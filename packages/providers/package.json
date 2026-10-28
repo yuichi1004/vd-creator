@@ -1,0 +1,23 @@
+{
+  "name": "@vd-creator/providers",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Provider interfaces with mock and ElevenLabs implementations.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@vd-creator/scenario": "*"
+  }
+}

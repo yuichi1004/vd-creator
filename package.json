@@ -1,0 +1,32 @@
+{
+  "name": "vd-creator",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Make voice dramas with generative AI voice tools.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "packages/scenario",
+    "packages/providers",
+    "packages/core",
+    "packages/render",
+    "apps/cli",
+    "apps/server",
+    "apps/web"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces",
+    "lint": "biome check .",
+    "typecheck": "npm run typecheck --workspaces",
+    "format": "biome format --write ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.6.3",
+    "@types/node": "^22.20.5",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}

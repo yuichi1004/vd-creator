@@ -9,6 +9,15 @@ CLAUDE.local.md
 .idea/
 *.local
 
+# Dependencies and build output
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+
+# Render output
+out/
+
 # OS files
 .DS_Store
 Thumbs.db
