@@ -105,7 +105,7 @@ Development and tests use mock providers by default. Each generation provider ha
 
 ### Worker rules
 
-These rules are added to `CLAUDE.md`, and to `AGENTS.md` if non-Claude agents are used:
+These rules live in `AGENTS.md`, which `CLAUDE.md` imports:
 
 - Do only the current Task, and edit only the files the Task owns.
 - If the spec is unclear or wrong, ask the coordinator through the orchestration `ask` command. Do not guess, and do not open a local question prompt that the coordinator cannot answer.
@@ -135,12 +135,12 @@ Suggested first parallel run, which will be confirmed in a later plan: scenario 
   - Target: `CLAUDE.md`
   - Change: a "Working as an Orca worker" section with the Worker rules above.
   - Acceptance: rules match this plan.
-- [ ] Decide on non-Claude agents. If they are used, add an `AGENTS.md` that mirrors `CLAUDE.md`.
+- [x] Decide on non-Claude agents. If they are used, add an `AGENTS.md` that mirrors `CLAUDE.md`.
+  - Decision: Claude Code implements and Codex reviews. The shared rules moved to `AGENTS.md`, and `CLAUDE.md` imports it so the two cannot drift.
 - [ ] Pilot: run plan 0002 through this workflow, with a single implementer and one reviewer, and record lessons learned in this plan.
 
 ## Open questions
 
-- Should Codex, or another non-Claude agent, be used as a reviewer or implementer? Using a different model for review is preferred but not required.
 - Should GitHub Issues become the backlog once the repository is public, or should plans stay the only backlog?
 - After the repo is on GitHub, should integration move to pull requests, or stay as local fast-forward merges by the coordinator?
 - What is the right number of parallel implementers after the pilot: two, three, or more?

@@ -35,7 +35,7 @@ Change: ...
 Constraints: ...
 Ownership: ...
 Acceptance: ...
-Rules: follow CLAUDE.md, "Working as an Orca worker".
+Rules: follow AGENTS.md, "Working as an Orca worker".
 ```
 
 ```sh
@@ -88,7 +88,7 @@ When a worker reports `--outcome succeeded`:
 ```sh
 orca orchestration worker-start --worktree <implementer_worktree_selector> --agent <reviewer_agent> \
   --task-title "Review: <short task name>" \
-  --spec "Review branch task/NNNN-<short-name> against this spec: <spec>. Check CLAUDE.md rules. Report findings in worker_done. Do not edit files." --json
+  --spec "Review branch task/NNNN-<short-name> against this spec: <spec>. Check AGENTS.md rules. Report findings in worker_done. Do not edit files." --json
 ```
 
 If there are findings, send them back as a follow-up on the same Task branch. Reuse the implementer's terminal if it is still live, or start a new implementer with `--retry-of`.

@@ -27,7 +27,8 @@ Planning. No application code yet. See [`docs/plans/`](docs/plans/) for design a
 ```
 .
 ├── README.md        # This file
-├── CLAUDE.md        # Guidance for coding agents working in this repo
+├── AGENTS.md        # Guidance for coding agents working in this repo
+├── CLAUDE.md        # Loads AGENTS.md for Claude Code
 └── docs/
     ├── development-workflow.md  # How agents build this project with Orca
     └── plans/       # Design and implementation plans
