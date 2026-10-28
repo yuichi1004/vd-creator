@@ -126,12 +126,12 @@ Suggested first parallel run, which will be confirmed in a later plan: scenario 
   - Change: add Target, Change, Constraints, Ownership, and Acceptance to the `## Tasks` example.
   - Ownership: `docs/plans/README.md` only.
   - Acceptance: the template matches the Task spec section of this plan.
-- [ ] Add `docs/development-workflow.md`, a short operational guide for the coordinator.
+- [x] Add `docs/development-workflow.md`, a short operational guide for the coordinator.
   - Target: `docs/development-workflow.md`, and a link from `README.md`.
   - Change: a step-by-step version of the lifecycle with example `orca orchestration` commands, using a generic `orca` executable name.
   - Constraints: no machine-specific paths.
   - Acceptance: a fresh coordinator session can run one wave by following the guide alone.
-- [ ] Add worker rules to `CLAUDE.md`.
+- [x] Add worker rules to `CLAUDE.md`.
   - Target: `CLAUDE.md`
   - Change: a "Working as an Orca worker" section with the Worker rules above.
   - Acceptance: rules match this plan.
