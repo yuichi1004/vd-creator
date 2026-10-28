@@ -1,6 +1,6 @@
 # 0002: Architecture and project skeleton
 
-- Status: Draft
+- Status: Accepted
 - Date: 2026-10-29
 
 ## Background
