@@ -44,4 +44,6 @@ Decisions that still need to be made.
 
 ## Index
 
-No plans yet.
+| Plan | Title | Status |
+|---|---|---|
+| [0001](0001-agent-development-workflow.md) | Agent development workflow | Draft |
