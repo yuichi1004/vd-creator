@@ -13,6 +13,24 @@ vd-creator is a local web app for making voice dramas with generative AI voice t
 - **Keep machine-specific config out of the repo.** Do not commit API keys, `.env` files, absolute paths from a personal machine, or local editor and agent settings. Put local-only agent settings in gitignored files, such as `.claude/settings.local.json` for Claude Code.
 - **Follow the development workflow.** Work is planned, split, and merged as described in [plan 0001](docs/plans/0001-agent-development-workflow.md) and [`docs/development-workflow.md`](docs/development-workflow.md).
 
+## Commands
+
+Run these from the repository root. Prerequisites are Node.js 22 or later and ffmpeg.
+
+- `scripts/setup.sh`: check prerequisites and install dependencies with `npm ci`. Run it once in a fresh clone or worktree.
+- `npm run build`: compile all workspaces.
+- `npm run lint`: run Biome checks on the whole repository. Fix formatting with `npm run format`.
+- `npm run typecheck`: type-check all workspaces.
+- `npm test`: run the Vitest tests of all workspaces.
+
+The standard acceptance chain is:
+
+```sh
+scripts/setup.sh && npm run build && npm run lint && npm run typecheck && npm test
+```
+
+To run `build`, `typecheck`, or `test` for one workspace, use `npm run <script> -w <workspace>`, where `<workspace>` is the path or the package name, for example `npm test -w packages/core` or `npm run typecheck -w @vd-creator/scenario`. Linting is repository-wide and has no per-workspace script.
+
 ## Working as an Orca worker
 
 These rules apply when your prompt starts with an Orca orchestration preamble that has a Task ID and a Dispatch ID.

@@ -20,7 +20,7 @@ You don't assemble the drama by hand from an empty timeline. You start from what
 
 ## Status
 
-Planning. No application code yet. See [`docs/plans/`](docs/plans/) for design and implementation plans.
+Early development. The monorepo skeleton is in place, but there are no features yet. See [`docs/plans/`](docs/plans/) for design and implementation plans.
 
 ## Repository layout
 
@@ -29,10 +29,42 @@ Planning. No application code yet. See [`docs/plans/`](docs/plans/) for design a
 ├── README.md        # This file
 ├── AGENTS.md        # Guidance for coding agents working in this repo
 ├── CLAUDE.md        # Loads AGENTS.md for Claude Code
+├── package.json     # npm workspaces and root scripts
+├── packages/        # Libraries: scenario, providers, core, render
+├── apps/            # Front ends: cli, server, web
+├── scripts/
+│   └── setup.sh     # Installs dependencies and checks prerequisites
 └── docs/
     ├── development-workflow.md  # How agents build this project with Orca
     └── plans/       # Design and implementation plans
 ```
+
+## Getting started
+
+Prerequisites:
+
+- Node.js 22 or later (see [`.nvmrc`](.nvmrc))
+- ffmpeg on your `PATH`
+
+Run the setup script from the repository root. It checks the prerequisites and installs dependencies with `npm ci`:
+
+```sh
+scripts/setup.sh
+```
+
+## Commands
+
+Run these from the repository root:
+
+| Command | What it does |
+|---|---|
+| `npm run build` | Compiles every workspace with TypeScript. |
+| `npm run lint` | Checks formatting, import order, and lint rules with Biome. |
+| `npm run typecheck` | Type-checks every workspace, including tests. |
+| `npm test` | Runs the Vitest tests of every workspace. |
+| `npm run format` | Rewrites files with the Biome formatter. |
+
+To run `build`, `typecheck`, or `test` for a single workspace, add `-w` with the workspace path or package name, for example `npm test -w packages/core` or `npm run build -w @vd-creator/core`.
 
 ## Development
 
