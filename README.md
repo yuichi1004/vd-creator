@@ -29,8 +29,13 @@ Planning. No application code yet. See [`docs/plans/`](docs/plans/) for design a
 ├── README.md        # This file
 ├── CLAUDE.md        # Guidance for coding agents working in this repo
 └── docs/
+    ├── development-workflow.md  # How agents build this project with Orca
     └── plans/       # Design and implementation plans
 ```
+
+## Development
+
+vd-creator is developed by coding agents coordinated with Orca orchestration. See [`docs/development-workflow.md`](docs/development-workflow.md).
 
 ## Language
 
