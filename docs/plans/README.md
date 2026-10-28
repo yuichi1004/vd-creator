@@ -54,3 +54,4 @@ Each task must be self-contained: an agent working on it sees only the task, not
 | Plan | Title | Status |
 |---|---|---|
 | [0001](0001-agent-development-workflow.md) | Agent development workflow | In progress |
+| [0002](0002-architecture.md) | Architecture and project skeleton | Draft |
