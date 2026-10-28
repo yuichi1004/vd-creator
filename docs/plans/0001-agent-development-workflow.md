@@ -1,6 +1,6 @@
 # 0001: Agent development workflow
 
-- Status: Draft
+- Status: In progress
 - Date: 2026-10-29
 
 ## Background
@@ -121,7 +121,7 @@ Suggested first parallel run, which will be confirmed in a later plan: scenario 
 
 ## Tasks
 
-- [ ] Extend the plan template in `docs/plans/README.md` with the task spec format.
+- [x] Extend the plan template in `docs/plans/README.md` with the task spec format.
   - Target: `docs/plans/README.md`
   - Change: add Target, Change, Constraints, Ownership, and Acceptance to the `## Tasks` example.
   - Ownership: `docs/plans/README.md` only.

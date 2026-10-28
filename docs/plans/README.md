@@ -35,15 +35,22 @@ The proposed approach.
 
 ## Tasks
 
-- [ ] Concrete steps to implement it.
+- [ ] Short task name
+  - Target: files, modules, or components in scope.
+  - Change: the concrete result to produce.
+  - Constraints: invariants, compatibility rules, and boundaries not to touch.
+  - Ownership: what the worker may edit. Tasks that run in parallel must not overlap.
+  - Acceptance: the command, test, or output that proves the task is done.
 
 ## Open questions
 
 Decisions that still need to be made.
 ```
 
+Each task must be self-contained: an agent working on it sees only the task, not the discussion behind it. See [0001](0001-agent-development-workflow.md) for how tasks become Orca orchestration Tasks.
+
 ## Index
 
 | Plan | Title | Status |
 |---|---|---|
-| [0001](0001-agent-development-workflow.md) | Agent development workflow | Draft |
+| [0001](0001-agent-development-workflow.md) | Agent development workflow | In progress |
