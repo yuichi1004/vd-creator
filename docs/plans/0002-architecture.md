@@ -140,7 +140,7 @@ This plan is carried out by a single implementer, as the 0001 pilot, with one Co
   - Constraints: no feature code. Only the dependencies named in this plan. Module dependencies must follow the direction above.
   - Ownership: everything except `docs/`, `AGENTS.md`, and `CLAUDE.md`.
   - Acceptance: on a fresh clone, `scripts/setup.sh && npm run build && npm run lint && npm run typecheck && npm test` succeeds.
-- [ ] Document the commands
+- [x] Document the commands
   - Target: `README.md`, `AGENTS.md`
   - Change: add setup and the build, lint, typecheck, and test commands to the README. Add a "Commands" section to AGENTS.md so that workers know the acceptance commands.
   - Constraints: keep the existing sections.
