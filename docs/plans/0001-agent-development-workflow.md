@@ -1,6 +1,6 @@
 # 0001: Agent development workflow
 
-- Status: In progress
+- Status: Done
 - Date: 2026-10-29
 
 ## Background
@@ -137,7 +137,31 @@ Suggested first parallel run, which will be confirmed in a later plan: scenario 
   - Acceptance: rules match this plan.
 - [x] Decide on non-Claude agents. If they are used, add an `AGENTS.md` that mirrors `CLAUDE.md`.
   - Decision: Claude Code implements and Codex reviews. The shared rules moved to `AGENTS.md`, and `CLAUDE.md` imports it so the two cannot drift.
-- [ ] Pilot: run plan 0002 through this workflow, with a single implementer and one reviewer, and record lessons learned in this plan.
+- [x] Pilot: run plan 0002 through this workflow, with a single implementer and one reviewer, and record lessons learned in this plan.
+
+## Lessons learned
+
+From the pilot on 2026-10-29: plan 0002 was run with one Claude implementer, reused for both tasks, and one Codex reviewer. Both tasks passed acceptance and were merged with `--ff-only`. Codex found no issues in the skeleton. The coordinator reviewed the small docs task itself.
+
+What worked:
+
+- The spec fields (Target, Change, Constraints, Ownership, Acceptance) were enough. Neither worker asked a question.
+- Asking the implementer to verify acceptance on a fresh `git clone` caught nothing this time, but it is cheap and proves `npm ci` and the lockfile work.
+- One implementer terminal can serve several Tasks in sequence: `worker-retain` after the first `worker_done`, then `worker-start --task <next> --terminal <handle>`. The first Dispatch then reports `retained` with reason `ownership_transferred`, which is its final state.
+- A reviewer started on the implementer's worktree stayed read-only as instructed.
+
+Problems and fixes (applied to [`docs/development-workflow.md`](../development-workflow.md) unless noted):
+
+1. **New worktrees start from `origin/main`, not from the local `main`.** Unpushed commits, such as accepting a plan or the coordinator's status commit, were missing in the worker's checkout. If a plan or spec changed locally, the worker would see the old version. Fix: pass `--base-branch main` to `worker-start`, or push first.
+2. **The guide's integration step fails as written.** `git switch task/...` in the main checkout is refused while the branch is checked out in the worker's worktree. Fix: rebase inside the worktree (`git -C <worktree> rebase main`), then run `merge --ff-only` from the main checkout.
+3. **The branch rename step is not needed.** `--name task-NNNN-<short-name>` already creates the branch `task/NNNN-<short-name>`. Workers reusing a worktree for a later Task create the new branch from `main` themselves.
+4. **Orca dependencies settle on `worker_done`, not on merge.** A dependent Task that needs the merged code becomes ready before the code is on `main`. The coordinator must start it only after integration.
+5. **Ownership overlapped across tasks in the plan.** Task 1 owned "everything except `docs/`, `AGENTS.md`, `CLAUDE.md`", which included `README.md`, owned by task 2. They ran in sequence, so this was harmless, but the coordinator narrowed it in the spec. Plans should list Ownership so that tasks do not overlap even when they run in sequence. (Plan authoring, not fixed in the guide.)
+6. **"Only the dependencies named in this plan" was ambiguous for dev dependencies.** It did not say whether `@types/node` or the runtime libraries (Zod, Hono, React) belonged in a skeleton. The coordinator listed the allowed dev dependencies in the spec. Plans should name dev dependencies explicitly. (Plan authoring.)
+7. **`task-create` has no spec-file option.** The spec must be passed inline. If the coordinator's shell permissions block command substitution, write the spec with no single quotes and pass it in single quotes.
+8. **No Orca setup hook is configured.** `worker-start --setup run` reported `hookFound: false`, so workers ran `scripts/setup.sh` themselves. Configure the Orca repo setup to run `scripts/setup.sh`. This is a local Orca setting, not a repository change.
+9. **`orca worktree rm` deleted the branch checked out in the worktree, but not earlier task branches made in it.** Delete merged branches with `git branch -d` after removing the worktree.
+10. **Workers may make small edits beyond the spec, inside their Ownership.** The docs worker also updated the README status and layout. It was correct here, but the reviewer or coordinator should check such edits explicitly.
 
 ## Open questions
 

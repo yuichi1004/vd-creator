@@ -29,7 +29,7 @@ Create one Orca Task for each unchecked task in the plan. Copy the task's fields
 
 ```text
 Plan: docs/plans/NNNN-<title>.md, task "<short task name>"
-Branch: task/NNNN-<short-name>. Rename the worktree branch to this before the first commit.
+Branch: task/NNNN-<short-name>. (A Task that reuses an earlier worktree creates it with: git switch -c task/NNNN-<short-name> main.)
 Target: ...
 Change: ...
 Constraints: ...
@@ -45,13 +45,26 @@ orca orchestration task-create --task-title "<later task>" --spec "<spec>" --dep
 
 Add `--deps` only for real ordering. Tasks that can run at the same time must not have overlapping Ownership.
 
+`task-create` has no option to read the spec from a file, so pass it inline. If your shell permissions block command substitution, write the spec without single quotes and wrap it in single quotes.
+
+An Orca dependency is met when the earlier Task reports `worker_done`, not when it is merged. If a later Task needs the earlier Task's code on `main`, start it only after step 6.
+
 ## 3. Start a wave
 
 Start every Task whose dependencies are met, up to three implementers at once. Each implementer gets a new child worktree:
 
 ```sh
 orca orchestration worker-start --task <task_id> --worktree new-child \
-  --name task-NNNN-<short-name> --agent claude --setup run --json
+  --name task-NNNN-<short-name> --base-branch main --agent claude --setup run --json
+```
+
+`--name task-NNNN-<short-name>` creates the branch `task/NNNN-<short-name>`. `--base-branch main` starts it from the local `main`. Without it, Orca starts from `origin/main`, and the worker misses unpushed commits such as plan or spec changes.
+
+To reuse an idle implementer for the next Task, keep it with `worker-retain --dispatch <dispatch_id>` after its `worker_done`, then start the next Task in the same terminal:
+
+```sh
+orca orchestration worker-start --task <next_task_id> --terminal <agent_terminal_handle> \
+  --worktree <implementer_worktree_selector> --json
 ```
 
 The command exits 0 only when the worker is ready. If it fails, do not run it again blindly. Read `failedStage` and `residualResources` in the receipt and follow its recovery commands.
@@ -97,12 +110,12 @@ When a worker reports `--outcome failed`, read its summary, then fix the spec an
 
 ## 6. Integrate
 
-From the main checkout:
+The Task branch is checked out in the worker's worktree, so rebase it there, then merge from the main checkout:
 
 ```sh
-git switch task/NNNN-<short-name> && git rebase main
-# re-run the task's Acceptance command
-git switch main && git merge --ff-only task/NNNN-<short-name>
+git -C <worktree_path> rebase main
+# re-run the task's Acceptance command in the worktree, or in a fresh clone of the branch
+git merge --ff-only task/NNNN-<short-name>
 ```
 
 In the same commit, or the one right after it, tick the task's checkbox in the plan. Pushing to GitHub is outward-facing, so the human must approve it.
@@ -120,6 +133,8 @@ Then remove merged worktrees, using the `id` from `orca worktree list --json`:
 ```sh
 orca worktree rm --worktree id:<repoId>::<worktreePath> --json
 ```
+
+This deletes only the branch that is checked out in the worktree. Delete other merged Task branches with `git branch -d task/NNNN-<short-name>`.
 
 Before ending the coordinator turn, this must return nothing:
 
