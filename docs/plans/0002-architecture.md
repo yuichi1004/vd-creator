@@ -134,7 +134,7 @@ The follow-up plans finalize these interfaces. Changing them after that requires
 
 This plan is carried out by a single implementer, as the 0001 pilot, with one Codex reviewer.
 
-- [ ] Monorepo skeleton
+- [x] Monorepo skeleton
   - Target: repository root, `packages/*`, `apps/*`, `scripts/setup.sh`
   - Change: npm workspaces with the seven modules above, each with a `package.json`, a TypeScript config, an `src/index.ts` placeholder, and one passing Vitest test. Root scripts `build`, `test`, `lint`, and `typecheck` run across all workspaces. Biome config. `.nvmrc` with Node 22. `scripts/setup.sh` as described above. Update `.gitignore` for `node_modules/`, build output, `.env`, and `out/`.
   - Constraints: no feature code. Only the dependencies named in this plan. Module dependencies must follow the direction above.
