@@ -36,6 +36,7 @@ Early development. The monorepo skeleton is in place, but there are no features 
 │   └── setup.sh     # Installs dependencies and checks prerequisites
 └── docs/
     ├── development-workflow.md  # How agents build this project with Orca
+    ├── phone-access.md          # Opening the review UI from a phone
     └── plans/       # Design and implementation plans
 ```
 
@@ -65,6 +66,10 @@ Run these from the repository root:
 | `npm run format` | Rewrites files with the Biome formatter. |
 
 To run `build`, `typecheck`, or `test` for a single workspace, add `-w` with the workspace path or package name, for example `npm test -w packages/core` or `npm run build -w @vd-creator/core`.
+
+## Using a phone
+
+`vd serve` opens the review UI on your PC only. To use it from your phone, follow the [phone access guide](docs/phone-access.md). Tailscale is the recommended way.
 
 ## Your own settings
 
