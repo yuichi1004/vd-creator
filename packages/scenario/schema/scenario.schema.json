@@ -83,7 +83,7 @@
           },
           "file": {
             "type": "string",
-            "minLength": 1,
+            "pattern": "^(?!\\.\\.?(?:\\/|$))[^/\\\\:]+(?:\\/(?!\\.\\.?(?:\\/|$))[^/\\\\:]+)*$",
             "description": "Image file path, relative to assets/."
           }
         },

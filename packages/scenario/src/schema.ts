@@ -59,9 +59,21 @@ export const SpeakerSchema = z.strictObject({
   voice: VoiceSchema,
 });
 
+// One path segment: no separators or drive colons, and not "." or "..".
+const PATH_SEGMENT = String.raw`(?!\.\.?(?:/|$))[^/\\:]+`;
+
+/** A portable path inside assets/: relative, "/"-separated, and never leaving the folder. */
+export const AssetPathSchema = z
+  .string()
+  .regex(
+    new RegExp(`^${PATH_SEGMENT}(?:/${PATH_SEGMENT})*$`),
+    "Path must be relative to assets/, use '/' as separator, and contain no '.', '..', ':', or empty segments",
+  )
+  .describe("File path relative to assets/, with '/' separators.");
+
 export const ImageSchema = z.strictObject({
   id: IdSchema,
-  file: z.string().min(1).describe("Image file path, relative to assets/."),
+  file: AssetPathSchema.describe("Image file path, relative to assets/."),
 });
 
 export const LibraryRefSchema = z.strictObject({

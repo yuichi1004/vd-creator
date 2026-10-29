@@ -1,4 +1,4 @@
-import { copyFile, mkdtemp, readFile, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -7,6 +7,7 @@ import {
   parseScenario,
   SCENARIO_FILE,
   ScenarioDocument,
+  ScenarioValidationError,
   saveScenario,
   updateItem,
 } from "./index.js";
@@ -50,6 +51,57 @@ describe("loadScenario and saveScenario", () => {
 
   test("load fails when the file is missing", async () => {
     await expect(loadScenario(join(dir, "missing"))).rejects.toThrow();
+  });
+
+  test("save refuses an invalid scenario and keeps the file", async () => {
+    const original = await readFile(join(dir, SCENARIO_FILE), "utf8");
+    const { doc } = await loadScenario(dir);
+    updateItem(doc, "s1-l1", { speaker: undefined });
+    await expect(saveScenario(dir, doc)).rejects.toThrow(ScenarioValidationError);
+    await expect(saveScenario(dir, doc)).rejects.toMatchObject({
+      issues: [expect.objectContaining({ path: ["scenes", 0, "items", 3, "speaker"] })],
+    });
+    expect(await readFile(join(dir, SCENARIO_FILE), "utf8")).toBe(original);
+    expect(await readdir(dir)).toEqual([SCENARIO_FILE]);
+  });
+
+  test("save refuses malformed YAML and keeps the file", async () => {
+    const original = await readFile(join(dir, SCENARIO_FILE), "utf8");
+    await expect(saveScenario(dir, new ScenarioDocument("title: [unclosed\n"))).rejects.toThrow(
+      ScenarioValidationError,
+    );
+    expect(await readFile(join(dir, SCENARIO_FILE), "utf8")).toBe(original);
+  });
+
+  test("concurrent saves do not collide on temp files", async () => {
+    const { doc } = await loadScenario(dir);
+    await Promise.all(Array.from({ length: 20 }, () => saveScenario(dir, doc)));
+    expect(await readFile(join(dir, SCENARIO_FILE), "utf8")).toBe(doc.text);
+    expect(await readdir(dir)).toEqual([SCENARIO_FILE]);
+  });
+});
+
+describe("ScenarioDocument.validate", () => {
+  test("reports an unresolved alias as an issue", () => {
+    const { scenario, issues } = parseScenario("version: 1\ntitle: *missing\nscenes: []\n");
+    expect(scenario).toBeUndefined();
+    expect(issues.some((i) => i.severity === "error")).toBe(true);
+  });
+
+  test("reports too many alias expansions as an issue", () => {
+    const lines = ["a0: &a0 [x, x, x, x, x, x, x, x, x, x]"];
+    for (let i = 1; i < 8; i++) {
+      lines.push(
+        `a${i}: &a${i} [${Array(10)
+          .fill(`*a${i - 1}`)
+          .join(", ")}]`,
+      );
+    }
+    const { scenario, issues } = parseScenario(`${lines.join("\n")}\n`);
+    expect(scenario).toBeUndefined();
+    expect(issues).toContainEqual(
+      expect.objectContaining({ message: expect.stringMatching(/alias/i), severity: "error" }),
+    );
   });
 });
 

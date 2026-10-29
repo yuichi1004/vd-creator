@@ -4,11 +4,13 @@ export {
   parseScenario,
   SCENARIO_FILE,
   ScenarioDocument,
+  ScenarioValidationError,
   saveScenario,
-  updateItem,
 } from "./document.js";
+export { updateItem } from "./edit.js";
 export { scenarioJsonSchema } from "./json-schema.js";
 export {
+  AssetPathSchema,
   type Bgm,
   BgmSchema,
   DEFAULT_BGM_VOLUME,

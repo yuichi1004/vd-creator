@@ -76,6 +76,17 @@ describe("minimal scenario", () => {
     expect(image).toMatchObject({ gapBeforeSec: 0 });
   });
 
+  test("speakers and images default to empty lists", () => {
+    const data = minimal();
+    delete data.speakers;
+    delete data.images;
+    data.scenes = [{ id: "s1", items: [{ pause: 1 }] }];
+    const { scenario, issues } = parseScenario(stringify(data));
+    expect(issues).toEqual([]);
+    expect(scenario?.speakers).toEqual([]);
+    expect(scenario?.images).toEqual([]);
+  });
+
   test("accepts any provider settings", () => {
     const data = minimal();
     data.speakers = [
@@ -283,6 +294,36 @@ describe("rule: SFX and BGM sources", () => {
       ["scenes", 0, "bgm", "volume"],
       /.+/,
     );
+  });
+});
+
+describe("rule: image files are portable paths inside assets/", () => {
+  test.each(["images/shore.png", "shore.png", "a/b/c d.png", ".hidden.png"])(
+    "accepts %s",
+    (file) => {
+      const data = minimal();
+      data.images = [{ id: "shore", file }];
+      expect(parseScenario(stringify(data)).issues).toEqual([]);
+    },
+  );
+
+  test.each([
+    "/etc/passwd",
+    "../outside.png",
+    "images/../../x.png",
+    "./x.png",
+    "images/./x.png",
+    "images//x.png",
+    "images/",
+    "C:\\x.png",
+    "C:/x.png",
+    "images\\x.png",
+    "",
+  ])("rejects %j", (file) => {
+    const errors = errorsAfter((s) => {
+      s.images = [{ id: "shore", file }];
+    });
+    expectError(errors, ["images", 0, "file"], /relative to assets/);
   });
 });
 
