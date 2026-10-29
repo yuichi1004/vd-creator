@@ -134,8 +134,15 @@ export async function readLibrary(root: string): Promise<Library> {
       issues.push(error(kind, kindState));
       continue;
     }
-    const { dirs, links, problem } = await listEntryDirs(root, kind);
+    const { dirs, links, blocked, problem } = await listEntryDirs(root, kind);
     if (problem) issues.push(error(kind, problem));
+    for (const name of blocked) {
+      issues.push({
+        file: `${kind}/${name}`,
+        message: `Entry folder ${kind}/${name} is not a folder`,
+        severity: "warning",
+      });
+    }
     for (const name of links) {
       issues.push(
         error(
@@ -187,7 +194,8 @@ export function lookupBlockers(library: Library, id?: string, kind?: LibraryKind
   const kinds = LIBRARY_KINDS.filter((k) => kind === undefined || k === kind);
   return library.issues.filter(
     (i) =>
-      i.severity === "error" &&
+      (i.severity === "error" ||
+        (id !== undefined && kinds.some((k) => i.file === `${k}/${id}`))) &&
       ((LIBRARY_KINDS as readonly string[]).includes(i.file) ||
         (id !== undefined &&
           kinds.some((k) => i.file === `${k}/${id}` || i.file === `${k}/${id}/${ENTRY_FILE}`))),
@@ -362,7 +370,7 @@ async function inspectKindDir(root: string, kind: LibraryKind): Promise<string |
 async function listEntryDirs(
   root: string,
   kind: LibraryKind,
-): Promise<{ dirs: string[]; links: string[]; problem?: string }> {
+): Promise<{ dirs: string[]; links: string[]; blocked: string[]; problem?: string }> {
   try {
     const dirents = (await readdir(join(root, kind), { withFileTypes: true }))
       .filter((d) => !d.name.startsWith("."))
@@ -370,10 +378,11 @@ async function listEntryDirs(
     return {
       dirs: dirents.filter((d) => d.isDirectory()).map((d) => d.name),
       links: dirents.filter((d) => d.isSymbolicLink()).map((d) => d.name),
+      blocked: dirents.filter((d) => !d.isDirectory() && !d.isSymbolicLink()).map((d) => d.name),
     };
   } catch (e) {
-    if (isErrno(e, "ENOENT")) return { dirs: [], links: [] };
-    return { dirs: [], links: [], problem: fsProblem("list", kind, e) };
+    if (isErrno(e, "ENOENT")) return { dirs: [], links: [], blocked: [] };
+    return { dirs: [], links: [], blocked: [], problem: fsProblem("list", kind, e) };
   }
 }
 
@@ -400,7 +409,7 @@ export async function inspectManagedPath(root: string, rel: string): Promise<Man
     try {
       info = await lstat(join(root, ...segments.slice(0, i)));
     } catch (e) {
-      if (isErrno(e, "ENOENT") || isErrno(e, "ENOTDIR")) return { status: "missing" };
+      if (isErrno(e, "ENOENT")) return { status: "missing" };
       return { status: "error", at: segments.slice(0, i).join("/"), code: errnoCode(e) };
     }
     if (info.isSymbolicLink()) return { status: "symlink", at: segments.slice(0, i).join("/") };

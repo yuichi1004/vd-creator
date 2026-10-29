@@ -126,6 +126,18 @@ describe("initLibrary", () => {
     expect(JSON.stringify(issues)).not.toContain(dir);
   });
 
+  test("readLibrary reports ENOTDIR when a part of the root is a file", async () => {
+    const failure = readLibrary(join(sound, "lib"));
+    await expect(failure).rejects.toThrow(/library\.yaml \(ENOTDIR\)/);
+    await expect(failure).rejects.not.toThrow(/ENOENT/);
+    await expect(failure).rejects.not.toThrow(dir);
+    const issues = await checkLibrary(join(sound, "lib"));
+    expect(messages(issues)).toEqual([
+      "Library file library.yaml: could not inspect library.yaml (ENOTDIR)",
+    ]);
+    expect(JSON.stringify(issues)).not.toContain(dir);
+  });
+
   test("the package does not export the unguarded hashFile", () => {
     expect(libraryIndex).not.toHaveProperty("hashFile");
   });
@@ -510,6 +522,26 @@ describe("symbolic links (P2-5)", () => {
     const library = await readLibrary(root);
     expect(library.entries).toEqual([]);
     expect(messages(library.issues).join("\n")).toMatch(/sfx is a symbolic link/);
+  });
+
+  test("findEntry refuses an ID whose entry folder is a file", async () => {
+    await importEntry(root, sound, { ...download, kind: "bgm", evidence });
+    await writeFile(join(root, "sfx", download.id), "not a folder");
+    const library = await readLibrary(root);
+    expect(library.issues).toEqual([
+      {
+        file: `sfx/${download.id}`,
+        message: `Entry folder sfx/${download.id} is not a folder`,
+        severity: "warning",
+      },
+    ]);
+    // Without a kind, the file might have been an sfx entry with this ID.
+    expect(() => findEntry(library, download.id)).toThrow(
+      `Cannot look up "${download.id}" until these are fixed: Entry folder sfx/${download.id} is not a folder`,
+    );
+    expect(() => findEntry(library, download.id, "sfx")).toThrow(/Cannot look up/);
+    expect(findEntry(library, download.id, "bgm").dir).toBe(`bgm/${download.id}`);
+    expect(() => findEntry(library, "other-id")).toThrow('No library entry with id "other-id"');
   });
 
   test("import refuses to write through a linked kind folder", async () => {

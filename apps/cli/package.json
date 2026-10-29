@@ -22,6 +22,7 @@
   },
   "dependencies": {
     "@vd-creator/core": "*",
+    "@vd-creator/library": "*",
     "@vd-creator/providers": "*",
     "@vd-creator/render": "*",
     "@vd-creator/scenario": "*",

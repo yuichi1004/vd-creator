@@ -39,6 +39,7 @@ import {
   providersFor,
 } from "./generate.js";
 import { InitError, initProject } from "./init.js";
+import { LIBRARY_OPTIONS, LIBRARY_USAGE, libraryCommand, safeLibraryText } from "./library.js";
 import { formatIssue, validateProject } from "./validate.js";
 
 /** Where the CLI writes its output. Each call writes one line. */
@@ -72,9 +73,11 @@ Commands:
                       folder inside the repository must be local/
   config show       Print each setting of config.yaml and where its value comes from
     --json            Print JSON
+  library           Manage the shared sound library (vd library --help for commands)
 
 Options:
   -h, --help        Show this help
+  --library <path>  Sound library (overrides VD_LIBRARY and config.yaml)
 
 Set VD_DEBUG=1 to print stack traces of unexpected errors.`;
 
@@ -111,6 +114,7 @@ type Context = {
   debug: (e: unknown) => void;
   env: Env;
   repoRoot: string;
+  library?: string;
 };
 
 /**
@@ -152,13 +156,15 @@ async function dispatch(args: string[], context: Context): Promise<number> {
   try {
     parsed = parse(args);
   } catch (e) {
-    output.stderr(`vd: ${e instanceof Error ? e.message : String(e)}`);
+    const message = e instanceof Error ? e.message : String(e);
+    output.stderr(`vd: ${args.includes("library") ? safeLibraryText(message) : message}`);
     output.stderr(USAGE);
     return EXIT_USAGE;
   }
   const [command, ...rest] = parsed.positionals;
+  context.library = parsed.values.library;
   if (parsed.values.help) {
-    output.stdout(USAGE);
+    output.stdout(command === "library" ? LIBRARY_USAGE : USAGE);
     return EXIT_OK;
   }
   const allowed =
@@ -166,7 +172,7 @@ async function dispatch(args: string[], context: Context): Promise<number> {
       ? COMMAND_OPTIONS[command]
       : undefined;
   const unknown = Object.keys(parsed.values).filter(
-    (name) => name !== "help" && !allowed?.includes(name),
+    (name) => name !== "help" && name !== "library" && !allowed?.includes(name),
   );
   if (allowed && unknown.length > 0) {
     output.stderr(`vd ${command}: unknown option --${unknown[0]}`);
@@ -184,6 +190,8 @@ async function dispatch(args: string[], context: Context): Promise<number> {
       return clean(rest, parsed.values, output, debug);
     case "config":
       return config(rest, parsed.values, context);
+    case "library":
+      return libraryCommand(rest, parsed.values, context);
     case undefined:
       output.stderr(USAGE);
       return EXIT_USAGE;
@@ -206,6 +214,18 @@ function parse(args: string[]) {
       yes: { type: "boolean" },
       dir: { type: "string" },
       json: { type: "boolean" },
+      library: { type: "string" },
+      kind: { type: "string" },
+      id: { type: "string" },
+      license: { type: "string" },
+      url: { type: "string" },
+      site: { type: "string" },
+      author: { type: "string" },
+      attribution: { type: "string" },
+      evidence: { type: "string" },
+      tags: { type: "string" },
+      title: { type: "string" },
+      "approve-commercial": { type: "boolean" },
     },
   });
 }
@@ -220,6 +240,7 @@ const COMMAND_OPTIONS: Partial<Record<string, readonly string[]>> = {
   clean: ["dry-run"],
   // Each subcommand checks which of these it takes.
   config: ["dir", "json"],
+  library: LIBRARY_OPTIONS,
 };
 
 async function init(args: string[], context: Context): Promise<number> {
@@ -463,7 +484,7 @@ async function config(args: string[], options: Options, context: Context): Promi
     subcommand !== undefined && Object.hasOwn(allowed, subcommand)
       ? allowed[subcommand]
       : undefined;
-  const given = Object.keys(options).filter((name) => name !== "help");
+  const given = Object.keys(options).filter((name) => name !== "help" && name !== "library");
   if (!accepted || extra.length > 0 || given.some((name) => !accepted.includes(name))) {
     output.stderr(CONFIG_USAGE);
     return EXIT_USAGE;
@@ -608,7 +629,7 @@ async function loadUserConfig(
 ): Promise<EffectiveConfig | number> {
   const { output, debug, env, repoRoot } = context;
   try {
-    const config = await loadConfig({ env, repoRoot });
+    const config = await loadConfig({ env, repoRoot, flags: { library: context.library } });
     if (config.userDirEnvSkipped) {
       output.stderr(`vd ${command}: VD_USER_DIR is set, but it is not a folder; skipping it`);
     }
