@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspect, promisify } from "node:util";
@@ -54,6 +54,7 @@ describe("buildVideoArgs", () => {
       "-loglevel",
       "error",
       "-y",
+      "-noautorotate",
       "-f",
       "image2",
       "-pattern_type",
@@ -80,6 +81,30 @@ describe("buildVideoArgs", () => {
       ["1.png", 90],
       ["0.png", 30],
     ]);
+  });
+
+  test("turns each image upright by its EXIF orientation before fitting it", () => {
+    const images = ["a.jpg", "b.jpg", "c.png"].map((file, i) => ({
+      imageId: String(i),
+      file: `images/${file}`,
+      startSec: i,
+      endSec: i + 1,
+    }));
+    const { stills } = buildVideoArgs(timeline(images, 3), {
+      ...OPTIONS,
+      orientations: new Map([
+        ["images/a.jpg", 6],
+        ["images/b.jpg", 3],
+      ]),
+    });
+    const graph = (i: number) => stills[i]?.[(stills[i]?.indexOf("-filter_complex") ?? 0) + 1];
+    expect(graph(0)).toMatch(/^\[0:v\]transpose=clock,scale=1920:1080:/);
+    expect(graph(1)).toMatch(/^\[0:v\]hflip,vflip,scale=1920:1080:/);
+    expect(graph(2)).toMatch(/^\[0:v\]scale=1920:1080:/);
+    // ffmpeg itself never turns the image too.
+    for (const still of stills.slice(0, 3)) {
+      expect(still.indexOf("-noautorotate")).toBeLessThan(still.indexOf("-i"));
+    }
   });
 
   test("encodes the list and the audio as H.264 for still images with AAC into an MP4", () => {
@@ -262,7 +287,12 @@ async function probe(file: string, entries: string, stream?: string): Promise<st
 }
 
 /** The gray level, 0 to 255, of the center pixel of the video at a time. */
-async function centerGray(file: string, sec: number): Promise<number> {
+function centerGray(file: string, sec: number): Promise<number> {
+  return grayAt(file, sec, 959, 539);
+}
+
+/** The gray level, 0 to 255, of the pixel at `x`, `y` of the video at a time. */
+async function grayAt(file: string, sec: number, x: number, y: number): Promise<number> {
   const { stdout } = await run(
     "ffmpeg",
     [
@@ -277,7 +307,7 @@ async function centerGray(file: string, sec: number): Promise<number> {
       "-frames:v",
       "1",
       "-vf",
-      "crop=2:2:959:539,format=gray",
+      `crop=2:2:${x}:${y},format=gray`,
       "-f",
       "rawvideo",
       "-",
@@ -285,6 +315,50 @@ async function centerGray(file: string, sec: number): Promise<number> {
     { encoding: "buffer" },
   );
   return stdout[0] as number;
+}
+
+/** A JPEG file with an EXIF APP1 segment that holds only `orientation`, added after its SOI. */
+function withOrientation(jpeg: Buffer, orientation: number): Buffer {
+  const exif = Buffer.from([
+    0xff,
+    0xe1,
+    0,
+    34,
+    0x45,
+    0x78,
+    0x69,
+    0x66,
+    0,
+    0,
+    // A big-endian TIFF header and one IFD with one entry: tag 0x0112, SHORT, count 1.
+    0x4d,
+    0x4d,
+    0,
+    42,
+    0,
+    0,
+    0,
+    8,
+    0,
+    1,
+    0x01,
+    0x12,
+    0,
+    3,
+    0,
+    0,
+    0,
+    1,
+    0,
+    orientation,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+  ]);
+  return Buffer.concat([jpeg.subarray(0, 2), exif, jpeg.subarray(2)]);
 }
 
 /** Makes a project with generated mock audio and, if asked, two images of other sizes. */
@@ -381,10 +455,62 @@ describe("renderVideo", { timeout: 120_000 }, () => {
       expect(shown).not.toContain(broken);
       expect(shown).not.toContain(tmpdir());
       expect((error as RenderError).cause).not.toBeInstanceOf(Error);
-      // The audio was rendered; the video's temporary files are removed.
-      expect(await readdir(join(broken, "out"))).toEqual(["drama.mp3"]);
+      // Neither the audio nor the video replaces an output, and the temporary files are removed.
+      expect(await readdir(join(broken, "out"))).toEqual([]);
     } finally {
       await rm(broken, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps the previous audio and video when the video fails", async () => {
+    const project = await mockProject("vd-render-video-pair-", true);
+    try {
+      await renderVideo(project, { resolvers });
+      const files = ["drama.mp3", "drama.mp4"].map((f) => join(project, "out", f));
+      const before = await Promise.all(files.map((f) => stat(f)));
+      await rm(join(project, "assets", "images", "tall.jpg"));
+
+      const error = await renderVideo(project, { resolvers }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(FfmpegError);
+      expect((await readdir(join(project, "out"))).sort()).toEqual(["drama.mp3", "drama.mp4"]);
+      // Both are the files of the first render: a rename would give each a new inode.
+      const after = await Promise.all(files.map((f) => stat(f)));
+      expect(after.map((s) => s.ino)).toEqual(before.map((s) => s.ino));
+    } finally {
+      await rm(project, { recursive: true, force: true });
+    }
+  });
+
+  test("shows a JPEG upright by its EXIF orientation", async () => {
+    const project = await mockProject("vd-render-video-exif-", true);
+    try {
+      // A tall image, white on top and black below. Orientation 6 turns it clockwise to a wide
+      // one, white on the right; shown as stored, it is a narrow strip with black at both sides.
+      const tall = join(project, "assets", "images", "tall.jpg");
+      await run("ffmpeg", [
+        "-hide_banner",
+        "-nostdin",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=white:s=400x900,drawbox=x=0:y=450:w=400:h=450:color=black:t=fill",
+        "-frames:v",
+        "1",
+        tall,
+      ]);
+      await writeFile(tall, withOrientation(await readFile(tall), 6));
+
+      const result = await renderVideo(project, { resolvers });
+      const span = result.audio.timeline.images[1];
+      const sec = ((span?.startSec ?? 0) + (span?.endSec ?? 0)) / 2;
+      const video = join(project, result.file);
+      expect(await grayAt(video, sec, 1500, 539)).toBeGreaterThan(220);
+      expect(await grayAt(video, sec, 400, 539)).toBeLessThan(30);
+    } finally {
+      await rm(project, { recursive: true, force: true });
     }
   });
 

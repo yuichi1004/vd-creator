@@ -1,24 +1,9 @@
 // The audio mix: voices, SFX, and BGM placed on the timeline, mixed, and loudness-normalized.
 // See "Audio mix" in docs/plans/0006-rendering.md.
 
-import { randomUUID } from "node:crypto";
-import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import {
-  ASSETS_DIR,
-  AssetCache,
-  type AssetResolver,
-  type BgmSpan,
-  CACHE_FILE,
-  CacheFormatError,
-  computeTimeline,
-  GenerationError,
-  type Timeline,
-  type TimelineItem,
-} from "@vd-creator/core";
-import { IdSchema, loadScenario, SCENARIO_FILE, type Scenario } from "@vd-creator/scenario";
-import { RenderError, stepError } from "./errors.js";
-import { runFfmpeg } from "./ffmpeg.js";
+import { ASSETS_DIR, type BgmSpan, type Timeline, type TimelineItem } from "@vd-creator/core";
+import { RenderError } from "./errors.js";
 
 export { RenderError } from "./errors.js";
 
@@ -57,6 +42,7 @@ function isMixed(item: TimelineItem): item is TimelineItem & { assetFile: string
   );
 }
 
+/** A BGM span that is in the mix: one with an asset and a length. */
 function isMixedBgm(span: BgmSpan): span is BgmSpan & { assetFile: string } {
   return (
     span.assetFile !== undefined &&
@@ -173,112 +159,4 @@ function num(value: number): string {
 
 function ms(sec: number): string {
   return String(Math.max(0, Math.round(sec * 1000)));
-}
-
-export type RenderAudioOptions = {
-  /** The resolvers that find each item's asset, as for `computeTimeline`. */
-  resolvers: readonly AssetResolver[];
-  /** Default "mp3". */
-  format?: RenderFormat;
-};
-
-export type RenderAudioResult = {
-  /** The rendered file, relative to the project folder, such as "out/drama.mp3". */
-  file: string;
-  format: RenderFormat;
-  scenario: Scenario;
-  timeline: Timeline;
-};
-
-/**
- * Mixes a project's assets into `out/drama.mp3` or `out/drama.wav`. ffmpeg runs in the project
- * folder with relative paths and writes a temporary file that replaces the output only when
- * ffmpeg succeeds. Items without an asset are left out of the mix: callers that need every
- * asset, such as `vd render`, check the timeline first.
- *
- * Every failure is a `RenderError`, or its subclass `FfmpegError` when ffmpeg fails, with a
- * fixed message that holds at most a project-relative path and an error code from
- * `REPORTED_ERROR_CODES`, never an absolute path. No original error leaves, not even as `cause`.
- */
-export async function renderAudio(
-  projectDir: string,
-  options: RenderAudioOptions,
-): Promise<RenderAudioResult> {
-  try {
-    return await renderAudioSteps(projectDir, options);
-  } catch (e) {
-    // Each step wraps its own errors; this keeps anything unexpected from escaping raw.
-    throw stepError("Could not render the audio", e);
-  }
-}
-
-async function renderAudioSteps(
-  projectDir: string,
-  options: RenderAudioOptions,
-): Promise<RenderAudioResult> {
-  const format = options.format ?? "mp3";
-  const { scenario, issues } = await loadScenario(projectDir).catch((e: unknown) => {
-    throw stepError(`Could not read ${SCENARIO_FILE}`, e);
-  });
-  if (!scenario) {
-    const count = issues.filter((i) => i.severity === "error").length;
-    throw new RenderError(
-      `${SCENARIO_FILE} has ${count} ${count === 1 ? "error" : "errors"}; run vd validate to see them`,
-    );
-  }
-  const cache = await AssetCache.load(projectDir).catch((e: unknown) => {
-    throw e instanceof CacheFormatError
-      ? new RenderError(`${CACHE_FILE} is not a valid cache`)
-      : stepError(`Could not read ${CACHE_FILE}`, e);
-  });
-  const timeline = await computeTimeline(scenario, cache, options.resolvers).catch((e: unknown) => {
-    throw stepError(timelineFailure(e), e);
-  });
-
-  const file = `${OUT_DIR}/${OUT_BASENAME}.${format}`;
-  const temp = `${file}.${randomUUID()}.tmp`;
-  const args = buildAudioMixArgs(timeline, { output: temp, format });
-  // A long drama's filter graph can pass the OS limit on one argument, so it goes in a file.
-  const graph = `${temp}.filter`;
-  const at = args.indexOf("-filter_complex");
-  const graphText = args[at + 1] as string;
-  args.splice(at, 2, "-filter_complex_script", graph);
-  const inProject = (path: string) => join(projectDir, path);
-  // Cleanup is best effort: its failure must not hide the error that caused it.
-  const remove = (path: string) => rm(inProject(path), { force: true }).catch(() => {});
-
-  await mkdir(inProject(OUT_DIR), { recursive: true }).catch((e: unknown) => {
-    throw stepError(`Could not create ${OUT_DIR}/`, e);
-  });
-  try {
-    await writeFile(inProject(graph), graphText).catch((e: unknown) => {
-      throw stepError(`Could not write the ffmpeg filter graph in ${OUT_DIR}/`, e);
-    });
-    // The relative paths this run passes, which ffmpeg's stderr may name.
-    const paths = [
-      ...timeline.items.filter(isMixed).map((i) => join(ASSETS_DIR, i.assetFile)),
-      ...timeline.bgm.filter(isMixedBgm).map((s) => join(ASSETS_DIR, s.assetFile)),
-      temp,
-      graph,
-    ];
-    await runFfmpeg(args, { cwd: projectDir, paths });
-    await rename(inProject(temp), inProject(file)).catch((e: unknown) => {
-      throw stepError(`Could not write ${file}`, e);
-    });
-  } catch (e) {
-    await remove(temp);
-    throw e;
-  } finally {
-    await remove(graph);
-  }
-  return { file, format, scenario, timeline };
-}
-
-/** The message for a failed timeline, naming the item when it is known. */
-function timelineFailure(error: unknown): string {
-  // IDs are validated, but the check keeps any other text out of the message.
-  if (error instanceof GenerationError && IdSchema.safeParse(error.itemId).success) {
-    return `Could not plan ${error.kind} "${error.itemId}" for the timeline`;
-  }
-  return "Could not plan the timeline";
 }

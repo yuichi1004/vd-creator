@@ -2,7 +2,7 @@
 
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { access, lstat, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import { ASSETS_DIR, itemLabel, type Timeline } from "@vd-creator/core";
 import {
@@ -26,6 +26,62 @@ export const PROJECT_CREDITS_TEMPLATE = "credits.template.txt";
 export const CREDITS_TEXT_FILE = `${OUT_DIR}/credits.txt`;
 /** The subtitles that vd render --srt writes, relative to the project folder. */
 export const SRT_FILE = `${OUT_DIR}/${OUT_BASENAME}.srt`;
+/** The video that vd render --video writes, relative to the project folder. */
+export const VIDEO_FILE = `${OUT_DIR}/${OUT_BASENAME}.mp4`;
+
+/** The flags of vd render that choose its outputs. */
+export type RenderOutputOptions = { format: RenderFormat; video: boolean; srt: boolean };
+
+/**
+ * Whether `out/` in the project folder is a symbolic link. A render refuses one, so that a
+ * project cannot make it write outside the project folder. A missing `out/` is not one.
+ */
+export async function outIsSymlink(projectDir: string): Promise<boolean> {
+  try {
+    return (await lstat(join(projectDir, OUT_DIR))).isSymbolicLink();
+  } catch (e) {
+    if ((e as { code?: unknown } | null)?.code === "ENOENT") return false;
+    throw e;
+  }
+}
+
+/**
+ * The outputs, relative to the project folder, that a render with `options` does not write but
+ * another render may have: the audio of the other format, the video without --video, and the
+ * subtitles without --srt. The credits are always written.
+ */
+export function staleOutputs(options: RenderOutputOptions): string[] {
+  return [
+    ...RENDER_FORMATS.filter((f) => f !== options.format).map(
+      (f) => `${OUT_DIR}/${OUT_BASENAME}.${f}`,
+    ),
+    ...(options.video ? [] : [VIDEO_FILE]),
+    ...(options.srt ? [] : [SRT_FILE]),
+  ];
+}
+
+/**
+ * Removes the `staleOutputs` of a render from the project folder, so that `out/` holds only what
+ * this render writes, and returns the ones it removed. A folder at such a name is left alone, and
+ * a symbolic link is removed, never followed.
+ */
+export async function removeStaleOutputs(
+  projectDir: string,
+  options: RenderOutputOptions,
+): Promise<string[]> {
+  const removed: string[] = [];
+  for (const file of staleOutputs(options)) {
+    const path = join(projectDir, file);
+    const found = await lstat(path).catch((e: unknown) => {
+      if ((e as { code?: unknown } | null)?.code === "ENOENT") return undefined;
+      throw e;
+    });
+    if (found === undefined || found.isDirectory()) continue;
+    await rm(path);
+    removed.push(file);
+  }
+  return removed;
+}
 
 /**
  * Whether `program` is an executable file in a folder of `env.PATH`. On Windows the
@@ -134,7 +190,7 @@ const HEREDOC_END = "VD_EOF";
  */
 export function renderCommands(
   timeline: Timeline,
-  options: { format: RenderFormat; video: boolean },
+  options: { format: RenderFormat; video: boolean; orientations?: ReadonlyMap<string, number> },
 ): string[] {
   const command = (args: readonly string[]) => ["ffmpeg", ...args].map(shellQuote).join(" ");
   const hereDoc = (file: string, text: string) => [
@@ -157,9 +213,14 @@ export function renderCommands(
     `rm ${shellQuote(graph)}`,
   ];
   if (!options.video) return lines;
-  const output = `${OUT_DIR}/${OUT_BASENAME}.mp4`;
+  const output = VIDEO_FILE;
   const stillsDir = `${output}.stills`;
-  const { stills, concatList, args } = buildVideoArgs(timeline, { audio, output, stillsDir });
+  const { stills, concatList, args } = buildVideoArgs(timeline, {
+    audio,
+    output,
+    stillsDir,
+    ...(options.orientations === undefined ? {} : { orientations: options.orientations }),
+  });
   lines.push(`mkdir -p ${shellQuote(stillsDir)}`);
   for (const still of stills) lines.push(command(still));
   lines.push(...hereDoc(`${stillsDir}/${CONCAT_LIST}`, concatList));

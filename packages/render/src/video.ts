@@ -2,18 +2,22 @@
 // See "Video" in docs/plans/0006-rendering.md.
 
 import { randomUUID } from "node:crypto";
-import { mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ASSETS_DIR, type ImageSpan, type Timeline } from "@vd-creator/core";
-import {
-  OUT_BASENAME,
-  OUT_DIR,
-  type RenderAudioOptions,
-  type RenderAudioResult,
-  renderAudio,
-} from "./audio.js";
+import { OUT_BASENAME, OUT_DIR } from "./audio.js";
 import { RenderError, stepError } from "./errors.js";
+import { ORIENTATION_FILTERS, readImageOrientations } from "./exif.js";
 import { runFfmpeg } from "./ffmpeg.js";
+import type { RenderAudioOptions, RenderAudioResult } from "./render-audio.js";
+import {
+  audioFile,
+  inProject,
+  loadRenderProject,
+  mixAudio,
+  prepareOutDir,
+  removeQuietly,
+} from "./steps.js";
 
 export const VIDEO_WIDTH = 1920;
 export const VIDEO_HEIGHT = 1080;
@@ -36,6 +40,11 @@ export type VideoOptions = {
   stillsDir: string;
   /** The folder that image files are relative to, as ffmpeg sees it. Default "assets". */
   assetsDir?: string;
+  /**
+   * The EXIF orientations of image files, as `readImageOrientations` finds them. Each listed
+   * image is turned upright before it is fitted.
+   */
+  orientations?: ReadonlyMap<string, number>;
 };
 
 export type VideoCommands = {
@@ -49,6 +58,12 @@ export type VideoCommands = {
   /** The ffmpeg arguments that encode the stills and the audio into the video. */
   args: string[];
 };
+
+/** The filters, each followed by a comma, that turn an image with an EXIF orientation upright. */
+function upright(orientation: number | undefined): string {
+  const filters = orientation === undefined ? undefined : ORIENTATION_FILTERS[orientation];
+  return filters === undefined ? "" : `${filters},`;
+}
 
 /** A run of frames that shows one still. */
 type Segment = { still: string; frames: number };
@@ -82,8 +97,8 @@ function segments(timeline: Timeline, still: (file: string) => string, total: nu
 /**
  * The ffmpeg runs that make an MP4 from a timeline's images and the mixed audio.
  *
- * Each distinct image file is decoded once and fitted to `VIDEO_WIDTH`x`VIDEO_HEIGHT` without
- * cropping, over black, so that transparent parts show black. The stills are PNG files in the
+ * Each distinct image file is decoded once, turned upright by its orientation in
+ * `options.orientations`, and fitted to `VIDEO_WIDTH`x`VIDEO_HEIGHT` without cropping, over black, so that transparent parts show black. The stills are PNG files in the
  * stills folder, which have the same size and format, as the concat demuxer needs. The concat
  * list shows each still for its frames, and black wherever no image is shown. The video is
  * H.264 (`yuv420p`, `VIDEO_FPS` fps, `-tune stillimage`) with the audio as AAC, and has the
@@ -123,6 +138,8 @@ export function buildVideoArgs(timeline: Timeline, options: VideoOptions): Video
 
   const stills = [...names].map(([file, name]) => [
     ...head,
+    // The orientation is applied by the filters below only, never also by ffmpeg.
+    "-noautorotate",
     // image2 with no pattern, so a "%" in a file name is not read as a sequence.
     "-f",
     "image2",
@@ -131,7 +148,7 @@ export function buildVideoArgs(timeline: Timeline, options: VideoOptions): Video
     "-i",
     join(assetsDir, file),
     "-filter_complex",
-    `[0:v]scale=${VIDEO_WIDTH}:${VIDEO_HEIGHT}:force_original_aspect_ratio=decrease[img];` +
+    `[0:v]${upright(options.orientations?.get(file))}scale=${VIDEO_WIDTH}:${VIDEO_HEIGHT}:force_original_aspect_ratio=decrease[img];` +
       `${black}[bg];[bg][img]overlay=(W-w)/2:(H-h)/2:shortest=1,setsar=1,format=rgb24`,
     ...pngOut(name),
   ]);
@@ -194,10 +211,11 @@ export type RenderVideoResult = {
 };
 
 /**
- * Renders a project's audio with `renderAudio`, then the video `out/drama.mp4` from the
+ * Renders a project's audio, as `renderAudio` does, then the video `out/drama.mp4` from the
  * timeline's images and that audio. ffmpeg runs in the project folder with relative paths. The
- * stills go in a temporary folder that is always removed, and the video is written to a
- * temporary file that replaces the output only when ffmpeg succeeds.
+ * stills go in a temporary folder that is always removed. The audio and the video are written to
+ * temporary files that replace the outputs only when both succeed, so a failed render keeps the
+ * previous pair.
  *
  * Every failure is a `RenderError`, or its subclass `FfmpegError` when ffmpeg fails, under the
  * same rules as `renderAudio`: a fixed message with no absolute path and no original error.
@@ -218,49 +236,62 @@ async function renderVideoSteps(
   projectDir: string,
   options: RenderVideoOptions,
 ): Promise<RenderVideoResult> {
-  // renderAudio also creates out/.
-  const audio = await renderAudio(projectDir, options);
-  const { timeline } = audio;
-
+  const format = options.format ?? "mp3";
+  const { scenario, timeline } = await loadRenderProject(
+    projectDir,
+    options.project,
+    options.resolvers,
+  );
+  const audio = audioFile(format);
   const file = `${OUT_DIR}/${OUT_BASENAME}.mp4`;
-  const temp = `${file}.${randomUUID()}.tmp`;
+  const id = randomUUID();
+  const audioTemp = `${audio}.${id}.tmp`;
+  const temp = `${file}.${id}.tmp`;
   const stillsDir = `${temp}.stills`;
+  const orientations = await readImageOrientations(projectDir, timeline);
   const { stills, concatList, args } = buildVideoArgs(timeline, {
-    audio: audio.file,
+    audio: audioTemp,
     output: temp,
     stillsDir,
+    orientations,
   });
-  const inProject = (path: string) => join(projectDir, path);
-  // Cleanup is best effort: its failure must not hide the error that caused it.
-  const remove = (path: string) =>
-    rm(inProject(path), { recursive: true, force: true }).catch(() => {});
 
   // The relative paths these runs pass, which ffmpeg's stderr may name.
   const paths = [
     ...timeline.images.filter(isShown).map((s) => join(ASSETS_DIR, s.file)),
-    audio.file,
+    audioTemp,
     temp,
     stillsDir,
     ...stills.map((s) => s.at(-1) as string),
     join(stillsDir, CONCAT_LIST),
   ];
+  await prepareOutDir(projectDir);
   try {
-    await mkdir(inProject(stillsDir)).catch((e: unknown) => {
+    await mixAudio(projectDir, timeline, format, audioTemp);
+    await mkdir(inProject(projectDir, stillsDir)).catch((e: unknown) => {
       throw stepError(`Could not create a folder for the video stills in ${OUT_DIR}/`, e);
     });
     for (const stillArgs of stills) await runFfmpeg(stillArgs, { cwd: projectDir, paths });
-    await writeFile(inProject(join(stillsDir, CONCAT_LIST)), concatList).catch((e: unknown) => {
-      throw stepError(`Could not write the ffmpeg concat list in ${OUT_DIR}/`, e);
-    });
+    await writeFile(inProject(projectDir, join(stillsDir, CONCAT_LIST)), concatList).catch(
+      (e: unknown) => {
+        throw stepError(`Could not write the ffmpeg concat list in ${OUT_DIR}/`, e);
+      },
+    );
     await runFfmpeg(args, { cwd: projectDir, paths });
-    await rename(inProject(temp), inProject(file)).catch((e: unknown) => {
-      throw stepError(`Could not write ${file}`, e);
-    });
+    for (const [from, to] of [
+      [audioTemp, audio],
+      [temp, file],
+    ] as const) {
+      await rename(inProject(projectDir, from), inProject(projectDir, to)).catch((e: unknown) => {
+        throw stepError(`Could not write ${to}`, e);
+      });
+    }
   } catch (e) {
-    await remove(temp);
+    await removeQuietly(projectDir, audioTemp);
+    await removeQuietly(projectDir, temp);
     throw e;
   } finally {
-    await remove(stillsDir);
+    await removeQuietly(projectDir, stillsDir);
   }
-  return { file, audio };
+  return { file, audio: { file: audio, format, scenario, timeline } };
 }

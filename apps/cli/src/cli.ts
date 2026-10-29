@@ -22,7 +22,13 @@ import {
 } from "@vd-creator/core";
 import { buildCreditsText } from "@vd-creator/library";
 import { providerIds } from "@vd-creator/providers";
-import { buildSrt, RenderError, renderAudio, renderVideo } from "@vd-creator/render";
+import {
+  buildSrt,
+  RenderError,
+  readImageOrientations,
+  renderAudio,
+  renderVideo,
+} from "@vd-creator/render";
 import { SCENARIO_FILE, type Scenario } from "@vd-creator/scenario";
 import {
   DEFAULT_HOST,
@@ -63,10 +69,12 @@ import {
   missingAudio,
   missingImages,
   onPath,
+  outIsSymlink,
   PROJECT_CREDITS_TEMPLATE,
   RENDER_FORMATS,
   RENDER_USAGE,
   readCreditsTemplate,
+  removeStaleOutputs,
   renderCommands,
   SRT_FILE,
   shellQuote,
@@ -110,7 +118,8 @@ Commands:
     --yes             Run a paid provider. Without it, a paid provider stops after the plan
   render [dir]      Mix the audio into out/drama.mp3 and write out/credits.txt. Checks first
                     that ffmpeg is on PATH, that every item has an asset, and that the
-                    licenses pass as in vd validate
+                    licenses pass as in vd validate. Removes the outputs of earlier
+                    renders that these options do not write, such as out/drama.srt
     --video           Also write out/drama.mp4 with the still images
     --srt             Also write out/drama.srt with the lines
     --format <f>      mp3 (default) or wav, for out/drama.wav
@@ -548,6 +557,20 @@ async function render(args: string[], options: Options, context: Context): Promi
     output.stderr("vd render: ffmpeg is not on PATH; install it, or add its folder to PATH");
     ok = false;
   }
+  if (!printOnly) {
+    try {
+      if (await outIsSymlink(dir)) {
+        output.stderr(`vd render: out/ in ${dir} is a symbolic link; replace it with a folder`);
+        ok = false;
+      }
+    } catch (e) {
+      const code = fsErrorCode(e);
+      if (code === undefined) throw e;
+      output.stderr(`vd render: cannot read out/ in ${dir}: ${code}`);
+      debug(e);
+      ok = false;
+    }
+  }
   let timeline: Timeline | undefined;
   try {
     timeline = await computeTimeline(scenario, cache, resolvers);
@@ -592,7 +615,13 @@ async function render(args: string[], options: Options, context: Context): Promi
   if (printOnly) {
     // The script enters the project folder itself; a quoted path holds any character safely.
     output.stdout(`cd -- ${shellQuote(dir)} || exit 1`);
-    for (const line of renderCommands(timeline, { format, video })) output.stdout(line);
+    const orientations = video ? await readImageOrientations(dir, timeline) : undefined;
+    for (const line of renderCommands(timeline, {
+      format,
+      video,
+      ...(orientations === undefined ? {} : { orientations }),
+    }))
+      output.stdout(line);
     return EXIT_OK;
   }
 
@@ -624,15 +653,31 @@ async function render(args: string[], options: Options, context: Context): Promi
   }
   const creditsText = buildCreditsText(credits, template);
 
+  // out/ then holds only what this render writes, so no output of an earlier one is mistaken
+  // for part of it.
+  let removed: string[];
+  try {
+    removed = await removeStaleOutputs(dir, { format, video, srt: options.srt === true });
+  } catch (e) {
+    const code = fsErrorCode(e);
+    if (code === undefined) throw e;
+    output.stderr(`vd render: cannot remove the outputs of an earlier render in ${dir}: ${code}`);
+    debug(e);
+    return EXIT_FAILURE;
+  }
+  for (const file of removed) output.stdout(`Removed ${file}, which this render does not write`);
+
+  // The scenario and timeline that were checked are rendered, not read again.
+  const checked = { scenario, timeline };
   let rendered: Awaited<ReturnType<typeof renderAudio>>;
   try {
     if (video) {
-      const result = await renderVideo(dir, { resolvers, format });
+      const result = await renderVideo(dir, { project: checked, format });
       rendered = result.audio;
       output.stdout(`Rendered ${rendered.file}`);
       output.stdout(`Rendered ${result.file}`);
     } else {
-      rendered = await renderAudio(dir, { resolvers, format });
+      rendered = await renderAudio(dir, { project: checked, format });
       output.stdout(`Rendered ${rendered.file}`);
     }
   } catch (e) {

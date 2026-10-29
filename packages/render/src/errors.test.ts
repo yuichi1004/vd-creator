@@ -8,9 +8,9 @@ import { inspect } from "node:util";
 import type { Timeline } from "@vd-creator/core";
 import type { Scenario } from "@vd-creator/scenario";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { renderAudio } from "./audio.js";
 import { causeOptions, errorCode, RenderError, stepError } from "./errors.js";
 import { FfmpegError, runFfmpeg } from "./ffmpeg.js";
+import { renderAudio } from "./render-audio.js";
 import { buildSrt } from "./srt.js";
 
 const packageDir = fileURLToPath(new URL("..", import.meta.url)).replace(/[\\/]+$/, "");

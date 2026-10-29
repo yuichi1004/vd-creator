@@ -1,16 +1,26 @@
 // Integration test: renders a mock-generated project with the real ffmpeg.
 
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  realpath,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspect, promisify } from "node:util";
-import { AssetCache, defaultResolvers, runGeneration } from "@vd-creator/core";
+import { AssetCache, computeTimeline, defaultResolvers, runGeneration } from "@vd-creator/core";
 import { createMockProviders } from "@vd-creator/providers";
 import { loadScenario } from "@vd-creator/scenario";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "vitest";
-import { LOUDNESS_TARGET_LUFS, RenderError, renderAudio } from "./audio.js";
+import { LOUDNESS_TARGET_LUFS, RenderError } from "./audio.js";
 import { FfmpegError } from "./ffmpeg.js";
+import { renderAudio } from "./render-audio.js";
 
 const run = promisify(execFile);
 
@@ -117,6 +127,24 @@ describe("renderAudio", { timeout: 60_000 }, () => {
     expect(Math.abs(integrated - LOUDNESS_TARGET_LUFS)).toBeLessThan(2);
   });
 
+  test("renders the scenario and timeline it is given without reading them again", async () => {
+    const { scenario } = await loadScenario(dir);
+    if (!scenario) throw new Error("invalid test scenario");
+    const timeline = await computeTimeline(scenario, await AssetCache.load(dir), resolvers);
+    // Neither file can be read while it renders.
+    const away = ["scenario.yaml", "cache.json"];
+    for (const file of away) await rename(join(dir, file), join(dir, `${file}.away`));
+    try {
+      const result = await renderAudio(dir, { project: { scenario, timeline } });
+      expect(result.scenario).toBe(scenario);
+      expect(result.timeline).toBe(timeline);
+      const duration = await durationOf(join(dir, result.file));
+      expect(Math.abs(duration - timeline.durationSec)).toBeLessThan(0.1);
+    } finally {
+      for (const file of away) await rename(join(dir, `${file}.away`), join(dir, file));
+    }
+  });
+
   test("reports an unreadable asset without absolute paths and keeps no partial output", async () => {
     const broken = await mkdtemp(join(tmpdir(), "vd-render-broken-"));
     try {
@@ -170,6 +198,18 @@ describe("renderAudio errors", { timeout: 60_000 }, () => {
     expect(error.cause).toEqual({ message: "system error EISDIR", code: "EISDIR" });
     // The temporary files are removed.
     expect(await readdir(join(project, "out"))).toEqual(["drama.mp3"]);
+  });
+
+  test("refuses an out/ that is a symbolic link and writes nothing through it", async () => {
+    const elsewhere = await mkdtemp(join(tmpdir(), "vd-render-elsewhere-"));
+    try {
+      await symlink(elsewhere, join(project, "out"));
+      const error = await renderError();
+      expect(error.message).toBe("out/ is a symbolic link; replace it with a folder");
+      expect(await readdir(elsewhere)).toEqual([]);
+    } finally {
+      await rm(elsewhere, { recursive: true, force: true });
+    }
   });
 
   test("reports an out/ that is a file", async () => {

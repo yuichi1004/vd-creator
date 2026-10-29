@@ -257,6 +257,46 @@ describe("vd render", { timeout: 120_000 }, () => {
     expect(await outFiles()).toEqual(["credits.txt", "drama.mp3", "drama.srt"]);
   });
 
+  test("refuses an out/ that is a symbolic link, before rendering anything", async () => {
+    expect((await vd("generate", dir)).code).toBe(EXIT_OK);
+    const elsewhere = join(tmp, "elsewhere");
+    await mkdir(elsewhere);
+    await rm(join(dir, "out"), { recursive: true, force: true });
+    await symlink(elsewhere, join(dir, "out"));
+    const result = await vd("render", dir, "--video", "--srt");
+    expect(result.code).toBe(EXIT_FAILURE);
+    expect(result.stderr).toBe(
+      `vd render: out/ in ${dir} is a symbolic link; replace it with a folder`,
+    );
+    expect(result.stdout).toBe("");
+    expect(await readdir(elsewhere)).toEqual([]);
+  });
+
+  test("removes the outputs of an earlier render that the current options do not write", async () => {
+    expect((await vd("generate", dir)).code).toBe(EXIT_OK);
+    const all = await vd("render", dir, "--video", "--srt", "--format", "wav");
+    expect(all).toMatchObject({ code: EXIT_OK, stderr: "" });
+    expect(all.stdout).not.toContain("Removed");
+
+    const audio = await vd("render", dir);
+    expect(audio).toMatchObject({ code: EXIT_OK, stderr: "" });
+    expect(audio.stdout.split("\n")).toEqual([
+      "Removed out/drama.wav, which this render does not write",
+      "Removed out/drama.mp4, which this render does not write",
+      "Removed out/drama.srt, which this render does not write",
+      "Rendered out/drama.mp3",
+      "Wrote out/credits.txt",
+    ]);
+    expect(await outFiles()).toEqual(["credits.txt", "drama.mp3"]);
+
+    // A folder at an output's name is not an output, and is left alone.
+    await mkdir(join(dir, "out", "drama.srt"));
+    const again = await vd("render", dir);
+    expect(again).toMatchObject({ code: EXIT_OK, stderr: "" });
+    expect(again.stdout).not.toContain("Removed");
+    expect(await outFiles()).toEqual(["credits.txt", "drama.mp3", "drama.srt"]);
+  });
+
   test("a verified CC-BY entry renders, with its attribution in credits.txt", async () => {
     await useDoor("commercial", { verify: true });
     expect((await vdEnv({ VD_LIBRARY: lib }, "generate", dir)).code).toBe(EXIT_OK);
