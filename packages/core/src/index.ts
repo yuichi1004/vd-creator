@@ -1,2 +1,7 @@
-// Placeholder. Generation pipeline, cache, and timeline computation.
-export const moduleName = "@vd-creator/core";
+// Generation pipeline, cache, and timeline computation.
+export * from "./cache.js";
+export * from "./canonical.js";
+export * from "./generate.js";
+export * from "./items.js";
+export * from "./resolver.js";
+export * from "./timeline.js";
