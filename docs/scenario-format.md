@@ -4,7 +4,7 @@ This guide is for agents that write or edit `scenario.yaml`, the source of truth
 
 ## Validating
 
-Check every scenario you write before you report it as done. The `vd validate` command is not merged yet. Until it is, build with `npm run build` and call `parseScenario(text)` from `@vd-creator/scenario`. It returns `{ scenario, issues }`. `scenario` is set only when there are no errors. Each issue has a `path` such as `["scenes", 0, "items", 2, "id"]` and a `message`.
+Check every scenario you write before you report it as done. The `vd validate` command is not merged yet. Until it is, build with `npm run build` and call `parseScenario(text)` from `@vd-creator/scenario`. It returns `{ scenario, issues }`. `scenario` is set only when there are no errors. Each issue has a `path` such as `["scenes", 0, "items", 2, "id"]`, a `message`, and a `severity` of `error` or `warning`. Only errors make a scenario invalid. Fix warnings too, but they do not block it.
 
 Editors can also use the JSON Schema at [`packages/scenario/schema/scenario.schema.json`](../packages/scenario/schema/scenario.schema.json). It checks types and shapes only. It does not check that IDs are unique or that references resolve, so a file that passes the JSON Schema can still fail `parseScenario`. To make YAML editors pick the schema up, add a comment as the first line, with a path relative to the scenario file:
 
@@ -75,7 +75,10 @@ scenes:
       - line: "Up here. Mind the stairs."
         id: s2-l1
         speaker: keeper
-        gapBeforeSec: -0.2 # Starts 0.2 seconds before Mira's last line ends
+      - line: "Coming!"
+        id: s2-l2
+        speaker: mira
+        gapBeforeSec: -0.2 # Starts 0.2 seconds before the keeper's line ends
       - sfx: "footsteps on iron stairs"
         id: s2-steps
         take: 1
@@ -202,11 +205,11 @@ Humans annotate drafts with comments, such as `# TODO: shorter?`. Keep every com
 
 Programs change items with `updateItem` from `@vd-creator/scenario`, which is also what the UI uses. It edits the YAML source in place and keeps comments and formatting. It supports the forms people usually write: block and flow mappings, comments anywhere, quoted and block scalars, trailing commas, closing braces on their own line, and empty values. It refuses the edit, and leaves the file unchanged, in these cases:
 
-- The item, its scene, or its scene's item list is defined by a YAML alias (`*name`).
+- The item, its scene, its scene's item list, or the whole `scenes` list is defined by a YAML alias (`*name`).
 - The item, or a field the edit changes, has an explicit tag such as `!!str` or `!!map`.
 - A field the edit changes has an anchor or tag on the line after its key.
 - An alias makes a cycle, or an alias does not resolve.
-- The edit changes an anchored value that an alias elsewhere refers to.
+- The edited item would not read back as patched. For example, the edit changes an anchored value that an alias elsewhere refers to.
 - The edit removes the item's `id` or its kind key, or renames it to an ID that another scene or item already uses.
 - The edit would make a valid scenario invalid.
 - The file has YAML syntax errors.
@@ -225,9 +228,11 @@ So that the UI can always edit what you write, **do not use YAML anchors (`&name
 - **A BGM with both `prompt` and `library`**, or with neither.
 - **An SFX written as `{ prompt: ... }`.** A generated SFX is a plain string: `sfx: "waves on rocks"`.
 - **Out-of-range numbers**: `gapBeforeSec` below -1, a `pause` or `durationSec` of 0, a negative or fractional `take`, or a BGM `volume` above 1.
-- **An image path that starts with `assets/`, `./`, or `/`**, or that uses `\`.
+- **An image path that starts with `./` or `/`**, or that uses `\`. Validation reports these.
+- **An image path that starts with `assets/`.** Validation does not catch this one: `assets/images/shore.png` is a valid path, but it points to `assets/assets/images/shore.png`. Write the path from inside `assets/`, as in `images/shore.png`.
 - **`version: "1"`** as a string. It must be the number 1.
 - **An empty value**, as in `direction:` with nothing after it. YAML reads it as null, which is not a string. Leave the key out instead.
 - **IDs that YAML reads as numbers**, such as `id: 01` or `id: 2`. Quote them (`id: "01"`), or better, start them with a letter.
-- **Unquoted text with YAML syntax in it.** Quote lines, directions, and prompts that contain `: `, ` #`, or that start with a character such as `"`, `'`, `[`, `{`, `*`, `&`, `!`, `|`, `>`, `%`, `@`, or `` ` ``. Quoting every line and prompt is the simplest habit. Inside double quotes, escape `"` and `\` with a backslash, or use single quotes and write `'` as `''`.
+- **Unquoted text with ` #` in it.** In YAML, a space followed by `#` starts a comment, so `line: Room #4 is empty` is read as the line `Room`. Validation does not catch this, because the shortened text is still valid. Quote any text that contains `#`: `line: "Room #4 is empty"`.
+- **Unquoted text with other YAML syntax in it.** Quote lines, directions, and prompts that contain `: `, ` #`, or that start with a character such as `"`, `'`, `[`, `{`, `*`, `&`, `!`, `|`, `>`, `%`, `@`, or `` ` ``. Quoting every line and prompt is the simplest habit. Inside double quotes, escape `"` and `\` with a backslash, or use single quotes and write `'` as `''`.
 - **Anchors, aliases, or tags.** See the previous section.
