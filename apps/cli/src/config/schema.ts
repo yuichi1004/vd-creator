@@ -6,25 +6,45 @@ import { z } from "zod";
 /** The config file in the user directory. */
 export const CONFIG_FILE = "config.yaml";
 
-const PathSchema = z
-  .string()
-  .min(1)
-  .describe(
-    "A path. ~ at the start is the home folder; a relative path is relative to the user directory.",
-  );
+/** The longest path a setting may hold, which is PATH_MAX on Linux. */
+export const MAX_PATH_LENGTH = 4096;
+
+/**
+ * Matches one line of printable characters: no control, format, private-use, or unassigned
+ * character, no lone surrogate, and no line or paragraph separator. So a value that passed the
+ * schema can be printed on one line as it is.
+ */
+export const PRINTABLE_LINE = /^[^\p{C}\p{Zl}\p{Zp}]+$/u;
+
+/** A host name: dot-separated labels of letters, digits, and inner hyphens (RFC 1123). */
+const HOST_NAME =
+  /^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/;
+
+/**
+ * A path. ~ at the start is the home folder; a relative path is relative to the user directory.
+ * One line of printable characters, at most `MAX_PATH_LENGTH` long.
+ */
+export const PathSchema = z.string().min(1).max(MAX_PATH_LENGTH).regex(PRINTABLE_LINE);
+
+/** A host name or an IPv4 or IPv6 address, without brackets, a port, or a zone. */
+export const HostSchema = z.union([z.string().regex(HOST_NAME), z.ipv6()]);
+
+/** A TCP port. */
+export const PortSchema = z.number().int().min(1).max(65535);
 
 /**
  * The content of config.yaml. Strict at every level, so an unknown key, such as a typo or a
  * pasted API key, is an error. There is deliberately no provider field: the provider stays mock
- * unless a command names another.
+ * unless a command names another. Each field has the narrowest shape it needs, and every string
+ * is one printable line, so that `vd config show` can print what passed.
  */
 export const UserConfigSchema = z.strictObject({
   version: z.literal(1),
   library: PathSchema.optional().describe("Default for --library and VD_LIBRARY."),
   serve: z
     .strictObject({
-      port: z.number().int().min(1).max(65535).optional(),
-      host: z.string().min(1).optional(),
+      port: PortSchema.optional(),
+      host: HostSchema.optional(),
     })
     .optional(),
   init: z

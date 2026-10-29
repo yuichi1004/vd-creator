@@ -299,8 +299,134 @@ describe("config.yaml schema", () => {
     expect(problems("version: 1\nlibrary: ''\n")[0]).toMatch(/^library: /);
     expect(problems("- a list\n")[0]).toMatch(/^the top level: /);
     expect(problems("version: 1\nserve:\n  host: [sk-secret-value]\n")).toEqual([
-      "serve.host: must be a non-empty host name or address",
+      "serve.host: must be a host name or an IPv4 or IPv6 address",
     ]);
+  });
+
+  const PATH_RULE = "must be a path on one line of printable characters, at most 4096 long";
+  const HOST_RULE = "must be a host name or an IPv4 or IPv6 address";
+  const PUBLISH_RULE = "must be one of private, non-commercial, commercial";
+  // Each string field, how to place a value in it, and the problem it gives.
+  const STRING_FIELDS: [string, (value: string) => string, string][] = [
+    ["library", (v) => `version: 1\nlibrary: ${v}\n`, `library: ${PATH_RULE}`],
+    ["serve.host", (v) => `version: 1\nserve:\n  host: ${v}\n`, `serve.host: ${HOST_RULE}`],
+    [
+      "init.publishUse",
+      (v) => `version: 1\ninit:\n  publishUse: ${v}\n`,
+      `init.publishUse: ${PUBLISH_RULE}`,
+    ],
+    [
+      "render.creditsTemplate",
+      (v) => `version: 1\nrender:\n  creditsTemplate: ${v}\n`,
+      `render.creditsTemplate: ${PATH_RULE}`,
+    ],
+  ];
+  // Values in YAML double quotes, so that the YAML escapes reach the value as the characters.
+  const BAD_VALUES: [string, string][] = [
+    ["a newline", '"sk-secret\\nvalue"'],
+    ["a carriage return", '"sk-secret\\rvalue"'],
+    ["a bell", '"sk-secret\\avalue"'],
+    ["an escape", '"sk-secret\\evalue"'],
+    ["a tab", '"sk-secret\\tvalue"'],
+    ["a NUL", '"sk-secret\\0value"'],
+    ["a line separator", '"sk-secret\\Lvalue"'],
+    ["a paragraph separator", '"sk-secret\\Pvalue"'],
+    ["a zero-width joiner", '"sk-secret\\u200dvalue"'],
+    ["a right-to-left override", '"sk-secret\\u202evalue"'],
+  ];
+  const BAD_CASES = STRING_FIELDS.flatMap(([field, place, problem]) =>
+    BAD_VALUES.map(([what, value]) => [field, what, place(value), problem] as const),
+  );
+
+  test.each(BAD_CASES)(
+    "%s with %s is rejected, and vd config show does not print it",
+    async (_field, _what, text, problem) => {
+      expect(problems(text)).toEqual([problem]);
+      await writeConfig(userDir, text);
+      const env = envWith({ VD_USER_DIR: userDir });
+      for (const args of [
+        ["config", "show"],
+        ["config", "show", "--json"],
+      ]) {
+        const result = await vd(env, ...args);
+        expect(result.code).toBe(EXIT_FAILURE);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toBe(`vd config show: ${join(userDir, "config.yaml")}: ${problem}`);
+        expect(result.stderr).not.toContain("sk-secret");
+      }
+    },
+  );
+
+  test("a value that is too long, or not the narrowest shape, is rejected", () => {
+    expect(problems(`version: 1\nlibrary: ${"a".repeat(4097)}\n`)).toEqual([
+      `library: ${PATH_RULE}`,
+    ]);
+    expect(problems(`version: 1\nlibrary: ${"a".repeat(4096)}\n`)).toEqual([]);
+    for (const host of ["sk-secret value", "http://example.com", "-bad", "a..b", "[::1]", "a:80"]) {
+      expect(problems(`version: 1\nserve:\n  host: "${host}"\n`)).toEqual([
+        `serve.host: ${HOST_RULE}`,
+      ]);
+    }
+    for (const host of ["localhost", "127.0.0.1", "0.0.0.0", "::1", "my-host.example.com"]) {
+      expect(problems(`version: 1\nserve:\n  host: "${host}"\n`)).toEqual([]);
+    }
+    for (const port of ["0", "1.5", '"80"', "65536"]) {
+      expect(problems(`version: 1\nserve:\n  port: ${port}\n`)).toEqual([
+        "serve.port: must be a whole number from 1 to 65535",
+      ]);
+    }
+  });
+
+  test.each(["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf"])(
+    "a key named %s is unknown at the top level and in serve, and is not named",
+    (key) => {
+      expect(problems(`version: 1\n${key}: 1\n`)).toEqual(["unknown key at line 2"]);
+      expect(problems(`version: 1\nserve:\n  ${key}: 1\n`)).toEqual([
+        "unknown key in serve at line 3",
+      ]);
+      expect(problems(`version: 1\nserve:\n  ${key}:\n    port: 1\n`)).toEqual([
+        "unknown key in serve at line 3",
+      ]);
+    },
+  );
+
+  test("a value from the environment must pass the schema too, and is not printed", async () => {
+    await mkdir(userDir);
+    for (const bad of ["sk-secret\nvalue", "sk-secret\u0007value", "sk-secret\u2028value"]) {
+      const env = envWith({ VD_USER_DIR: userDir, VD_LIBRARY: bad });
+      await expect(loadConfig({ env, repoRoot: repo })).rejects.toThrow(
+        `library from VD_LIBRARY: ${PATH_RULE}`,
+      );
+      for (const args of [
+        ["config", "show"],
+        ["config", "show", "--json"],
+      ]) {
+        const result = await vd(env, ...args);
+        expect(result.code).toBe(EXIT_FAILURE);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).not.toContain("sk-secret");
+      }
+    }
+  });
+
+  test("vd config show and path escape a control character in a folder from the environment", async () => {
+    const odd = join(tmp, "odd\u001b[31mdir\u2028x");
+    await mkdir(odd);
+    for (const args of [
+      ["config", "show"],
+      ["config", "show", "--json"],
+      ["config", "path"],
+    ]) {
+      const result = await vd(envWith({ VD_USER_DIR: odd }), ...args);
+      expect(result.code).toBe(EXIT_OK);
+      expect(result.stdout).not.toContain("\u001b");
+      expect(result.stdout).not.toContain("\u2028");
+      if (args.includes("--json")) {
+        expect(JSON.parse(result.stdout).userDir.dir).toBe(odd);
+      } else {
+        expect(result.stdout).toContain("odd\\u{1b}[31mdir\\u{2028}x");
+      }
+    }
   });
 
   test("invalid YAML names the line but not the text", () => {

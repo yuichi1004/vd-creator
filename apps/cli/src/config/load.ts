@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { PUBLISH_USES, type PublishUse } from "@vd-creator/scenario";
 import { isAlias, isMap, isNode, isScalar, isSeq, LineCounter, parseDocument } from "yaml";
+import { z } from "zod";
 import {
   type Env,
   findUserDir,
@@ -12,7 +13,15 @@ import {
   type LocationOptions,
   type UserDirLocation,
 } from "./location.js";
-import { CONFIG_FILE, type UserConfig, UserConfigSchema } from "./schema.js";
+import {
+  CONFIG_FILE,
+  HostSchema,
+  MAX_PATH_LENGTH,
+  PathSchema,
+  PortSchema,
+  type UserConfig,
+  UserConfigSchema,
+} from "./schema.js";
 
 /** The settings, named by their dotted path in config.yaml, in the order they are shown. */
 export const SETTINGS = [
@@ -135,18 +144,29 @@ export async function readUserConfig(file: string): Promise<UserConfig | undefin
  * What each key path of the schema must hold. A problem names only these paths and this fixed
  * text, never a key or value from the file, so that a pasted secret is not printed.
  */
-const KEY_RULES: Record<string, string> = {
-  "": "must be a mapping of settings",
-  version: "must be 1",
-  library: "must be a non-empty path",
-  serve: "must be a mapping",
-  "serve.port": "must be a whole number from 1 to 65535",
-  "serve.host": "must be a non-empty host name or address",
-  init: "must be a mapping",
-  "init.publishUse": `must be one of ${PUBLISH_USES.join(", ")}`,
-  render: "must be a mapping",
-  "render.creditsTemplate": "must be a non-empty path",
-};
+const PATH_RULE = `must be a path on one line of printable characters, at most ${MAX_PATH_LENGTH} long`;
+// A Map, so that a key such as "constructor" or "__proto__" is not found on a prototype.
+const KEY_RULES: ReadonlyMap<string, string> = new Map([
+  ["", "must be a mapping of settings"],
+  ["version", "must be 1"],
+  ["library", PATH_RULE],
+  ["serve", "must be a mapping"],
+  ["serve.port", "must be a whole number from 1 to 65535"],
+  ["serve.host", "must be a host name or an IPv4 or IPv6 address"],
+  ["init", "must be a mapping"],
+  ["init.publishUse", `must be one of ${PUBLISH_USES.join(", ")}`],
+  ["render", "must be a mapping"],
+  ["render.creditsTemplate", PATH_RULE],
+]);
+
+/** The schema of each setting, which a value from a flag or the environment must pass too. */
+const SETTING_SCHEMAS: ReadonlyMap<SettingName, z.ZodType> = new Map<SettingName, z.ZodType>([
+  ["library", PathSchema],
+  ["serve.port", PortSchema],
+  ["serve.host", HostSchema],
+  ["init.publishUse", z.enum(PUBLISH_USES)],
+  ["render.creditsTemplate", PathSchema],
+]);
 
 /**
  * Parses the text of a config file. `file` names it in errors.
@@ -220,13 +240,13 @@ function checkUserConfig(text: string): { config: UserConfig } | { problems: str
       const name = String(key.value);
       const child = path ? `${path}.${name}` : name;
       // A key is checked only inside a mapping of the schema.
-      if (known && !(child in KEY_RULES)) {
+      if (known && !KEY_RULES.has(child)) {
         problems.push(`unknown key${path ? ` in ${path}` : ""}${keyAt}`);
         continue;
       }
       // defineProperty, because assigning "__proto__" would replace the prototype.
       Object.defineProperty(object, name, {
-        value: toPlain(pair.value, child, known && child in KEY_RULES),
+        value: toPlain(pair.value, child, known && KEY_RULES.has(child)),
         enumerable: true,
         configurable: true,
         writable: true,
@@ -243,7 +263,7 @@ function checkUserConfig(text: string): { config: UserConfig } | { problems: str
     const path = issue.path.map(String).join(".");
     // Every path is a key of the schema, as unknown keys were rejected above; anything else is
     // not named.
-    const rule = KEY_RULES[path];
+    const rule = KEY_RULES.get(path);
     if (rule === undefined) return "a setting is not valid";
     return `${path || "the top level"}: ${rule}`;
   });
@@ -276,6 +296,16 @@ export function resolveSettings(options: {
       setting = { value: fromFile[name], source: "file" };
       base = file?.dir ?? cwd;
     } else setting = { value: CONFIG_DEFAULTS[name], source: "default" };
+    // A value from a flag or the environment must pass the same schema as one from the file.
+    // The problem names where it came from, never the value.
+    if (setting.source === "flag" || setting.source === "env") {
+      const schema = SETTING_SCHEMAS.get(name);
+      if (schema && !schema.safeParse(setting.value).success) {
+        const from = setting.source === "env" ? envName : "the command-line flag";
+        problems.push(`${name} from ${from}: ${KEY_RULES.get(name)}`);
+        continue;
+      }
+    }
     if (PATH_SETTINGS.has(name) && typeof setting.value === "string") {
       const path = expandPath(setting.value, base, env);
       if (path === undefined) {

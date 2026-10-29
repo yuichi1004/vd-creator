@@ -486,10 +486,10 @@ async function configPath(context: Context): Promise<number> {
   }
   if (!search.found) {
     output.stdout("No user directory; vd uses its built-in defaults. Checked, in order:");
-    for (const candidate of search.candidates) output.stdout(`  ${candidate.dir}`);
+    for (const candidate of search.candidates) output.stdout(`  ${printable(candidate.dir)}`);
     return EXIT_OK;
   }
-  output.stdout(search.found.dir);
+  output.stdout(printable(search.found.dir));
   output.stdout(`Selected by ${describeRule(search.found.rule)}`);
   return EXIT_OK;
 }
@@ -542,20 +542,47 @@ async function configShow(json: boolean, context: Context): Promise<number> {
       }),
     );
     const userDir = config.userDir ?? null;
-    output.stdout(JSON.stringify({ userDir, configFile: config.file ?? null, settings }, null, 2));
+    output.stdout(printableJson({ userDir, configFile: config.file ?? null, settings }));
     return EXIT_OK;
   }
   output.stdout(
     config.userDir
-      ? `User directory: ${config.userDir.dir} (${describeRule(config.userDir.rule)})`
+      ? `User directory: ${printable(config.userDir.dir)} (${describeRule(config.userDir.rule)})`
       : "User directory: none",
   );
-  output.stdout(`Config file: ${config.file ?? "none"}`);
+  output.stdout(`Config file: ${printable(config.file ?? "none")}`);
   for (const name of SETTINGS) {
     const { value, source } = config.settings[name];
-    output.stdout(`${name}: ${value ?? "(not set)"} (${sourceLabel(name, source)})`);
+    const shown = value === undefined ? "(not set)" : printable(String(value));
+    output.stdout(`${name}: ${shown} (${sourceLabel(name, source)})`);
   }
   return EXIT_OK;
+}
+
+/** Characters that are not printable on one line: controls, formats, and separators. */
+const UNPRINTABLE = /[\p{C}\p{Zl}\p{Zp}]/gu;
+
+/**
+ * `text` with every character that is not printable on one line written as \u{...}. Settings
+ * that passed the schema have none, but a folder from the environment, such as HOME, can.
+ */
+function printable(text: string): string {
+  return text.replace(UNPRINTABLE, (c) => `\\u{${c.codePointAt(0)?.toString(16)}}`);
+}
+
+/**
+ * Indented JSON with every character in a string that is not printable on one line escaped as
+ * \uXXXX. JSON.stringify escapes U+0000 to U+001F in strings itself, so those left in its
+ * output are the newlines and indentation between values.
+ */
+function printableJson(value: unknown): string {
+  return JSON.stringify(value, null, 2).replace(UNPRINTABLE, (c) =>
+    c.length === 1 && c.charCodeAt(0) < 0x20
+      ? c
+      : [...Array(c.length).keys()]
+          .map((i) => `\\u${c.charCodeAt(i).toString(16).padStart(4, "0")}`)
+          .join(""),
+  );
 }
 
 function sourceLabel(name: SettingName, source: SettingSource): string {
