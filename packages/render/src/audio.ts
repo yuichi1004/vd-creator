@@ -254,7 +254,14 @@ async function renderAudioSteps(
     await writeFile(inProject(graph), graphText).catch((e: unknown) => {
       throw stepError(`Could not write the ffmpeg filter graph in ${OUT_DIR}/`, e);
     });
-    await runFfmpeg(args, { cwd: projectDir });
+    // The relative paths this run passes, which ffmpeg's stderr may name.
+    const paths = [
+      ...timeline.items.filter(isMixed).map((i) => join(ASSETS_DIR, i.assetFile)),
+      ...timeline.bgm.filter(isMixedBgm).map((s) => join(ASSETS_DIR, s.assetFile)),
+      temp,
+      graph,
+    ];
+    await runFfmpeg(args, { cwd: projectDir, paths });
     await rename(inProject(temp), inProject(file)).catch((e: unknown) => {
       throw stepError(`Could not write ${file}`, e);
     });

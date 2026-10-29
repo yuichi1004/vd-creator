@@ -1,4 +1,4 @@
-import { mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
@@ -66,7 +66,7 @@ describe("runFfmpeg", () => {
     const error = await failWith(input(dir));
     expect(error.message).not.toContain(dir);
     expect(error.message).not.toMatch(/tmp/);
-    expect(error.message).toMatch(/absolute path left out/);
+    expect(error.message).toMatch(/left out that may hold a path/);
   });
 
   test("shows the working folder, as given, as '.'", async () => {
@@ -129,6 +129,40 @@ describe("runFfmpeg", () => {
     expect(error.message).not.toContain("secret.wav");
   });
 
+  test("reports a deleted working folder without its path", async () => {
+    const gone = await mkdtemp(join(tmpdir(), "vd-render-gone-"));
+    const before = process.cwd();
+    process.chdir(gone);
+    try {
+      await rm(gone, { recursive: true });
+      // Resolving a relative cwd needs the process's own working folder, which is gone.
+      const error = (await runFfmpeg(["-version"], { cwd: "." }).catch(
+        (e: unknown) => e,
+      )) as FfmpegError;
+      expect(error).toBeInstanceOf(FfmpegError);
+      expect(error.message).toBe("ffmpeg could not be started (ENOENT)");
+      expect(error.code).toBe("ENOENT");
+      expect(error.cause).toBeInstanceOf(Error);
+    } finally {
+      process.chdir(before);
+    }
+  });
+
+  test("shows a relative path that it was given, and no other", async () => {
+    await mkdir(join(dir, "in"), { recursive: true });
+    await writeFile(join(dir, "in", "bad.wav"), "not audio");
+    const args = ["-hide_banner", "-nostdin", "-i", "in/bad.wav"];
+    const hidden = await runFfmpeg(args, { cwd: dir, paths: ["in/other.wav"] }).catch(
+      (e: unknown) => e,
+    );
+    expect(hidden).toBeInstanceOf(FfmpegError);
+    expect((hidden as Error).message).not.toContain("bad.wav");
+    const shown = await runFfmpeg(args, { cwd: dir, paths: ["in/bad.wav"] }).catch(
+      (e: unknown) => e,
+    );
+    expect((shown as Error).message).toContain("in/bad.wav: Invalid data");
+  });
+
   test("never runs its arguments through a shell", async () => {
     const error = (await runFfmpeg(["-hide_banner", "-nostdin", "-i", "$(echo x);ls"], {
       cwd: dir,
@@ -159,21 +193,59 @@ describe("reportableStderr", () => {
     ["a UNC path", "\\\\host\\share\\x.wav: denied"],
     ["a path on the current Windows drive", "\\Users\\u\\x.wav: Invalid data"],
     ["a quoted path on the current Windows drive", "Error opening '\\Users\\u\\x.wav'"],
+    ["an ANSI-colored path", "\x1b[0;31m/home/alice/private.wav: denied\x1b[0m"],
+    ["an ANSI-colored path after text", "Error\x1b[1m/home/alice/private.wav"],
+    ["a path behind an OSC sequence", "\x1b]8;;x\x07/home/alice/private.wav"],
+    ["a path behind a control character", "x\x08/home/alice/private.wav"],
+    ["a percent-encoded path", "Error opening %2Fhome%2Falice%2Fprivate.wav"],
+    ["a plain ../ path", "../../home/alice/private.wav: denied"],
+    ["a bare ..", "Error opening ..: denied"],
+    ["a relative path that was not given", "other/x.wav: Invalid data"],
+    ["a ratio", "size=  10kB bitrate= 128kb/s speed=N/A"],
   ])("leaves out a line with %s", (_, line) => {
     expect(reportableStderr(`ok\n${line}\n`)).toEqual([
       "ok",
-      "(1 line with an absolute path left out)",
+      "(1 line left out that may hold a path)",
     ]);
   });
 
-  test("keeps relative paths and ratios", () => {
-    const lines = [
-      "assets/voice/x.wav: No such file or directory",
-      "./out/drama.mp3: Is a directory",
-      "size=  10kB bitrate= 128kb/s speed=N/A",
-      "[Parsed_aresample_22 @ 0x564625afae00] Cannot select channel layout",
-    ];
-    expect(reportableStderr(lines.join("\r\n"))).toEqual(lines);
+  test("removes escape sequences and control characters before checking", () => {
+    expect(
+      reportableStderr("\x1b[0;31m[aresample @ 0x5646] Cannot select\x1b[0m layout\x07", {}),
+    ).toEqual(["[aresample @ 0x5646] Cannot select layout"]);
+  });
+
+  test("shows the relative paths it was given, as whole tokens only", () => {
+    const paths = ["assets/voice/x.wav", "out/drama.mp3.tmp"];
+    expect(
+      reportableStderr(
+        [
+          "assets/voice/x.wav: Invalid data found when processing input",
+          "Error opening input file assets/voice/x.wav.",
+          "'out/drama.mp3.tmp': Is a directory",
+          "assets/voice/x.wav/../../etc/passwd: denied",
+          "assets/../../etc/passwd: denied",
+          "other/assets/voice/x.wav: denied",
+          "%2Fassets/voice/x.wav: denied",
+          "assets/voice/x.wav.bak: denied",
+        ].join("\n"),
+        { paths },
+      ),
+    ).toEqual([
+      "assets/voice/x.wav: Invalid data found when processing input",
+      "Error opening input file assets/voice/x.wav.",
+      "'out/drama.mp3.tmp': Is a directory",
+      "(5 lines left out that may hold a path)",
+    ]);
+  });
+
+  test("ignores given paths that are not plain relative paths", () => {
+    const paths = ["/etc/passwd", "../x.wav", "a/../b.wav", "~/x.wav", "a\\b.wav", "a//b.wav"];
+    for (const path of paths) {
+      expect(reportableStderr(`${path}: denied`, { paths })).toEqual([
+        "(1 line left out that may hold a path)",
+      ]);
+    }
   });
 
   test("replaces the given folders with '.', longest first, before checking", () => {
@@ -184,23 +256,46 @@ describe("reportableStderr", () => {
           "Error opening 'file:///p/proj/x.wav'",
           "/p/proj2/x.wav: denied",
           "/p/proj: Is a directory",
+          "'/p/proj/out/./drama.mp3'",
         ].join("\n"),
-        ["/p", "/p/proj"],
+        { folders: ["/p", "/p/proj"] },
       ),
     ).toEqual([
       "./assets/x.wav: No such file or directory",
       "./proj2/x.wav: denied",
       ".: Is a directory",
-      "(1 line with an absolute path left out)",
+      "'./out/drama.mp3'",
+      "(1 line left out that may hold a path)",
     ]);
   });
 
-  test("replaces a folder only as a whole path, and handles regex characters in it", () => {
-    expect(
-      reportableStderr(["/mnt/srv/proj/x.wav: denied", "/srv/(a+b)[1]/x.wav: denied"].join("\n"), [
-        "/srv/proj",
-        "/srv/(a+b)[1]",
-      ]),
-    ).toEqual(["./x.wav: denied", "(1 line with an absolute path left out)"]);
+  test.each([
+    ["a .. segment", "/srv/proj/../../home/alice/private.wav: denied"],
+    ["a .. segment at the end", "/srv/proj/assets/..: denied"],
+    ["a name with ..", "/srv/proj/a..b/x.wav: denied"],
+    ["a percent sign", "/srv/proj/%2E%2E/%2E%2E/home/alice/private.wav"],
+    ["a tilde", "/srv/proj/~alice/x.wav"],
+    ["a folder inside a longer path", "/mnt/srv/proj/x.wav: denied"],
+    // On POSIX this names "proj\x.wav" next to the project, not a file in it.
+    ...(process.platform === "win32" ? [] : [["a backslash", "/srv/proj\\x.wav: denied"]]),
+    ["a file: URL", "file:///srv/proj/x.wav: denied"],
+  ])("does not replace a folder followed by %s", (_, line) => {
+    expect(reportableStderr(line, { folders: ["/srv/proj"] })).toEqual([
+      "(1 line left out that may hold a path)",
+    ]);
+  });
+
+  test("shows names with combining marks", () => {
+    // "ガ" in NFD, as macOS file names are: カ followed by a combining dakuten.
+    const path = "assets/voice/ガ.wav";
+    expect(reportableStderr(`${path}: Invalid data`, { paths: [path] })).toEqual([
+      `${path}: Invalid data`,
+    ]);
+  });
+
+  test("handles regex characters in a folder", () => {
+    expect(reportableStderr("/srv/(a+b)[1]/x.wav: denied", { folders: ["/srv/(a+b)[1]"] })).toEqual(
+      ["./x.wav: denied"],
+    );
   });
 });

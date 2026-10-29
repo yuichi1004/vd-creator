@@ -204,4 +204,18 @@ describe("renderAudio errors", { timeout: 60_000 }, () => {
     expect(error.message).toBe("cache.json is not a valid cache");
     expect(error.cause).toBeInstanceOf(Error);
   });
+
+  test("reports a deleted working folder when given a relative project folder", async () => {
+    const before = process.cwd();
+    process.chdir(project);
+    try {
+      await rm(project, { recursive: true });
+      const error = await renderAudio(".", { resolvers }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(RenderError);
+      expect((error as Error).message).not.toContain(project);
+      expect((error as RenderError).code).toBe("ENOENT");
+    } finally {
+      process.chdir(before);
+    }
+  });
 });
