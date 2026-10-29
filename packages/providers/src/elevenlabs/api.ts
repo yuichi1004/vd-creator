@@ -79,13 +79,31 @@ export function ttsModelId(req: TtsRequest): string {
 }
 
 /**
- * The text sent for a line. Models that read inline audio tags (eleven_v3) get the stage
- * direction as a leading tag, such as "[whispers] ...". Other models get the text only.
+ * The model ID prefixes of the models that read inline audio tags, such as "[whispers]". This is
+ * the only list of them. Nothing in this repository says which models read tags beyond
+ * eleven_v3, so eleven_v4 is listed on the assumption that newer models keep reading them.
+ * Check the list against the ElevenLabs documentation on audio tags when a model is added.
+ */
+export const ELEVENLABS_AUDIO_TAG_MODELS: readonly string[] = ["eleven_v3", "eleven_v4"];
+
+/** True if the model reads inline audio tags, so a line's direction is sent as a tag. */
+export function readsAudioTags(modelId: string): boolean {
+  return ELEVENLABS_AUDIO_TAG_MODELS.some((prefix) => modelId.startsWith(prefix));
+}
+
+/**
+ * The text sent for a line. Models that read inline audio tags get the stage direction as a
+ * leading tag, such as "[whispers] ...". Other models get the text only.
  */
 export function ttsText(req: TtsRequest): string {
   const direction = req.direction?.trim();
-  if (direction && ttsModelId(req).startsWith("eleven_v3")) return `[${direction}] ${req.text}`;
+  if (direction && readsAudioTags(ttsModelId(req))) return `[${direction}] ${req.text}`;
   return req.text;
+}
+
+/** True if the request has a direction that its model cannot read, so it is not sent. */
+export function dropsDirection(req: TtsRequest): boolean {
+  return Boolean(req.direction?.trim()) && !readsAudioTags(ttsModelId(req));
 }
 
 /**

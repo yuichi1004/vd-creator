@@ -106,19 +106,37 @@ test("TTS sends the text, model, and voice settings to the voice's endpoint", as
   });
 });
 
-test("TTS sends the direction as an audio tag only to eleven_v3", async () => {
+test.each(["eleven_v3", "eleven_v4"])(
+  "TTS sends the direction as an audio tag to %s and counts it",
+  async (modelId) => {
+    const stub = stubFetch(() => audioResponse());
+    const tts = new ElevenLabsTtsProvider(options(stub.fetch));
+    const req = {
+      text: "Hi.",
+      voiceId: "v",
+      direction: "whispers",
+      settings: { modelId },
+      take: 0,
+    };
+    await tts.synthesize(req);
+    expect(bodyOf(stub.calls[0])).toEqual({ text: "[whispers] Hi.", model_id: modelId });
+    expect(tts.estimate(req)).toEqual({ characters: "[whispers] Hi.".length, requests: 1 });
+  },
+);
+
+test("TTS sends the text only to a model that does not read audio tags", async () => {
   const stub = stubFetch(() => audioResponse());
   const tts = new ElevenLabsTtsProvider(options(stub.fetch));
   const req = {
     text: "Hi.",
     voiceId: "v",
     direction: "whispers",
-    settings: { modelId: "eleven_v3" },
+    settings: { modelId: "eleven_multilingual_v2" },
     take: 0,
   };
   await tts.synthesize(req);
-  expect(bodyOf(stub.calls[0])).toEqual({ text: "[whispers] Hi.", model_id: "eleven_v3" });
-  expect(tts.estimate(req)).toEqual({ characters: "[whispers] Hi.".length, requests: 1 });
+  expect(bodyOf(stub.calls[0])).toEqual({ text: "Hi.", model_id: "eleven_multilingual_v2" });
+  expect(tts.estimate(req)).toEqual({ characters: 3, requests: 1 });
   expect(tts.estimate({ text: "Hi.", voiceId: "v", direction: "whispers", take: 0 })).toEqual({
     characters: 3,
     requests: 1,
