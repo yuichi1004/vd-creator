@@ -33,7 +33,7 @@ Non-goals:
 The user directory is the first of these that exists:
 
 1. `VD_USER_DIR`, if set. Any folder, for example a private repository the user keeps elsewhere.
-2. `local/` at the root of this repository. The root `.gitignore` lists `/local/`, so nothing in it is ever committed. A symbolic link named `local` to another folder works the same way.
+2. `local/` at the root of this repository. The root `.gitignore` lists `/local` (without a trailing slash, so that a symbolic link named `local` is ignored too), so nothing in it is ever committed. A symbolic link named `local` to another folder works the same way.
 3. `$XDG_CONFIG_HOME/vd-creator/`, or `~/.config/vd-creator/` when `XDG_CONFIG_HOME` is not set.
 
 Only one directory is used; they are not merged. If none exists, `vd` runs with built-in defaults and no error. `vd config path` prints which directory is used and why.
@@ -96,9 +96,9 @@ Config loading is in `apps/cli/src/config/`. The CLI passes the resolved values 
 
 Both tasks use the default reviewer.
 
-- [ ] Repository side
+- [x] Repository side
   - Target: `.gitignore`, `AGENTS.md`, `README.md`
-  - Change: add `/local/` to `.gitignore`. Add the agent rule above to AGENTS.md, including how to find the user directory by hand before `vd config` exists. Add a short "Your own settings" section to the README that explains the three locations.
+  - Change: add `/local` to `.gitignore`. Add the agent rule above to AGENTS.md, including how to find the user directory by hand before `vd config` exists. Add a short "Your own settings" section to the README that explains the three locations.
   - Constraints: no code. Keep the existing sections. No example paths from a real machine.
   - Ownership: `.gitignore`, `AGENTS.md`, `README.md`.
   - Acceptance: `git check-ignore local/config.yaml` succeeds, and the coordinator checks that the three documents agree on the locations.
