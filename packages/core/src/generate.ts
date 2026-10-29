@@ -3,10 +3,10 @@
 import { type LicenseRegistry, MOCK_PROVIDER_ID } from "@vd-creator/library";
 import type { Cost } from "@vd-creator/providers";
 import type { Scenario } from "@vd-creator/scenario";
-import type { AssetCache } from "./cache.js";
+import { AssetCache } from "./cache.js";
 import { isCanonicalJsonError } from "./canonical.js";
 import { itemLabel, type ScenarioItem, type ScenarioItemKind, scenarioItems } from "./items.js";
-import { playedProviders, recordProvider } from "./library/project.js";
+import { type ProviderUse, playedProviders, recordProvider } from "./library/project.js";
 import {
   type AssetResolver,
   GenerationBudget,
@@ -185,18 +185,58 @@ export async function runGeneration(
   // The run may not visit every item, such as with `only`, so the providers of every asset
   // the scenario plays are credited too, including ones cached before.
   try {
-    for (const use of await playedProviders(scenario, cache)) {
-      await recordProvider(cache.projectDir, use.providerId, use.kind, await licenses());
-    }
+    await recordPlayedProviders(cache.projectDir, scenario, cache, licenses);
   } catch {
     // Left to the license check, which counts an unrecorded provider's terms as unknown.
   }
   return { items: results, failed: results.filter((r) => r.status === "failed").length };
 }
 
+export type RecordCachedProvidersOptions = {
+  scenario: Scenario;
+  /** The project's cache, if already loaded. Defaults to `<projectDir>/cache.json`. */
+  cache?: AssetCache;
+  /** The license of each provider comes from the first of these that has a license registry. */
+  resolvers?: readonly AssetResolver[];
+};
+
 /**
- * The license registry of the first resolver that has one. A registry that cannot be read,
- * such as a broken library, counts as none, so provider records keep their licenses.
+ * Records in credits.json the provider of every generated asset the scenario plays, read from
+ * cache.json, as `runGeneration` does at the end of a run, but without generating anything.
+ * For a run with nothing to generate. Returns the providers recorded, as `playedProviders`
+ * lists them. Throws if cache.json or credits.json cannot be read or written.
+ */
+export async function recordCachedProviders(
+  projectDir: string,
+  options: RecordCachedProvidersOptions,
+): Promise<ProviderUse[]> {
+  const { scenario, resolvers = [] } = options;
+  const cache = options.cache ?? (await AssetCache.load(projectDir));
+  const ctx: ResolveContext = { scenario, cache, purpose: "generate" };
+  let registry: Promise<LicenseRegistry | undefined> | undefined;
+  return recordPlayedProviders(projectDir, scenario, cache, () => {
+    registry ??= licenseRegistry(resolvers, ctx);
+    return registry;
+  });
+}
+
+async function recordPlayedProviders(
+  projectDir: string,
+  scenario: Scenario,
+  cache: AssetCache,
+  licenses: () => Promise<LicenseRegistry | undefined>,
+): Promise<ProviderUse[]> {
+  const uses = await playedProviders(scenario, cache);
+  for (const use of uses) {
+    await recordProvider(projectDir, use.providerId, use.kind, await licenses());
+  }
+  return uses;
+}
+
+/**
+ * The license registry of the first resolver that has one. A resolver whose registry cannot be
+ * read, such as from a broken library, is skipped for the next one. If none has one, provider
+ * records keep their licenses.
  */
 async function licenseRegistry(
   resolvers: readonly AssetResolver[],
@@ -207,7 +247,7 @@ async function licenseRegistry(
       const registry = await resolver.licenseRegistry?.(ctx);
       if (registry) return registry;
     } catch {
-      return undefined;
+      // Try the next resolver.
     }
   }
   return undefined;

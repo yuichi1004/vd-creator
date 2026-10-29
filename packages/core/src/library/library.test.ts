@@ -30,16 +30,19 @@ import { createMockProviders, encodeWav, type ProviderSet } from "@vd-creator/pr
 import { type Scenario, ScenarioDocument } from "@vd-creator/scenario";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AssetCache } from "../cache.js";
-import { planGeneration, runGeneration } from "../generate.js";
+import { planGeneration, recordCachedProviders, runGeneration } from "../generate.js";
 import { scenarioItems } from "../items.js";
-import { defaultResolvers } from "../resolver.js";
+import { type AssetResolver, defaultResolvers } from "../resolver.js";
 import { computeTimeline } from "../timeline.js";
 import { checkLibraryLicenses, STALE_CREDIT_HINT } from "./licenses.js";
 import {
+  BROKEN_CREDITS_HINT,
   copyLibraryEntry,
   LIBRARY_DURATIONS_FILE,
   ProjectCreditsError,
+  playedProviders,
   readCredits,
+  recordProvider,
 } from "./project.js";
 import { libraryResolver, NO_LIBRARY } from "./resolver.js";
 import { libraryStatus, syncLibrary } from "./sync.js";
@@ -535,6 +538,161 @@ describe("provider records", () => {
       status: "failed",
       error: expect.objectContaining({ cause: expect.any(ProjectCreditsError) }),
     });
+  });
+
+  test("a malformed credits.json says to fix or delete it", async () => {
+    await mkdir(project, { recursive: true });
+    for (const [text, start] of [
+      ["{ not json", `${CREDITS_FILE} is not valid JSON; `],
+      ['{ "version": 2 }', `${CREDITS_FILE} is invalid at version: `],
+    ] as const) {
+      await writeFile(join(project, CREDITS_FILE), text);
+      const error = await readCredits(project).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(ProjectCreditsError);
+      const { message } = error as Error;
+      expect(message.startsWith(start)).toBe(true);
+      expect(message.endsWith(`; ${BROKEN_CREDITS_HINT}`)).toBe(true);
+      expect(message).not.toContain(project);
+    }
+  });
+
+  test("a resolver whose license registry throws is skipped for the next one", async () => {
+    await addAcmeLicense();
+    const broken: AssetResolver = {
+      id: "broken",
+      handles: () => false,
+      plan: () => Promise.reject(new Error("unused")),
+      resolve: () => Promise.reject(new Error("unused")),
+      licenseRegistry: () => Promise.reject(new Error("broken registry")),
+    };
+    const cache = await AssetCache.load(project);
+    const resolvers = [
+      broken,
+      libraryResolver(root),
+      ...defaultResolvers(fakePaidProviders("acme")),
+    ];
+    const s = generatedScenario("commercial");
+    expect((await runGeneration(s, cache, resolvers)).failed).toBe(0);
+    expect((await readCredits(project)).providers).toEqual([
+      expect.objectContaining({
+        id: "acme",
+        license: expect.objectContaining({ id: "generated-acme", approvedFor: "commercial" }),
+      }),
+    ]);
+  });
+
+  test("playedProviders skips only unknown speakers and requests that are not plain JSON", async () => {
+    const s = generatedScenario("private");
+    await generateWith(s, fakePaidProviders("acme"));
+    const cache = await AssetCache.load(project);
+    const played = [{ providerId: "acme", kind: "sfx" }];
+
+    const unknownSpeaker = structuredClone(s);
+    const [line] = unknownSpeaker.scenes[0]?.items ?? [];
+    if (line && "line" in line) line.speaker = "nobody";
+    expect(await playedProviders(unknownSpeaker, cache)).toEqual(played);
+
+    const notJson = structuredClone(s);
+    const [speaker] = notJson.speakers;
+    if (speaker) speaker.voice.settings = { speed: Number.POSITIVE_INFINITY };
+    expect(await playedProviders(notJson, cache)).toEqual(played);
+
+    vi.spyOn(cache, "playbackAsset").mockRejectedValueOnce(new Error("disk failure"));
+    await expect(playedProviders(s, cache)).rejects.toThrow("disk failure");
+  });
+
+  test("the license check reports a provider lookup that fails", async () => {
+    const s = generatedScenario("private");
+    await generateWith(s, fakePaidProviders("acme"));
+    vi.spyOn(AssetCache.prototype, "playbackAsset").mockRejectedValueOnce(new Error("disk"));
+    try {
+      // The lookup error is its own issue; the providers recorded in credits.json are still checked.
+      expect((await checkLibraryLicenses(project, s))[0]).toEqual({
+        message: expect.stringMatching(/^Cannot find the providers of the generated assets/),
+        severity: "error",
+      });
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+});
+
+describe("recordCachedProviders", () => {
+  test("records the providers of cached assets without generating anything", async () => {
+    await addAcmeLicense();
+    const s = generatedScenario("commercial");
+    await generateWith(s, fakePaidProviders("acme"));
+    const path = join(project, CREDITS_FILE);
+    // As in a project generated before providers were recorded.
+    await rm(path);
+    const cacheText = await readFile(join(project, "cache.json"), "utf8");
+
+    const calls = vi.fn();
+    const providers = fakePaidProviders("acme");
+    providers.tts.synthesize = (r) => {
+      calls(r);
+      return createMockProviders().tts.synthesize(r);
+    };
+    const recorded = await recordCachedProviders(project, {
+      scenario: s,
+      resolvers: [libraryResolver(root), ...defaultResolvers(providers)],
+    });
+    expect(recorded).toEqual([
+      { providerId: "acme", kind: "sfx" },
+      { providerId: "acme", kind: "tts" },
+    ]);
+    expect(calls).not.toHaveBeenCalled();
+    expect(await readFile(join(project, "cache.json"), "utf8")).toBe(cacheText);
+
+    const text = await readFile(path, "utf8");
+    expect((JSON.parse(text) as Credits).providers).toEqual([
+      {
+        id: "acme",
+        kinds: ["voice", "sfx"],
+        license: expect.objectContaining({ id: "generated-acme", approvedFor: "commercial" }),
+      },
+    ]);
+    expect(await checkLibraryLicenses(project, s)).toEqual([]);
+
+    // Unchanged records are not written again.
+    const mtime = (await stat(path)).mtimeMs;
+    const cache = await AssetCache.load(project);
+    await recordCachedProviders(project, { scenario: s, cache });
+    expect(await readFile(path, "utf8")).toBe(text);
+    expect((await stat(path)).mtimeMs).toBe(mtime);
+  });
+
+  test("keeps credits.json sorted, with library entries kept", async () => {
+    await addDoor();
+    const s = generatedScenario("private");
+    await generateWith(s, fakePaidProviders("zeta"));
+    await copyLibraryEntry(
+      project,
+      await readLibrary(root),
+      findEntry(await readLibrary(root), "door-01", "sfx"),
+    );
+    await recordProvider(project, "alpha", "music");
+    await recordCachedProviders(project, { scenario: s });
+    const credits = await readCredits(project);
+    expect(credits.entries.map((e) => e.id)).toEqual(["door-01"]);
+    expect(credits.providers.map((p) => p.id)).toEqual(["alpha", "zeta"]);
+  });
+
+  test("skips the mock provider and a project with no cache", async () => {
+    const s = generatedScenario("private");
+    expect(await recordCachedProviders(project, { scenario: s })).toEqual([]);
+    await generateWith(s, createMockProviders());
+    expect(await recordCachedProviders(project, { scenario: s })).toEqual([]);
+    await expect(readFile(join(project, CREDITS_FILE))).rejects.toThrow(/ENOENT/);
+  });
+
+  test("throws for a malformed credits.json", async () => {
+    const s = generatedScenario("private");
+    await generateWith(s, fakePaidProviders("acme"));
+    await writeFile(join(project, CREDITS_FILE), "{ not json");
+    await expect(recordCachedProviders(project, { scenario: s })).rejects.toBeInstanceOf(
+      ProjectCreditsError,
+    );
   });
 });
 

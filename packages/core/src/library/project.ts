@@ -25,8 +25,13 @@ import {
 import { readWavInfo } from "@vd-creator/providers";
 import type { Scenario } from "@vd-creator/scenario";
 import { ASSETS_DIR, type AssetCache } from "../cache.js";
-import { ASSET_KEY_PREFIX_LENGTH, type AssetKind } from "../canonical.js";
-import { generationRequest, type ScenarioItem, scenarioItems } from "../items.js";
+import { ASSET_KEY_PREFIX_LENGTH, type AssetKind, isCanonicalJsonError } from "../canonical.js";
+import {
+  generationRequest,
+  type ScenarioItem,
+  scenarioItems,
+  UnknownSpeakerError,
+} from "../items.js";
 
 /** Folder of the library copies, relative to assets/. */
 export const LIBRARY_ASSET_DIR = "library";
@@ -77,15 +82,30 @@ export function findCredit(credits: Credits, ref: LibraryRef): CreditEntry | und
   return credits.entries.find((e) => e.kind === ref.kind && e.id === ref.id);
 }
 
-/** Reads `<projectDir>/credits.json`, or returns empty credits if it does not exist. */
+/** Added to the error for a malformed credits.json. */
+export const BROKEN_CREDITS_HINT = `fix ${CREDITS_FILE}, or delete it and run vd generate to write it again`;
+
+/**
+ * Reads `<projectDir>/credits.json`, or returns empty credits if it does not exist. Throws a
+ * `ProjectCreditsError` if it cannot be read or is malformed.
+ */
 export async function readCredits(projectDir: string): Promise<Credits> {
-  const data = await readJson(join(projectDir, CREDITS_FILE), CREDITS_FILE);
+  const path = join(projectDir, CREDITS_FILE);
+  let data: unknown;
+  try {
+    data = await readJson(path, CREDITS_FILE);
+  } catch (e) {
+    if (!(e instanceof ProjectCreditsError) || !(e.cause instanceof SyntaxError)) throw e;
+    throw new ProjectCreditsError(`${e.message}; ${BROKEN_CREDITS_HINT}`, { cause: e.cause });
+  }
   if (data === undefined) return { version: 1, entries: [], providers: [] };
   const parsed = CreditsSchema.safeParse(data);
   if (!parsed.success) {
     const [issue] = parsed.error.issues;
     const where = issue && issue.path.length > 0 ? ` at ${issue.path.join(".")}` : "";
-    throw new ProjectCreditsError(`${CREDITS_FILE} is invalid${where}: ${issue?.message}`);
+    throw new ProjectCreditsError(
+      `${CREDITS_FILE} is invalid${where}: ${issue?.message}; ${BROKEN_CREDITS_HINT}`,
+    );
   }
   return parsed.data;
 }
@@ -347,7 +367,9 @@ export type ProviderUse = { providerId: string; kind: AssetKind };
 /**
  * The providers of the generated assets that a scenario plays: for each generated item, the
  * asset `planPlayback` would pick, from any provider. The mock provider is left out. Items
- * whose request cannot be built or keyed are skipped. Sorted by provider ID, then kind.
+ * whose request cannot be built, because a line names an unknown speaker, or cannot be keyed,
+ * because it is not plain JSON, are skipped; any other error is thrown. Sorted by provider
+ * ID, then kind.
  */
 export async function playedProviders(
   scenario: Scenario,
@@ -359,8 +381,9 @@ export async function playedProviders(
     try {
       const gen = generationRequest(scenario, item);
       found = gen && (await cache.playbackAsset(gen.kind, gen.request));
-    } catch {
-      continue;
+    } catch (e) {
+      if (e instanceof UnknownSpeakerError || isCanonicalJsonError(e)) continue;
+      throw e;
     }
     if (!found || found.entry.providerId === MOCK_PROVIDER_ID) continue;
     const use = { providerId: found.entry.providerId, kind: found.entry.kind };

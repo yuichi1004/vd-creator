@@ -35,9 +35,17 @@ export type GenerationRequest =
   | { kind: "sfx"; request: SfxRequest }
   | { kind: "music"; request: MusicRequest };
 
+/** Thrown by `generationRequest` when a line names a speaker the scenario does not have. */
+export class UnknownSpeakerError extends Error {
+  constructor(lineId: string) {
+    super(`Line "${lineId}" names an unknown speaker`);
+    this.name = "UnknownSpeakerError";
+  }
+}
+
 /**
  * The provider request that generates an item, or `undefined` if the item is not generated,
- * such as a library sound. Throws if a line names an unknown speaker.
+ * such as a library sound. Throws an `UnknownSpeakerError` if a line names an unknown speaker.
  */
 export function generationRequest(
   scenario: Scenario,
@@ -47,7 +55,7 @@ export function generationRequest(
     case "line": {
       const { item } = target;
       const speaker = scenario.speakers.find((s) => s.id === item.speaker);
-      if (!speaker) throw new Error(`Line "${item.id}" names an unknown speaker`);
+      if (!speaker) throw new UnknownSpeakerError(item.id);
       return {
         kind: "tts",
         request: withoutUndefined({

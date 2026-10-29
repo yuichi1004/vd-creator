@@ -98,11 +98,20 @@ export async function checkLibraryLicenses(
   // before providers were recorded, is checked with unknown terms.
   const providers = [...credits.providers];
   let played: ProviderUse[] = [];
+  let cache: AssetCache | undefined;
   try {
-    played = await playedProviders(scenario, await AssetCache.load(projectDir));
+    cache = await AssetCache.load(projectDir);
   } catch {
     issues.push({
       message: `Cannot read ${CACHE_FILE}, so the providers of generated assets are not checked`,
+      severity: "error",
+    });
+  }
+  try {
+    if (cache) played = await playedProviders(scenario, cache);
+  } catch {
+    issues.push({
+      message: `Cannot find the providers of the generated assets that the scenario plays, so they are not checked`,
       severity: "error",
     });
   }
