@@ -7,13 +7,16 @@ const BITRATES_V2 = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 16
 // Hertz, by sample rate index, for MPEG 1. MPEG 2 halves them and MPEG 2.5 quarters them.
 const SAMPLE_RATES_V1 = [44100, 48000, 32000];
 
+/** The byte range of the MPEG frames in MP3 data, and their duration in seconds. */
+export type Mp3Frames = { start: number; end: number; durationSec: number };
+
 /**
- * Returns the duration in seconds of MP3 data, or throws if the data does not start with
- * MPEG Layer III frames (after an optional ID3v2 tag). Trailing bytes after the last frame,
- * such as an ID3v1 tag, are ignored.
+ * Finds the run of MPEG Layer III frames that starts after an optional ID3v2 tag, or throws if
+ * there is none. Anything after the last whole frame, such as an ID3v1 tag, is outside the range.
  */
-export function mp3DurationSec(data: Uint8Array): number {
-  let offset = id3v2Length(data);
+export function mp3Frames(data: Uint8Array): Mp3Frames {
+  const start = id3v2Length(data);
+  let offset = start;
   let frames = 0;
   let samples = 0;
   let sampleRate = 0;
@@ -28,7 +31,16 @@ export function mp3DurationSec(data: Uint8Array): number {
   if (frames === 0) {
     throw new Error("The audio is not MP3: no MPEG Layer III frame found");
   }
-  return samples / sampleRate;
+  return { start, end: offset, durationSec: samples / sampleRate };
+}
+
+/**
+ * Returns the duration in seconds of MP3 data, or throws if the data does not start with
+ * MPEG Layer III frames (after an optional ID3v2 tag). Trailing bytes after the last frame,
+ * such as an ID3v1 tag, are ignored.
+ */
+export function mp3DurationSec(data: Uint8Array): number {
+  return mp3Frames(data).durationSec;
 }
 
 type FrameHeader = { length: number; samples: number; sampleRate: number };

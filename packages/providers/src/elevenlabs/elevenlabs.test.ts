@@ -16,6 +16,8 @@ const FAKE_KEY = "test-key-not-real";
 const env = { ELEVENLABS_API_KEY: FAKE_KEY };
 /** A random-looking fake key, so that no English word in an error can match a piece of it. */
 const LEAK_KEY = "sk_9f3a7c1e5b2d8046aa71";
+/** Node's own fetch, saved before each test replaces the global with a guard. */
+const nodeFetch = globalThis.fetch;
 
 /** MPEG 1 Layer III, 128 kbps, 44.1 kHz, no padding: 417 bytes and 1152 samples per frame. */
 function fakeMp3(frames: number): Uint8Array {
@@ -663,7 +665,7 @@ test("leak: a key with a lone surrogate is redacted without throwing", async () 
     (set) => set.sfx.generate({ prompt: `say ${key} \uDC00`, take: 0 }),
   );
   expect(expectNoKey(error, key).message).toBe(
-    'ElevenLabs SFX failed for take 0, prompt "say [redacted] \\udc00": HTTP 400, unknown API error (unknown)',
+    'ElevenLabs SFX failed for take 0, prompt "say [redacted] \\udc00": ELEVENLABS_API_KEY must be printable ASCII with no whitespace (malformed_api_key)',
   );
 });
 
@@ -705,4 +707,134 @@ test("leak: the final guard replaces a label that holds a piece of the key", asy
     code: "unknown",
     status: 401,
   });
+});
+
+test("redirect: fetch is told not to follow redirects, and a 3xx is an error", async () => {
+  const stub = stubFetch(
+    () => new Response(null, { status: 302, headers: { location: "http://other.example/x" } }),
+  );
+  const set = createElevenLabsProviders({
+    env: { ELEVENLABS_API_KEY: LEAK_KEY },
+    fetch: stub.fetch,
+  });
+  const error = await sfx(set).catch((e: unknown) => e);
+  expect(stub.calls).toHaveLength(1);
+  expect(stub.calls[0]?.init.redirect).toBe("manual");
+  const e = expectNoKey(error);
+  expect(e.message).toBe(
+    'ElevenLabs SFX failed for take 0, prompt "x": HTTP 302, the API answered with a redirect, which is not followed (unexpected_redirect)',
+  );
+  // A browser-style opaque redirect has status 0 and is rejected the same way.
+  const opaque = { type: "opaqueredirect", status: 0, ok: false } as unknown as Response;
+  const { error: opaqueError } = await failWith(LEAK_KEY, () => opaque, sfx);
+  expect((opaqueError as ElevenLabsError).code).toBe("unexpected_redirect");
+});
+
+test("redirect: Node's fetch never sends the key to the origin a 302 points at", async () => {
+  // An in-memory dispatcher for Node's built-in fetch, so the real redirect logic runs without
+  // any socket. The API host answers 302 to a plain-http origin, which would answer with audio.
+  const seen: Array<{ origin: string; headers: unknown }> = [];
+  const dispatcher = {
+    dispatch(
+      opts: { origin: unknown; headers: unknown },
+      handler: {
+        onConnect?: (abort: () => void) => void;
+        onHeaders?: (status: number, headers: Buffer[], resume: () => void, text: string) => void;
+        onData?: (chunk: Buffer) => void;
+        onComplete?: (trailers: Buffer[]) => void;
+      },
+    ) {
+      const origin = String(opts.origin);
+      seen.push({ origin, headers: opts.headers });
+      const isApi = origin === "https://api.elevenlabs.io";
+      const headers = isApi
+        ? ["location", "http://attacker.example/steal"]
+        : ["content-type", "audio/mpeg"];
+      queueMicrotask(() => {
+        handler.onConnect?.(() => {});
+        handler.onHeaders?.(
+          isApi ? 302 : 200,
+          headers.map((h) => Buffer.from(h)),
+          () => {},
+          "",
+        );
+        if (!isApi) handler.onData?.(Buffer.from(fakeMp3(2)));
+        handler.onComplete?.([]);
+      });
+      return true;
+    },
+    close() {},
+    destroy() {},
+    on() {
+      return this;
+    },
+    off() {
+      return this;
+    },
+  };
+  const fetchWithDispatcher = ((input: string | URL | Request, init?: RequestInit) =>
+    nodeFetch(input, { ...init, dispatcher } as unknown as RequestInit)) as typeof fetch;
+  const set = createElevenLabsProviders({
+    env: { ELEVENLABS_API_KEY: LEAK_KEY },
+    fetch: fetchWithDispatcher,
+  });
+  const error = await sfx(set).catch((e: unknown) => e);
+  expect(seen.map((s) => s.origin)).toEqual(["https://api.elevenlabs.io"]);
+  expect(expectNoKey(error).code).toBe("unexpected_redirect");
+});
+
+test("audio: ID3 tags and trailing bytes are dropped, and the duration is unchanged", async () => {
+  const marker = new TextEncoder().encode(`key=${LEAK_KEY}`);
+  // An ID3v2 tag whose 40-byte body holds the key.
+  const id3v2Body = new Uint8Array(40);
+  id3v2Body.set(marker);
+  const id3v2 = new Uint8Array([0x49, 0x44, 0x33, 4, 0, 0, 0, 0, 0, 40, ...id3v2Body]);
+  // An ID3v1 tag: "TAG" and 125 bytes, with the key in the title.
+  const id3v1 = new Uint8Array(128);
+  id3v1.set([0x54, 0x41, 0x47]);
+  id3v1.set(marker, 3);
+  const frames = fakeMp3(5);
+  for (const parts of [
+    [id3v2, frames],
+    [frames, id3v1],
+    [frames, marker],
+    [id3v2, frames, id3v1, marker],
+  ]) {
+    const body = new Uint8Array(parts.flatMap((p) => [...p]));
+    const stub = stubFetch(() => new Response(body, { status: 200 }));
+    const result = await createElevenLabsProviders({
+      env: { ELEVENLABS_API_KEY: LEAK_KEY },
+      fetch: stub.fetch,
+    }).sfx.generate({ prompt: "x", take: 0 });
+    expect(result.data).toEqual(frames);
+    expect(result.durationSec).toBeCloseTo(mp3DurationSec(body), 9);
+    expect(result.durationSec).toBeCloseTo((5 * 1152) / 44100, 9);
+    expectNoLeak(Buffer.from(result.data).toString("latin1"), LEAK_KEY);
+  }
+});
+
+test("key: an empty, whitespace, or control-character key is rejected before any request", async () => {
+  for (const key of [" ", "\t", "  \n "]) {
+    const { error, calls } = await failWith(key, () => audioResponse(), sfx);
+    expect((error as ElevenLabsError).code, JSON.stringify(key)).toBe("missing_api_key");
+    expect(calls).toHaveLength(0);
+  }
+  for (const key of [
+    " sk_7f3q9z2x8k",
+    "sk_7f3q9z2x8k ",
+    "sk_7f3q9 z2x8k",
+    "sk_7f3q9\tz2x8k",
+    "sk_7f3q9z2x8k\n",
+    "sk_7f3q9\u0000z2x8k",
+    "sk_7f3q9\u007fz2x8k",
+    "sk_7f3q9\u00a0z2x8k",
+    "sk_7f3q9\u2028z2x8k",
+  ]) {
+    const { error, calls } = await failWith(key, () => audioResponse(), sfx);
+    const e = expectNoKey(error, key);
+    expect(e.message, JSON.stringify(key)).toBe(
+      'ElevenLabs SFX failed for take 0, prompt "x": ELEVENLABS_API_KEY must be printable ASCII with no whitespace (malformed_api_key)',
+    );
+    expect(calls).toHaveLength(0);
+  }
 });

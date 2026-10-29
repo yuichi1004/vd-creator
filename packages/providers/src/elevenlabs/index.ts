@@ -32,7 +32,7 @@ import {
   ttsModelId,
   ttsText,
 } from "./api.js";
-import { mp3DurationSec } from "./mp3.js";
+import { type Mp3Frames, mp3Frames } from "./mp3.js";
 import { containsSecret, redactKey, truncate } from "./redact.js";
 
 export const ELEVENLABS_PROVIDER_ID = "elevenlabs";
@@ -47,16 +47,20 @@ export type ElevenLabsOptions = {
 };
 
 const MAX_LABEL_TEXT_LENGTH = 24;
+/** Printable ASCII with no spaces, so whitespace, control, and non-ASCII characters are rejected. */
+const API_KEY_TOKEN = /^[\x21-\x7e]+$/;
 
 export type ElevenLabsKind = "tts" | "sfx" | "music";
 
 /** Failures on our side, with fixed English text. */
 const LOCAL_ERRORS = {
   missing_api_key: `${ELEVENLABS_API_KEY_ENV} is not set`,
+  malformed_api_key: `${ELEVENLABS_API_KEY_ENV} must be printable ASCII with no whitespace`,
   invalid_voice_id: "the voice ID is not a plain token",
   invalid_model_id: "the model ID is not a plain token",
   invalid_base_url: "the base URL must be https with no credentials, query, or fragment",
   network_error: "network error",
+  unexpected_redirect: "the API answered with a redirect, which is not followed",
   body_read_failed: "response body read failed",
   bad_audio: "the response is not MP3 audio",
   internal_error: "internal error",
@@ -117,10 +121,11 @@ class ElevenLabsClient {
     try {
       const env = this.options.env ?? process.env;
       const rawKey = env[ELEVENLABS_API_KEY_ENV];
-      apiKey = typeof rawKey === "string" && rawKey !== "" ? rawKey : undefined;
+      apiKey = typeof rawKey === "string" && rawKey.trim() !== "" ? rawKey : undefined;
       const prepared = prepare(apiKey);
       label = itemLabel(prepared.item, apiKey);
       if (!apiKey) throw fail("missing_api_key");
+      if (!API_KEY_TOKEN.test(apiKey)) throw fail("malformed_api_key");
       if (prepared.invalid) throw fail(prepared.invalid);
       const base = safeBaseUrl(this.options.baseUrl ?? ELEVENLABS_BASE_URL);
       if (!base) throw fail("invalid_base_url");
@@ -139,6 +144,8 @@ class ElevenLabsClient {
             Accept: "audio/mpeg",
           },
           body: JSON.stringify(call.body),
+          // A followed redirect would send the key header to wherever the response points.
+          redirect: "manual",
         });
       } catch {
         // The rejection is untrusted, so none of its properties are read.
@@ -146,6 +153,12 @@ class ElevenLabsClient {
       }
 
       const status = httpStatus(response.status);
+      if (
+        response.type === "opaqueredirect" ||
+        (status !== undefined && status >= 300 && status < 400)
+      ) {
+        throw fail("unexpected_redirect", status);
+      }
       if (!response.ok) {
         let body: string;
         try {
@@ -156,22 +169,23 @@ class ElevenLabsClient {
         throw fail(errorCode(body, status), status);
       }
 
-      let data: Uint8Array;
+      let body: Uint8Array;
       try {
-        data = new Uint8Array(await response.arrayBuffer());
+        body = new Uint8Array(await response.arrayBuffer());
       } catch {
         throw fail("body_read_failed", status);
       }
-      let durationSec: number;
+      // Only the MPEG frames are kept: ID3 tags and trailing bytes could carry any data.
+      let frames: Mp3Frames;
       try {
-        durationSec = mp3DurationSec(data);
+        frames = mp3Frames(body);
       } catch {
         throw fail("bad_audio", status);
       }
       return {
-        data,
+        data: body.slice(frames.start, frames.end),
         format: "mp3",
-        durationSec,
+        durationSec: frames.durationSec,
         meta: { ...prepared.meta, provider: ELEVENLABS_PROVIDER_ID },
       };
     } catch (error) {

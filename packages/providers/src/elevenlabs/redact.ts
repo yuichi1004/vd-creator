@@ -5,6 +5,11 @@
 // thrown error for the key as defense in depth. It also pins the stack when a stack hook, such
 // as Error.prepareStackTrace, puts the key there. Other code running inside the process is out
 // of scope: it can read the environment directly.
+//
+// The key is sent only to the configured https host: redirects are never followed, since fetch
+// would send the key header to the new location. Audio from that host is trusted as audio, but
+// only the MPEG frame range is kept. A leading ID3v2 tag, a trailing ID3v1 tag, and any bytes
+// after the last frame are dropped, so they cannot carry other data into the asset file.
 
 const REDACTED = "[redacted]";
 /** A key substring at least this long counts as a leak. Shorter keys are matched whole. */
