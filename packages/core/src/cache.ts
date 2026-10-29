@@ -6,7 +6,13 @@ import { access, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises
 import { dirname, join } from "node:path";
 import type { AudioFormat } from "@vd-creator/providers";
 import { AssetPathSchema } from "@vd-creator/scenario";
-import { ASSET_DIRS, ASSET_KEY_PREFIX_LENGTH, type AssetKind, canonicalJson } from "./canonical.js";
+import {
+  ASSET_DIRS,
+  ASSET_KEY_PREFIX_LENGTH,
+  type AssetKind,
+  canonicalJson,
+  isCanonicalJsonError,
+} from "./canonical.js";
 
 /** File name of the cache inside a project folder. */
 export const CACHE_FILE = "cache.json";
@@ -48,6 +54,8 @@ export function assetFileFor(kind: AssetKind, key: string, format: AudioFormat):
 export class AssetCache {
   readonly projectDir: string;
   #entries: Map<string, CacheEntry>;
+  /** For `playbackAsset`: built on first use and dropped by `set`. */
+  #playbackIndex: PlaybackIndex | undefined;
   #saving: Promise<void> = Promise.resolve();
 
   constructor(projectDir: string, data?: CacheData) {
@@ -79,6 +87,7 @@ export class AssetCache {
 
   set(key: string, entry: CacheEntry): void {
     this.#entries.set(key, entry);
+    this.#playbackIndex = undefined;
   }
 
   keys(): string[] {
@@ -110,15 +119,43 @@ export class AssetCache {
     request: object,
   ): Promise<{ key: string; entry: CacheEntry } | undefined> {
     const wanted = canonicalJson(request);
-    // An unreadable createdAt counts as the oldest.
-    const time = (entry: CacheEntry) => Date.parse(entry.createdAt) || Number.NEGATIVE_INFINITY;
-    const matches = [...this.#entries]
-      .filter(([, entry]) => entry.kind === kind && canonicalJson(entry.request) === wanted)
-      .sort(([, a], [, b]) => time(b) - time(a));
-    for (const [key, entry] of matches) {
-      if (await this.#fileExists(entry)) return { key, entry };
+    this.#playbackIndex ??= this.#buildPlaybackIndex();
+    for (const found of this.#playbackIndex.get(kind)?.get(wanted) ?? []) {
+      if (await this.#fileExists(found.entry)) return found;
     }
     return undefined;
+  }
+
+  /**
+   * Groups the entries by kind and canonical request text, each group newest first. Each entry
+   * is canonicalized once here, not once per lookup. An entry whose request does not
+   * canonicalize, which only `set` can add, is left out.
+   */
+  #buildPlaybackIndex(): PlaybackIndex {
+    const index: PlaybackIndex = new Map();
+    for (const [key, entry] of this.#entries) {
+      let text: string;
+      try {
+        text = canonicalJson(entry.request);
+      } catch (e) {
+        if (isCanonicalJsonError(e)) continue;
+        throw e;
+      }
+      let byRequest = index.get(entry.kind);
+      if (!byRequest) {
+        byRequest = new Map();
+        index.set(entry.kind, byRequest);
+      }
+      const group = byRequest.get(text);
+      if (group) group.push({ key, entry });
+      else byRequest.set(text, [{ key, entry }]);
+    }
+    // An unreadable createdAt counts as the oldest.
+    const time = (entry: CacheEntry) => Date.parse(entry.createdAt) || Number.NEGATIVE_INFINITY;
+    for (const byRequest of index.values()) {
+      for (const group of byRequest.values()) group.sort((a, b) => time(b.entry) - time(a.entry));
+    }
+    return index;
   }
 
   async #fileExists(entry: CacheEntry): Promise<boolean> {
@@ -166,9 +203,15 @@ async function writeAtomic(target: string, data: Uint8Array | string): Promise<v
   }
 }
 
+type PlaybackIndex = Map<AssetKind, Map<string, { key: string; entry: CacheEntry }[]>>;
+
 const KINDS = new Set<string>(Object.keys(ASSET_DIRS));
 
-/** Checks the shape of cache.json content. Throws a `CacheFormatError` if it is wrong. */
+/**
+ * Checks the shape of cache.json content. Throws a `CacheFormatError` if it is wrong. An entry
+ * whose request is not plain JSON, such as one edited by hand to hold 1e999, is skipped as if
+ * it were missing, so it cannot break lookups for the other entries.
+ */
 export function parseCacheData(data: unknown): CacheData {
   if (!isRecord(data)) throw new CacheFormatError(`${CACHE_FILE} must be a JSON object`);
   if (data.version !== CACHE_VERSION) {
@@ -199,6 +242,7 @@ export function parseCacheData(data: unknown): CacheData {
       throw new CacheFormatError(`${where}: invalid durationSec`);
     }
     if (typeof createdAt !== "string") throw new CacheFormatError(`${where}: invalid createdAt`);
+    if (!canonicalizes(request)) continue;
     entries[key] = {
       kind: kind as AssetKind,
       file,
@@ -209,6 +253,16 @@ export function parseCacheData(data: unknown): CacheData {
     };
   }
   return { version: CACHE_VERSION, entries };
+}
+
+function canonicalizes(value: unknown): boolean {
+  try {
+    canonicalJson(value);
+    return true;
+  } catch (e) {
+    if (isCanonicalJsonError(e)) return false;
+    throw e;
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

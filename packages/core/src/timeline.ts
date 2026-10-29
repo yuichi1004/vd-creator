@@ -27,6 +27,8 @@ export type TimelineItem = {
   missing?: true;
   /** True if no resolver can supply the audio, such as a library sound without a library resolver. */
   unresolved?: true;
+  /** True if the item's request is not plain JSON, so it cannot be generated or looked up. */
+  invalid?: true;
 };
 
 export type ImageSpan = {
@@ -46,6 +48,7 @@ export type BgmSpan = {
   assetDurationSec?: number;
   missing?: true;
   unresolved?: true;
+  invalid?: true;
 };
 
 export type SceneSpan = { sceneId: string; startSec: number; endSec: number };
@@ -62,7 +65,8 @@ export type Timeline = {
  * Lays the scenario out in time. Items play in order, each after the previous one ends plus
  * its `gapBeforeSec`, which may be negative to overlap. An SFX with `overlap: true` plays
  * from its start time but does not move the next item. The order continues across scenes.
- * Items without an asset get an estimated duration and `missing: true`.
+ * Items without an asset get an estimated duration and `missing: true`, and also
+ * `invalid: true` if their request is not plain JSON.
  *
  * Assets come from `planPlayback` with the given resolvers. A generated asset counts whichever
  * provider made it, so a project generated with one provider still plays when the resolvers
@@ -80,12 +84,18 @@ export async function computeTimeline(
   }
   const lookup = (
     id: string,
-  ): { asset?: { file: string; durationSec: number }; unresolved?: true } => {
+  ): { asset?: { file: string; durationSec: number }; unresolved?: true; invalid?: true } => {
     const planned = plans.get(id);
-    if (planned?.status === "cached") {
-      return { asset: { file: planned.file, durationSec: planned.durationSec } };
+    switch (planned?.status) {
+      case "cached":
+        return { asset: { file: planned.file, durationSec: planned.durationSec } };
+      case "to-generate":
+        return {};
+      case "invalid":
+        return { invalid: true };
+      default:
+        return { unresolved: true };
     }
-    return planned?.status === "to-generate" ? {} : { unresolved: true };
   };
 
   const items: TimelineItem[] = [];
@@ -104,7 +114,7 @@ export async function computeTimeline(
       const base = { sceneId: scene.id, index, startSec };
       let entry: TimelineItem;
       if ("line" in item || "sfx" in item) {
-        const { asset, unresolved } = lookup(item.id);
+        const { asset, unresolved, invalid } = lookup(item.id);
         entry = { ...base, id: item.id, kind: "line" in item ? "line" : "sfx", durationSec: 0 };
         if (asset) {
           entry.durationSec = asset.durationSec;
@@ -114,6 +124,7 @@ export async function computeTimeline(
             "line" in item ? estimateLine(item.line) : (item.durationSec ?? ESTIMATED_SFX_SEC);
           entry.missing = true;
           if (unresolved) entry.unresolved = true;
+          if (invalid) entry.invalid = true;
         }
       } else if ("pause" in item) {
         entry = { ...base, id: item.id, kind: "pause", durationSec: item.pause };
@@ -154,7 +165,7 @@ export async function computeTimeline(
     end = Math.max(end, sceneEnd);
 
     if (scene.bgm) {
-      const { asset, unresolved } = lookup(scene.id);
+      const { asset, unresolved, invalid } = lookup(scene.id);
       const bgmSpan: BgmSpan = {
         sceneId: scene.id,
         volume: scene.bgm.volume,
@@ -167,6 +178,7 @@ export async function computeTimeline(
       } else {
         bgmSpan.missing = true;
         if (unresolved) bgmSpan.unresolved = true;
+        if (invalid) bgmSpan.invalid = true;
       }
       bgm.push(bgmSpan);
     }

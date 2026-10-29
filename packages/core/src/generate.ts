@@ -3,6 +3,7 @@
 import type { Cost } from "@vd-creator/providers";
 import type { Scenario } from "@vd-creator/scenario";
 import type { AssetCache } from "./cache.js";
+import { isCanonicalJsonError } from "./canonical.js";
 import { itemLabel, type ScenarioItem, type ScenarioItemKind, scenarioItems } from "./items.js";
 import type { AssetResolver, PlannedAsset, ResolveContext } from "./resolver.js";
 
@@ -50,10 +51,16 @@ export type GenerationOptions = {
 
 const NO_RESOLVER = "No resolver handles this item";
 
+/** The reason of an `invalid` item. It names only the item, never its request. */
+function invalidReason(item: ScenarioItem): string {
+  return `The request of ${itemLabel(item)} is not plain JSON, such as a non-finite number or a cycle in its settings`;
+}
+
 /**
  * Plans the generation of a scenario: which items are cached, which would be generated, and
- * which no resolver can supply, with the total cost. Makes no provider calls.
- * Throws a `GenerationError` if planning an item fails.
+ * which no resolver can supply, with the total cost. Makes no provider calls. An item whose
+ * request is not plain JSON is `invalid`, with no cost, and the other items still plan.
+ * Throws a `GenerationError` if planning an item fails in any other way.
  */
 export async function planGeneration(
   scenario: Scenario,
@@ -203,6 +210,10 @@ async function planItem(
   try {
     return { ...base, resolver: resolver.id, ...(await resolver.plan(item, ctx)) };
   } catch (e) {
+    // A request that cannot be keyed affects only its own item.
+    if (isCanonicalJsonError(e)) {
+      return { ...base, resolver: resolver.id, status: "invalid", reason: invalidReason(item) };
+    }
     throw new GenerationError(item, "plan", e);
   }
 }

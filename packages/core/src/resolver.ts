@@ -24,7 +24,13 @@ export type ResolveContext = {
 export type PlannedAsset =
   | { status: "cached"; key?: string; file: string; durationSec: number }
   | { status: "to-generate"; key?: string; cost: Cost }
-  | { status: "unresolved"; reason: string };
+  | { status: "unresolved"; reason: string }
+  /**
+   * The item's request cannot be keyed, such as a line whose speaker settings hold a
+   * non-finite number or a cycle. The pipeline sets this status, not the resolvers: it is the
+   * outcome when `plan` throws the `canonicalJson` error. The reason names only the item.
+   */
+  | { status: "invalid"; reason: string };
 
 export type ResolvedAsset = {
   key?: string;

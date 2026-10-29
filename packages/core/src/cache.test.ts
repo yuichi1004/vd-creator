@@ -76,6 +76,34 @@ describe("canonicalJson and cacheKey", () => {
     }
   });
 
+  test("holes in sparse arrays are written as null", () => {
+    // biome-ignore lint/suspicious/noSparseArray: the hole is what is tested.
+    expect(canonicalJson([, 1])).toBe("[null,1]");
+    expect(canonicalJson(new Array(2))).toBe("[null,null]");
+  });
+
+  test("cycles, symbol keys, and too deep nesting throw the fixed TypeError", () => {
+    const cyclic: Record<string, unknown> = { a: 1 };
+    cyclic.self = { back: cyclic };
+    const cyclicArray: unknown[] = [1];
+    cyclicArray.push(cyclicArray);
+    let deep: unknown = 1;
+    for (let i = 0; i < 100_000; i++) deep = [deep];
+    for (const value of [cyclic, cyclicArray, { [Symbol("s")]: 1, a: 1 }, deep]) {
+      let error: unknown;
+      try {
+        canonicalJson(value);
+      } catch (e) {
+        error = e;
+      }
+      expect(error).toBeInstanceOf(TypeError);
+      expect((error as Error).message).toBe(CANONICAL_JSON_UNSUPPORTED);
+    }
+    // The same object twice, but not inside itself, is no cycle.
+    const shared = { x: 1 };
+    expect(canonicalJson({ a: shared, b: [shared] })).toBe('{"a":{"x":1},"b":[{"x":1}]}');
+  });
+
   test("anything but plain JSON values throws a TypeError with a fixed message", () => {
     const secret = "secret line text";
     const unsupported: unknown[] = [
@@ -180,6 +208,48 @@ describe("AssetCache", () => {
     }
     await Promise.all(saves);
     expect((await AssetCache.load(dir)).keys()).toHaveLength(5);
+  });
+
+  test("loading skips an entry whose request is not plain JSON, and the others still play", async () => {
+    const otherRequest = { ...request, take: 1 };
+    const otherKey = cacheKey("tts", "mock", otherRequest);
+    const other: CacheEntry = {
+      ...entry,
+      request: otherRequest,
+      file: assetFileFor("tts", otherKey, "wav"),
+    };
+    // 1e999 parses as Infinity, which canonicalJson rejects.
+    const bad = JSON.stringify({ ...entry, request: { ...request, speed: 0 } }).replace(
+      '"speed":0',
+      '"speed":1e999',
+    );
+    await writeFile(
+      join(dir, CACHE_FILE),
+      `{"version":1,"entries":{"${key}":${bad},"${otherKey}":${JSON.stringify(other)}}}`,
+    );
+    const cache = await AssetCache.load(dir);
+    expect(cache.keys()).toEqual([otherKey]);
+    await cache.writeAsset(other.file, new Uint8Array([0]));
+    expect(await cache.playbackAsset("tts", otherRequest)).toEqual({ key: otherKey, entry: other });
+  });
+
+  test("playbackAsset canonicalizes each entry once until the cache changes", async () => {
+    const cache = new AssetCache(dir);
+    let reads = 0;
+    const counted = { ...request };
+    Object.defineProperty(counted, "text", {
+      enumerable: true,
+      get: () => {
+        reads++;
+        return "Hello";
+      },
+    });
+    cache.set(key, { ...entry, request: counted });
+    for (let take = 0; take < 5; take++) await cache.playbackAsset("tts", { ...request, take });
+    expect(reads).toBe(1);
+    cache.set(cacheKey("sfx", "mock", { prompt: "x" }), { ...entry, kind: "sfx" });
+    await cache.playbackAsset("tts", request);
+    expect(reads).toBe(2);
   });
 
   test("rejects invalid JSON, other versions, and bad entries", async () => {
