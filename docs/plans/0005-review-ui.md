@@ -18,7 +18,7 @@ Goals:
 - Pick up edits that an agent makes to `scenario.yaml` while the UI is open.
 - Basic operation on both a PC and a smartphone: play, follow the images, edit a line, change the take, regenerate, and pick a library sound.
 - A library panel: search the shared library (0007), preview a sound, use it for an SFX or BGM, and verify its license record.
-- Opt-in access from a phone on the same network, protected by a token.
+- Access from a phone, with Tailscale as the recommended way, and an opt-in fallback protected by a token.
 - `vd serve`.
 
 Non-goals:
@@ -38,12 +38,25 @@ The server runs with one provider, chosen by `vd serve --provider`, which defaul
 
 ### Access from a phone
 
-By default the server listens on `127.0.0.1`, so only the PC can open it. To use a phone, the user runs `vd serve --host 0.0.0.0` (or a specific LAN address). Then:
+By default the server listens on `127.0.0.1`, so only the PC can open it.
 
-- The server creates a random token at start, and `vd serve` prints the URL with it for each LAN address of the machine.
+**The recommended way to use a phone is [Tailscale](https://tailscale.com/)**, a private network between the user's own devices. It works at home and away, encrypts traffic, and keeps the UI off the local network and the internet. The server stays on `127.0.0.1`, and Tailscale forwards to it:
+
+```sh
+vd serve my-drama                  # Listens on 127.0.0.1:5310
+tailscale serve --bg 5310          # Makes it reachable from the user's tailnet over HTTPS
+```
+
+The phone, signed in to the same tailnet, opens the `https://<machine>.<tailnet>.ts.net/` URL that `tailscale serve` prints. Access is limited by the tailnet's own access controls. `tailscale funnel`, which publishes to the internet, must not be used. vd itself does not call or configure Tailscale; the guide in the docs task below explains these steps.
+
+Other VPNs and SSH tunnels work the same way: anything that forwards to `127.0.0.1:5310` from a trusted network.
+
+**Fallback without a VPN:** `vd serve --host <addr>`, for example `0.0.0.0` or the machine's Tailscale IP, listens on that address directly. Then:
+
+- The server creates a random token at start, and `vd serve` prints the URL with it for each address of the machine.
 - Every request needs the token: from the `?token=` query on the first visit, after which the server sets an `HttpOnly`, `SameSite=Strict` cookie. Requests without it get 401. With the default `127.0.0.1` host no token is needed.
-- The server prints a warning that anyone on the network with the URL can edit the project and, with a paid provider, spend money. A paid provider still needs the confirm step for every generation.
-- Traffic is plain HTTP on the local network. For use outside the home network, the user's own VPN or SSH tunnel is the recommended path. vd adds no TLS.
+- The server prints a warning that anyone on the network with the URL can edit the project and, with a paid provider, spend money, and that Tailscale is the recommended way. A paid provider still needs the confirm step for every generation.
+- Traffic is plain HTTP. vd adds no TLS.
 
 The UI must also work behind a user's own reverse proxy that serves it under a path prefix, such as `http://host/app/vd/`, while the server stays on `127.0.0.1`:
 
@@ -141,11 +154,17 @@ The server task is reviewed with `gpt-6-astra`, because it handles file access, 
   - Ownership: `apps/cli/`.
   - Acceptance: `npm test -w apps/cli` passes, with a test that starts `serve` on a free port against an `init` project and gets `/api/project`, and a test that `--host` output contains a URL with a token. Before the plan is closed, the coordinator checks the UI in a browser at 1280 px and 375 px widths, and the human runs the phone checklist below on a real phone.
 
-Phone checklist for the human: open the printed URL, tap play and hear sound, see the image change, edit a line and save, change a take and regenerate with the mock, pick a library SFX, and lock and unlock the phone.
+- [ ] Phone access guide
+  - Target: `docs/phone-access.md` (new), `README.md`
+  - Change: a guide that recommends Tailscale: install it on the PC and the phone, run `vd serve` and `tailscale serve --bg <port>`, open the printed URL, and stop with `tailscale serve --bg <port> off` (or the command current Tailscale documents). It says not to use `tailscale funnel`, then describes other VPNs or SSH tunnels and the `--host` fallback with its risks. Link it from the README.
+  - Constraints: no code. No addresses, machine names, or tailnet names from a real setup. Check the Tailscale commands against Tailscale's current documentation. Depends on the `vd serve` task.
+  - Ownership: `docs/phone-access.md`, `README.md`.
+  - Acceptance: the coordinator follows the guide once with a real phone, as part of the phone checklist.
+
+Phone checklist for the human: open the URL from the guide on a phone over Tailscale, tap play and hear sound, see the image change, edit a line and save, change a take and regenerate with the mock, pick a library SFX, and lock and unlock the phone.
 
 ## Open questions
 
 - Should the UI show a running total of paid characters used in this session?
-- Is a phone on the same network enough, or is access from outside the home wanted? The default is the same network, with a VPN or SSH tunnel for anything else.
 - Should `vd serve --host` print a QR code of the URL, so that the long token need not be typed? It needs a small dependency such as `qrcode-terminal`. The default is no QR in this plan.
 - Should paid generation be disabled entirely for requests coming through `--host`, leaving phones with the mock only? The default is to allow it with the confirm step.
