@@ -2,9 +2,11 @@
 // is wrapped so a test can swap the folder at a chosen step, and see every path clean touches.
 
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readdirSync,
+  readFileSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -13,6 +15,7 @@ import {
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { type CacheEntry, cacheKey } from "@vd-creator/core";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { EXIT_FAILURE, EXIT_OK, run } from "./index.js";
 
@@ -69,6 +72,7 @@ beforeEach(async () => {
 afterEach(async () => {
   fsHook.before = undefined;
   fsHook.after = undefined;
+  chmodSync(dir, 0o755);
   await rm(tmp, { recursive: true, force: true });
 });
 
@@ -206,6 +210,48 @@ describe("vd clean when a folder is swapped while it runs", () => {
     expect(touched.length).toBeLessThanOrEqual(1);
     expect(outsideFiles()).toHaveLength(20);
   });
+
+  test("an unlink that fails after one removal stops and reports the count", async () => {
+    let unlinks = 0;
+    fsHook.before = (name) => {
+      if (name === "unlink" && ++unlinks === 2) {
+        throw Object.assign(new Error("denied"), { code: "EACCES" });
+      }
+    };
+    const result = await vd("clean", dir);
+    expect(result.code).toBe(EXIT_FAILURE);
+    expect(result.stderr).toBe(
+      `vd clean: stopped cleaning ${dir}: could not remove a file under assets (EACCES); stopped after removing 1 file`,
+    );
+    expect(existsSync(join(voice, "stray1.wav"))).toBe(false);
+    expect(existsSync(join(voice, "stray2.wav"))).toBe(true);
+  });
+
+  // Root can write to a read-only folder, so the save would not fail.
+  test.skipIf(process.getuid?.() === 0)(
+    "a cache.json save that fails after removals reports the count",
+    async () => {
+      const file = join(dir, "cache.json");
+      const cache = JSON.parse(readFileSync(file, "utf8"));
+      const [entry] = Object.values(cache.entries) as CacheEntry[];
+      if (!entry) throw new Error("no cache entry");
+      // An entry for a line that the scenario no longer has.
+      const request = { ...(entry.request as object), text: "Gone." };
+      cache.entries[cacheKey(entry.kind, entry.providerId, request)] = { ...entry, request };
+      writeFileSync(file, JSON.stringify(cache));
+      // Make the project folder read-only once the files are removed, so the save fails.
+      let unlinks = 0;
+      fsHook.after = (name) => {
+        if (name === "unlink" && ++unlinks === 2) chmodSync(dir, 0o555);
+      };
+      const result = await vd("clean", dir);
+      expect(result.code).toBe(EXIT_FAILURE);
+      expect(result.stderr).toBe(
+        `vd clean: stopped cleaning ${dir}: removed 2 files, but could not update cache.json (EACCES)`,
+      );
+      expect(Object.keys(JSON.parse(readFileSync(file, "utf8")).entries)).toHaveLength(2);
+    },
+  );
 
   test("without a swap, clean removes the strays", async () => {
     const result = await vd("clean", dir);

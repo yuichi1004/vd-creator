@@ -37,8 +37,10 @@ export type CleanResult = {
  * With `dryRun`, nothing changes and the result lists what would be removed.
  *
  * The folders are checked and every file to remove is listed before anything is removed, so a
- * refusal never follows a removal. Before each removal, the folders and the file must still be
- * the ones that were listed; otherwise it stops and throws a `CleanInterruptedError`.
+ * refusal never follows a removal: it happens while listing or, in a dry run, in the final
+ * check of the listing. Before each removal, the folders and the file must still be the ones
+ * that were listed. If one changed, an unlink fails, or cache.json cannot be saved, it stops
+ * and throws a `CleanInterruptedError` with the number of files already removed.
  */
 export async function cleanProject(
   scenario: Scenario,
@@ -64,9 +66,10 @@ export async function cleanProject(
     else keys.push(key);
   }
 
-  // Phase 1: check the folders and list every file to remove. Every refusal happens here.
-  // Every fs call on a path under assets/, in both phases, follows a `changedPath` check of the
-  // recorded folders, so the first mismatch stops clean.
+  // Phase 1: check the folders and list every file to remove. Every refusal happens here, or
+  // in the final check of a dry run below, before anything is removed.
+  // Every fs call on a path under assets/, in both phases, follows an `ensureUnchanged` check
+  // of the recorded folders, so the first mismatch stops clean.
   // Residual risk: Node has no openat or unlinkat, so a folder swapped for a symbolic link in
   // the instant between a check and the next fs call can still redirect that one call: a
   // readdir or lstat while listing, or the unlink while removing. At most one fs call can touch
@@ -91,7 +94,8 @@ export async function cleanProject(
   targets.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
   const files = targets.map((target) => target.file);
   if (options.dryRun) {
-    // A dry run checks every listed file and folder as a real run does before each unlink.
+    // A dry run checks every listed file and folder as a real run does before each unlink. It
+    // skips the realpath check, which only guards an unlink, because it removes nothing.
     for (const target of targets) await ensureUnchanged(cache, folders, target.dir, target, refuse);
     for (const dir of folders.kinds.keys()) {
       await ensureUnchanged(cache, folders, dir, undefined, refuse);
@@ -103,20 +107,28 @@ export async function cleanProject(
   // change, including a listed file that is gone, stops the removal at once.
   const project = await realpath(cache.projectDir);
   let removed = 0;
-  const interrupt = () => new CleanInterruptedError(removed);
+  const interrupt = () => new CleanInterruptedError(removed, "changed");
   for (const target of targets) {
     const path = cache.assetPath(target.file);
     await ensureUnchanged(cache, folders, target.dir, undefined, interrupt);
     if (!(await realpath(path).catch(() => path)).startsWith(project + sep)) throw interrupt();
     await ensureUnchanged(cache, folders, target.dir, target, interrupt);
-    await unlink(path);
+    try {
+      await unlink(path);
+    } catch (e) {
+      throw new CleanInterruptedError(removed, "unlink", errorCode(e));
+    }
     removed++;
   }
   if (keys.length > 0) {
     const { entries } = cache.toJSON();
     for (const key of keys) delete entries[key];
-    // AssetCache has no delete, so a cache without those entries replaces cache.json.
-    await new AssetCache(cache.projectDir, { version: CACHE_VERSION, entries }).save();
+    try {
+      // AssetCache has no delete, so a cache without those entries replaces cache.json.
+      await new AssetCache(cache.projectDir, { version: CACHE_VERSION, entries }).save();
+    } catch (e) {
+      throw new CleanInterruptedError(removed, "cache", errorCode(e));
+    }
   }
   return { files, keys };
 }
@@ -147,16 +159,32 @@ export class CleanRefusedError extends Error {
 }
 
 /**
- * Thrown when a folder or file changed between the listing and its removal. Clean stops at
- * once, and `removed` files were already removed. The message is fixed text.
+ * Thrown when the removal phase stops early: a folder or file changed after the listing, an
+ * unlink failed, or cache.json could not be saved. `removed` files were already removed. The
+ * message is fixed text with a file system error code, and never a path.
  */
 export class CleanInterruptedError extends Error {
-  constructor(readonly removed: number) {
+  constructor(
+    readonly removed: number,
+    readonly reason: "changed" | "unlink" | "cache",
+    readonly code = "error",
+  ) {
+    const count = `${removed} ${removed === 1 ? "file" : "files"}`;
     super(
-      `a folder or file under ${ASSETS_DIR} changed while cleaning; stopped after removing ${removed} ${removed === 1 ? "file" : "files"}`,
+      reason === "changed"
+        ? `a folder or file under ${ASSETS_DIR} changed while cleaning; stopped after removing ${count}`
+        : reason === "unlink"
+          ? `could not remove a file under ${ASSETS_DIR} (${code}); stopped after removing ${count}`
+          : `removed ${count}, but could not update cache.json (${code})`,
     );
     this.name = "CleanInterruptedError";
   }
+}
+
+/** The code of a file system error, such as "EACCES", or "error" for anything else. */
+function errorCode(e: unknown): string {
+  const code = (e as NodeJS.ErrnoException | undefined)?.code;
+  return typeof code === "string" && /^E[A-Z]+$/.test(code) ? code : "error";
 }
 
 /**
