@@ -130,7 +130,7 @@ The schema task fixes a file format, so it is reviewed with `gpt-6-astra` (see t
   - Constraints: no new dependencies. Depends on the schema task being merged.
   - Ownership: `apps/cli/`, plus the root `package-lock.json` (npm records workspace `bin` entries there).
   - Acceptance: `npm test -w apps/cli` passes, with tests that run `init` into a temporary folder, `validate` the result (exit 0), and `validate` a broken copy (exit 1, issue printed).
-- [ ] Scenario reference for agents
+- [x] Scenario reference for agents
   - Target: `docs/scenario-format.md`, and a link from `AGENTS.md`.
   - Change: a guide for agents that write scenarios: every field, the ID rules, a full example, and common mistakes. Generated from reading the merged schema, not from this plan alone.
   - Constraints: depends on the schema task being merged. English.
