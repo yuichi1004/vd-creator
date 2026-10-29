@@ -359,6 +359,39 @@ describe("provider licenses (P2-1)", () => {
   });
 });
 
+describe("provider license IDs (P2-A)", () => {
+  const borrowed: CreditProvider = {
+    id: "elevenlabs",
+    kinds: ["voice"],
+    license: { id: "CC0-1.0", terms: CC0 },
+  };
+
+  test("CreditsSchema rejects a provider with another provider's or a CC license", () => {
+    const parsed = CreditsSchema.safeParse({ version: 1, providers: [borrowed] });
+    expect(parsed.success).toBe(false);
+    expect(parsed.error?.issues[0]?.path).toEqual(["providers", 0, "license", "id"]);
+    const other = { ...borrowed, license: { id: "generated-other", terms: CC0 } };
+    expect(CreditsSchema.safeParse({ version: 1, providers: [other] }).success).toBe(false);
+  });
+
+  test("CreditsSchema accepts the provider's own license, none, and any for mock", () => {
+    const own = { ...borrowed, license: { id: "generated-elevenlabs", terms: CC0 } };
+    const none = { id: "elevenlabs", kinds: [] };
+    const mock = { ...borrowed, id: "mock" };
+    expect(CreditsSchema.safeParse({ version: 1, providers: [own, none, mock] }).success).toBe(
+      true,
+    );
+  });
+
+  test("the checker reports the mismatch as an error for every use", () => {
+    expect(allOutcomes({ version: 1, entries: [], providers: [borrowed] })).toEqual([
+      "license-mismatch:error",
+      "license-mismatch:error",
+      "license-mismatch:error",
+    ]);
+  });
+});
+
 describe("URLs (P3)", () => {
   test.each(["example.com/terms", "javascript:alert(1)", "ftp://example.com/x", "https://", "x"])(
     "rejects %j",

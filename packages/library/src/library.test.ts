@@ -1,13 +1,24 @@
-import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { parse, stringify } from "yaml";
+import { testHooks } from "./entries.js";
 import {
   checkLibrary,
   ENTRY_FILE,
   importEntry,
   initLibrary,
+  LIBRARY_FILE,
   LICENSES_FILE,
   LibraryError,
   LicenseRegistrySchema,
@@ -102,8 +113,12 @@ describe("importEntry", () => {
     expect(before?.verified).toBe(false);
 
     const verified = await verifyEntry(root, "door-creak-01", { date: "2026-10-30" });
-    expect(verified.entry.license).toMatchObject({ verified: true, verifiedAt: "2026-10-30" });
-    expect(verified.entry.license.approvedFor).toBeUndefined();
+    expect(verified.verified).toBe(true);
+    expect(verified.entry.entry.license).toMatchObject({
+      verified: true,
+      verifiedAt: "2026-10-30",
+    });
+    expect(verified.entry.entry.license.approvedFor).toBeUndefined();
     const [after] = await searchEntries(root, "door");
     expect(after?.verified).toBe(true);
   });
@@ -476,5 +491,111 @@ describe("symbolic links (P2-5)", () => {
       /evidence is a symbolic link/,
     );
     expect((await readLibrary(root)).entries).toEqual([]);
+  });
+});
+
+// Moves the file or folder at `rel` in the library to `outside` and links it back.
+async function linkOut(rel: string, outside: string) {
+  await rename(join(root, rel), outside);
+  await symlink(outside, join(root, rel));
+}
+
+describe("managed metadata files (P2-B)", () => {
+  test("a linked library.yaml is refused by read, check, and verify", async () => {
+    await importEntry(root, sound, { ...download, evidence });
+    await linkOut(LIBRARY_FILE, join(dir, "library.yaml"));
+    const refused = /Library file library\.yaml: library\.yaml is a symbolic link/;
+    await expect(readLibrary(root)).rejects.toThrow(refused);
+    await expect(checkLibrary(root)).rejects.toThrow(refused);
+    await expect(verifyEntry(root, "door-creak-01")).rejects.toThrow(refused);
+  });
+
+  test("a linked licenses.yaml is reported, and verification refused", async () => {
+    await importEntry(root, sound, { ...download, evidence });
+    await linkOut(LICENSES_FILE, join(dir, "licenses.yaml"));
+    const message =
+      "License registry licenses.yaml: licenses.yaml is a symbolic link; the library does not follow links";
+    const issues = await checkLibrary(root);
+    expect(issues).toContainEqual({ file: LICENSES_FILE, message, severity: "error" });
+    expect(messages(issues)).not.toContain("licenses.yaml not found");
+    await expect(verifyEntry(root, "door-creak-01")).rejects.toThrow(message);
+  });
+
+  test("a linked entry.yaml is reported, and verification refused", async () => {
+    const { entry } = await importEntry(root, sound, { ...download, evidence });
+    const outside = join(dir, "entry.yaml");
+    await linkOut(`${entry.dir}/${ENTRY_FILE}`, outside);
+    const before = await readFile(outside, "utf8");
+    const message =
+      "Entry file sfx/door-creak-01/entry.yaml: sfx/door-creak-01/entry.yaml is a symbolic link; the library does not follow links";
+    expect(await checkLibrary(root)).toEqual([
+      { file: "sfx/door-creak-01/entry.yaml", message, severity: "error" },
+    ]);
+    await expect(verifyEntry(root, "door-creak-01")).rejects.toThrow(message);
+    expect(await readFile(outside, "utf8")).toBe(before);
+  });
+});
+
+describe("folders swapped during a write (P2-C)", () => {
+  afterEach(() => {
+    testHooks.validated = undefined;
+    testHooks.staged = undefined;
+  });
+
+  // Swaps the library folder `rel` for a link to `outside`, keeping the real folder
+  // inside the library under a dot name.
+  async function swap(rel: string, outside: string) {
+    const parts = rel.split("/");
+    const name = parts.pop() ?? "";
+    await rename(join(root, rel), join(root, ...parts, `.${name}-moved`));
+    await symlink(outside, join(root, rel));
+  }
+
+  test.each(["validated", "staged"] as const)(
+    "import writes nothing outside when sfx/ is swapped once %s",
+    async (point) => {
+      const outside = join(dir, "outside");
+      await mkdir(outside);
+      testHooks[point] = () => swap("sfx", outside);
+      await expect(importEntry(root, sound, { ...download, evidence })).rejects.toThrow(
+        "The library folders changed while the entry was being written; nothing was added",
+      );
+      expect(await readdir(outside)).toEqual([]);
+      expect(await readdir(join(root, ".sfx-moved"))).not.toContain("door-creak-01");
+    },
+  );
+
+  test.each(["validated", "staged"] as const)(
+    "verifyEntry changes nothing outside when the entry folder is swapped once %s",
+    async (point) => {
+      const { entry } = await importEntry(root, sound, { ...download, evidence });
+      const outside = join(dir, "outside-entry");
+      await mkdir(outside);
+      const text = await readFile(join(root, entry.dir, ENTRY_FILE), "utf8");
+      await writeFile(join(outside, ENTRY_FILE), text);
+      testHooks[point] = () => swap(entry.dir, outside);
+
+      const result = await verifyEntry(root, "door-creak-01");
+      expect(result).toMatchObject({
+        verified: false,
+        message:
+          "The library folders changed while entry.yaml was being written; the entry was not verified",
+      });
+      expect(result.entry.entry.license.verified).toBe(false);
+      expect(await readdir(outside)).toEqual([ENTRY_FILE]);
+      expect(await readFile(join(outside, ENTRY_FILE), "utf8")).toBe(text);
+      const moved = parse(
+        await readFile(join(root, "sfx", ".door-creak-01-moved", ENTRY_FILE), "utf8"),
+      );
+      expect(moved.license.verified).toBe(false);
+    },
+  );
+
+  test("verifyEntry reports verified when nothing changed", async () => {
+    await importEntry(root, sound, { ...download, evidence });
+    const result = await verifyEntry(root, "door-creak-01");
+    expect(result.verified).toBe(true);
+    expect(result.message).toBeUndefined();
+    expect(await readdir(join(root, "sfx", "door-creak-01"))).toEqual([ENTRY_FILE, "sound.wav"]);
   });
 });

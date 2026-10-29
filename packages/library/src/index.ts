@@ -16,6 +16,7 @@ export {
   type LicenseCheckCode,
   type LicenseCheckIssue,
   MOCK_PROVIDER_ID,
+  providerLicenseId,
   toCreditEntry,
   toCreditProvider,
 } from "./credits.js";
@@ -30,6 +31,7 @@ export {
   type SearchResult,
   searchEntries,
   searchLibrary,
+  type VerifyEntryResult,
   verifyEntry,
 } from "./entries.js";
 export {
@@ -40,7 +42,9 @@ export {
   type LibraryEntry,
   LibraryError,
   type LibraryIssue,
+  pathProblem,
   readLibrary,
+  readManagedText,
 } from "./library.js";
 export {
   ATTRIBUTION_TERMS,

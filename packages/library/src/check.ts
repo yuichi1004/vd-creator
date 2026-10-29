@@ -6,7 +6,7 @@ import {
   type Library,
   type LibraryEntry,
   type LibraryIssue,
-  type ManagedPathState,
+  pathProblem,
   readLibrary,
 } from "./library.js";
 import { ENTRY_FILE, EVIDENCE_PATH, hasText, lookupLicense } from "./schema.js";
@@ -66,20 +66,4 @@ export async function checkEntry(library: Library, item: LibraryEntry): Promise<
     }
   }
   return issues;
-}
-
-/** Message for a managed path that is not a plain file inside the library. */
-export function pathProblem(what: string, rel: string, state: ManagedPathState): string {
-  switch (state.status) {
-    case "missing":
-      return `${what} ${rel} not found`;
-    case "not-file":
-      return `${what} ${rel} is not a regular file`;
-    case "symlink":
-      return `${what} ${rel}: ${state.at} is a symbolic link; the library does not follow links`;
-    case "outside":
-      return `${what} ${rel} resolves outside the library`;
-    default:
-      return `${what} ${rel} is fine`;
-  }
 }

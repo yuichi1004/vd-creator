@@ -58,20 +58,37 @@ export const CreditProviderSchema = z.strictObject({
   license: CreditProviderLicenseSchema.optional(),
 });
 
-/** Schema of a project's credits.json. */
-export const CreditsSchema = z.strictObject({
-  version: z.literal(1),
-  entries: z.array(CreditEntrySchema).default([]),
-  providers: z.array(CreditProviderSchema).default([]),
-});
+/** The mock provider makes test tones, so it is exempt from license checks. */
+export const MOCK_PROVIDER_ID = "mock";
+
+/** The registry license ID of a provider, such as generated-elevenlabs. */
+export function providerLicenseId(providerId: string): string {
+  return `${PROVIDER_LICENSE_PREFIX}${providerId}`;
+}
+
+/**
+ * Schema of a project's credits.json. A provider's license must be its own
+ * `generated-<providerId>` license, so that one provider cannot borrow another license's
+ * terms. The mock provider is exempt.
+ */
+export const CreditsSchema = z
+  .strictObject({
+    version: z.literal(1),
+    entries: z.array(CreditEntrySchema).default([]),
+    providers: z.array(CreditProviderSchema).default([]),
+  })
+  .superRefine((credits, ctx) => {
+    credits.providers.forEach((provider, index) => {
+      const message = providerLicenseMismatch(provider);
+      if (message)
+        ctx.addIssue({ code: "custom", path: ["providers", index, "license", "id"], message });
+    });
+  });
 
 export type CreditEntry = z.infer<typeof CreditEntrySchema>;
 export type CreditProviderLicense = z.infer<typeof CreditProviderLicenseSchema>;
 export type CreditProvider = z.infer<typeof CreditProviderSchema>;
 export type Credits = z.infer<typeof CreditsSchema>;
-
-/** The mock provider makes test tones, so it is exempt from license checks. */
-export const MOCK_PROVIDER_ID = "mock";
 
 /** Builds the credits record of a library entry copied to `file` in a project. */
 export function toCreditEntry(
@@ -99,7 +116,7 @@ export function toCreditProvider(
   licenses: LicenseRegistry,
   options: { name?: string; kinds?: CreditProvider["kinds"] } = {},
 ): CreditProvider {
-  const licenseId = `${PROVIDER_LICENSE_PREFIX}${providerId}`;
+  const licenseId = providerLicenseId(providerId);
   const terms = lookupLicense(licenses, licenseId);
   const license: CreditProviderLicense = { id: licenseId };
   if (terms) {
@@ -116,6 +133,7 @@ export function toCreditProvider(
 }
 
 export type LicenseCheckCode =
+  | "license-mismatch"
   | "unverified"
   | "commercial-forbidden"
   | "commercial-conditional"
@@ -138,6 +156,8 @@ type Outcome = "ok" | "warning" | "error";
 
 // The check table of plan 0007, by situation and publish.use.
 const CHECK_TABLE: Record<LicenseCheckCode, Record<PublishUse, Outcome>> = {
+  // Not in the plan's table: a provider credit with another license is always an error.
+  "license-mismatch": { private: "error", "non-commercial": "error", commercial: "error" },
   unverified: { private: "warning", "non-commercial": "error", commercial: "error" },
   "commercial-forbidden": { private: "ok", "non-commercial": "ok", commercial: "error" },
   // A commercial error here is lifted by approvedFor: commercial, set by a human.
@@ -167,8 +187,14 @@ export function checkProjectLicenses(credits: Credits, use: PublishUse): License
   }
   for (const provider of credits.providers) {
     if (provider.id === MOCK_PROVIDER_ID) continue;
-    const license = provider.license ?? { id: `${PROVIDER_LICENSE_PREFIX}${provider.id}` };
+    const license = provider.license ?? { id: providerLicenseId(provider.id) };
     const report = reporter(issues, use, { target: "provider", id: provider.id });
+    // Checked again here, for credits that did not go through CreditsSchema.
+    const mismatch = providerLicenseMismatch(provider);
+    if (mismatch) {
+      report("license-mismatch", mismatch);
+      continue;
+    }
     checkTerms(report, use, `Provider "${provider.id}"`, license.id, license.terms, {
       attribution: license.attribution,
       // With no terms there is nothing to approve.
@@ -176,6 +202,14 @@ export function checkProjectLicenses(credits: Credits, use: PublishUse): License
     });
   }
   return issues;
+}
+
+// A message if `provider` has a license other than its own generated-<providerId>.
+function providerLicenseMismatch(provider: CreditProvider): string | undefined {
+  if (provider.id === MOCK_PROVIDER_ID || provider.license === undefined) return undefined;
+  const expected = providerLicenseId(provider.id);
+  if (provider.license.id === expected) return undefined;
+  return `Provider "${provider.id}" has license ${provider.license.id}; it must be ${expected}`;
 }
 
 type Report = (code: LicenseCheckCode, message: string, outcome?: Outcome) => void;

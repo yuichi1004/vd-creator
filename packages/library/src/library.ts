@@ -88,9 +88,13 @@ export async function initLibrary(root: string, options: { name?: string } = {})
   return readLibrary(root);
 }
 
-/** Reads the library at `root`. Throws a `LibraryError` if library.yaml is missing or invalid. */
+/**
+ * Reads the library at `root`. Throws a `LibraryError` if library.yaml is missing, invalid,
+ * or not a regular file inside the library. Every managed file is read like sound and
+ * evidence files are checked: no symbolic links, and inside the root.
+ */
 export async function readLibrary(root: string): Promise<Library> {
-  const metaText = await readOptional(join(root, LIBRARY_FILE));
+  const metaText = await readManagedText(root, LIBRARY_FILE, "Library file");
   if (metaText === undefined) {
     throw new LibraryError(`Not a sound library: ${LIBRARY_FILE} not found in ${root}`);
   }
@@ -101,9 +105,11 @@ export async function readLibrary(root: string): Promise<Library> {
   const issues: LibraryIssue[] = [...metaResult.issues];
 
   let licenses: LicenseRegistry = {};
-  const licensesText = await readOptional(join(root, LICENSES_FILE));
+  const licensesText = await readManagedIssue(root, LICENSES_FILE, "License registry", issues);
   if (licensesText === undefined) {
-    issues.push(error(LICENSES_FILE, `${LICENSES_FILE} not found`));
+    if (!issues.some((i) => i.file === LICENSES_FILE)) {
+      issues.push(error(LICENSES_FILE, `${LICENSES_FILE} not found`));
+    }
   } else {
     const result = parseYaml(licensesText, LICENSES_FILE, LicenseRegistrySchema);
     issues.push(...result.issues);
@@ -130,9 +136,10 @@ export async function readLibrary(root: string): Promise<Library> {
     for (const name of dirs) {
       const dir = `${kind}/${name}`;
       const file = `${dir}/${ENTRY_FILE}`;
-      const text = await readOptional(join(root, kind, name, ENTRY_FILE));
+      const before = issues.length;
+      const text = await readManagedIssue(root, file, "Entry file", issues);
       if (text === undefined) {
-        issues.push(error(file, `${ENTRY_FILE} not found`));
+        if (issues.length === before) issues.push(error(file, `${ENTRY_FILE} not found`));
         continue;
       }
       const result = parseYaml(text, file, EntrySchema);
@@ -223,12 +230,51 @@ export function error(file: string, message: string): LibraryIssue {
   return { file, message, severity: "error" };
 }
 
-async function readOptional(path: string): Promise<string | undefined> {
+/**
+ * Reads `rel`, a managed text file, after the same checks as sound and evidence files:
+ * a regular file, no symbolic link at any segment, and inside the root. Returns undefined
+ * if it does not exist, and throws a `LibraryError` for any other problem.
+ */
+export async function readManagedText(
+  root: string,
+  rel: string,
+  what: string,
+): Promise<string | undefined> {
+  const state = await inspectManagedPath(root, rel);
+  if (state.status === "missing") return undefined;
+  if (state.status !== "file") throw new LibraryError(pathProblem(what, rel, state));
+  return readFile(join(root, ...rel.split("/")), "utf8");
+}
+
+// `readManagedText`, with a refusal added to `issues` as an error on `rel`.
+async function readManagedIssue(
+  root: string,
+  rel: string,
+  what: string,
+  issues: LibraryIssue[],
+): Promise<string | undefined> {
   try {
-    return await readFile(path, "utf8");
+    return await readManagedText(root, rel, what);
   } catch (e) {
-    if (isErrno(e, "ENOENT")) return undefined;
-    throw e;
+    if (!(e instanceof LibraryError)) throw e;
+    issues.push(error(rel, e.message));
+    return undefined;
+  }
+}
+
+/** Message for a managed path that is not a plain file inside the library. */
+export function pathProblem(what: string, rel: string, state: ManagedPathState): string {
+  switch (state.status) {
+    case "missing":
+      return `${what} ${rel} not found`;
+    case "not-file":
+      return `${what} ${rel} is not a regular file`;
+    case "symlink":
+      return `${what} ${rel}: ${state.at} is a symbolic link; the library does not follow links`;
+    case "outside":
+      return `${what} ${rel} resolves outside the library`;
+    default:
+      return `${what} ${rel} is fine`;
   }
 }
 
@@ -324,6 +370,39 @@ export async function assertManagedDir(root: string, rel: string): Promise<void>
 async function isInside(root: string, path: string): Promise<boolean> {
   const [realRoot, realPath] = await Promise.all([realpath(root), realpath(path)]);
   return realPath.startsWith(realRoot.endsWith(sep) ? realRoot : realRoot + sep);
+}
+
+/** Device and inode numbers of a path, recorded when it was validated. */
+export type PathIdentity = { path: string; dev: bigint; ino: bigint };
+
+/**
+ * Records the identity of the folders a write goes through, right after they were
+ * validated. `sameIdentity` compares them again just before the write is committed.
+ *
+ * Node has no openat, so a write still goes by path. A folder swapped for a symbolic link
+ * between the last `sameIdentity` and the write itself is not detected; these checks only
+ * narrow that window, and fail closed when they see a change.
+ */
+export async function recordIdentity(paths: string[]): Promise<PathIdentity[]> {
+  const ids: PathIdentity[] = [];
+  for (const path of paths) {
+    const info = await lstat(path, { bigint: true });
+    ids.push({ path, dev: info.dev, ino: info.ino });
+  }
+  return ids;
+}
+
+/** True if every path still has the identity recorded by `recordIdentity`. */
+export async function sameIdentity(ids: PathIdentity[]): Promise<boolean> {
+  for (const id of ids) {
+    try {
+      const info = await lstat(id.path, { bigint: true });
+      if (info.dev !== id.dev || info.ino !== id.ino) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
 }
 
 /** True if something, even a dangling symbolic link, exists at `path`. */
