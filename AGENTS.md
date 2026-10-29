@@ -57,6 +57,7 @@ The sound library is a folder of SFX and BGM with license records, shared by all
 - **Do not guess a license.** The license ID must be in the library's `licenses.yaml`. If the site's license is not there, or you are not sure which one applies, ask the user.
 - **Never mark an entry as verified.** Every import starts unverified, and only a human verifies it. Never run `vd library verify`, never answer its prompt, and never set `verified` or `approvedFor` in an `entry.yaml` or in `licenses.yaml` yourself. An agent terminal is a pseudo-terminal, so the command's terminal check alone cannot stop you. Tell the user which entries need verifying.
 - Run `npx vd library check` after you import, and fix the errors it reports.
+- **Promote and sync with the same care.** `npx vd library promote [dir] --item <item-id> --id <id> --license <license-id>` adds a project's generated SFX or BGM to the library, and the entry starts unverified like an import; tell the user to verify it. When a project's library sounds or their records changed in the library, `npx vd library status [dir]` lists them and `npx vd library sync [dir]` updates the project's copies.
 
 ## Commands
 

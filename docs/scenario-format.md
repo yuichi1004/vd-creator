@@ -219,7 +219,7 @@ Common fields:
 | `id` | ID | no | Give one if the UI or another agent needs to refer to the item. |
 | `gapBeforeSec` | number, -1 or more | no | Default 0. |
 
-Validation checks only the shape of a library reference. Whether the library entry exists, and whether its license fits `publish.use`, is checked against the library ([plan 0007](plans/0007-sound-library.md)). See [Sound library](#sound-library) for how to find entries.
+Validation checks only the shape of a library reference. Whether the library entry exists, and whether its license fits `publish.use`, is checked by the license check of `vd validate` ([plan 0007](plans/0007-sound-library.md)). See [Sound library](#sound-library) for how to find entries.
 
 ## Sound library
 
@@ -252,7 +252,9 @@ A BGM takes `library` in place of `prompt`, and can still set `volume`. An SFX t
 
 An unverified entry is fine for a draft. Under `publish.use` of `non-commercial` or `commercial`, the project license check reports it as an error until a human verifies it.
 
-Not everything is built yet. Until the project integration task of plan 0007 is done, `vd validate` checks only the shape of a library reference and runs no license check, and `vd generate` and `vd render` do not produce sound for library entries. Tell the user which unverified entries the scenario uses. Never verify them yourself. The rules for importing downloaded sounds are in [AGENTS.md](../AGENTS.md#sound-library).
+`vd validate` runs this license check. For an entry that the project has already copied, it checks the record in the project's `credits.json`; for one it has not copied yet, it reads the library. `vd generate` copies each library entry the scenario uses into `assets/library/` and records it in `credits.json`. `vd render` is not built yet. Tell the user which unverified entries the scenario uses. Never verify them yourself. The rules for importing downloaded sounds are in [AGENTS.md](../AGENTS.md#sound-library).
+
+The copies in a project do not follow later changes in the library, such as a replaced sound or a corrected license record. If an entry changed after the project copied it, the project's credits are stale. `npx vd library status [dir]` lists the copies whose sound or records changed in the library, or that the library no longer has, and `npx vd library sync [dir]` updates the copies that changed. Old copies stay in `assets/library/`.
 
 ## IDs
 

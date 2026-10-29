@@ -192,6 +192,30 @@ describe("vd library", () => {
     expect(help.stdout).toMatch(/^Usage: vd library/);
   });
 
+  test("help lists the project commands with their options", async () => {
+    const help = await vd("library", "--help");
+    expect(help.code).toBe(EXIT_OK);
+    expect(help.stdout).toContain(
+      "promote [dir] --item <item-id> --id <id> --license <license-id>",
+    );
+    expect(help.stdout).toMatch(/^ {2}status \[dir\] /m);
+    expect(help.stdout).toMatch(/^ {2}sync \[dir\] /m);
+    const promote = help.stdout.slice(
+      help.stdout.indexOf("\n  promote "),
+      help.stdout.indexOf("\n  status "),
+    );
+    for (const option of ["--title <text>", "--tags <a,b>", "--attribution <text>"]) {
+      expect(promote).toContain(option);
+    }
+  });
+
+  test("serve help no longer says that library sounds are not resolved", async () => {
+    const help = await vd("serve", "--help");
+    expect(help.code).toBe(EXIT_OK);
+    expect(help.stdout).toContain("--library <path>");
+    expect(help.stdout).not.toMatch(/not (resolved|built) yet/);
+  });
+
   describe("with a library", () => {
     beforeEach(async () => {
       await vd("library", "init", lib);
