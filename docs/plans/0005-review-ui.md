@@ -51,16 +51,19 @@ The phone, signed in to the same tailnet, opens the `https://<machine>.<tailnet>
 
 Other VPNs and SSH tunnels work the same way: anything that forwards to `127.0.0.1:5310` from a trusted network.
 
+Without a token, the server accepts a request only if its `Host` header names an allowed host: `localhost`, `127.0.0.1`, `[::1]`, any name ending in `.ts.net`, or a name given with `vd serve --allow-host <name>` (repeatable), each with or without a port. Others get 403 with a fixed body. This stops DNS rebinding, where a hostile web page points its own name at `127.0.0.1` and then calls the API as a same-origin page. A `.ts.net` name resolves only to addresses of its own tailnet, so it cannot be rebound to the user's machine. A user's own reverse proxy either rewrites `Host` to `127.0.0.1:<port>` or is named with `--allow-host`. With `--host`, the token check applies instead. (Added during implementation, after the server review.)
+
 **Fallback without a VPN:** `vd serve --host <addr>`, for example `0.0.0.0` or the machine's Tailscale IP, listens on that address directly. Then:
 
 - The server creates a random token at start, and `vd serve` prints the URL with it for each address of the machine.
-- Every request needs the token: from the `?token=` query on the first visit, after which the server sets an `HttpOnly`, `SameSite=Strict` cookie. Requests without it get 401. With the default `127.0.0.1` host no token is needed.
+- Every request needs the token: from the `?token=` query on the first visit, after which the server sets an `HttpOnly`, `SameSite=Strict` cookie and redirects to the same page without the query, using a relative `Location` so that it works under a path prefix. Every response carries `Referrer-Policy: no-referrer`. Requests without the token get 401. With the default `127.0.0.1` host no token is needed. (The redirect and the header were added during implementation.)
 - The server prints a warning that anyone on the network with the URL can edit the project and, with a paid provider, spend money, and that Tailscale is the recommended way. A paid provider still needs the confirm step for every generation.
 - Traffic is plain HTTP. vd adds no TLS.
 
 The UI must also work behind a user's own reverse proxy that serves it under a path prefix, such as `http://host/app/vd/`, while the server stays on `127.0.0.1`:
 
 - The web build uses relative URLs for its files (Vite `base: "./"`), and the API client builds every URL relative to the page, never from `/`. The server needs no prefix setting.
+- The web build puts its files under `ui/` (Vite `build.assetsDir: "ui"`), so they never collide with the project's `/assets/`. (Added during implementation.)
 - Cookies set by the server have no fixed `Path` that assumes the root.
 - Live updates use server-sent events, which are plain HTTP. If the event stream fails or is buffered by a proxy, the UI falls back to polling `GET /api/project` every 5 seconds. No WebSocket is used.
 
@@ -149,7 +152,7 @@ The server task is reviewed with `gpt-6-astra`, because it handles file access, 
   - Acceptance: `npm run build -w apps/web && npm test -w apps/web` passes, with unit tests for playback scheduling, for the confirm step on paid providers, for the audio unlock state (no `AudioContext` start before a play gesture), for API URLs staying relative under a path prefix, and for the polling fallback when events fail.
 - [ ] `vd serve`
   - Target: `apps/cli/`
-  - Change: `vd serve [dir] [--port 5310] [--provider mock|elevenlabs] [--host <addr>] [--library <path>]` starts the server with the built UI and prints the URL. With `--host`, it prints the LAN URLs with the token and the network warning.
+  - Change: `vd serve [dir] [--port 5310] [--provider mock|elevenlabs] [--host <addr>] [--allow-host <name>]... [--library <path>]` starts the server with the built UI and prints the URL. With `--host`, it prints the LAN URLs with the token and the network warning.
   - Constraints: no new dependencies. Depends on the server and web tasks. Must not run at the same time as another task that owns `apps/cli/`.
   - Ownership: `apps/cli/`.
   - Acceptance: `npm test -w apps/cli` passes, with a test that starts `serve` on a free port against an `init` project and gets `/api/project`, and a test that `--host` output contains a URL with a token. Before the plan is closed, the coordinator checks the UI in a browser at 1280 px and 375 px widths, and the human runs the phone checklist below on a real phone.
