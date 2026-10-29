@@ -1,0 +1,310 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "number",
+      "const": 1
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "publish": {
+      "default": {
+        "use": "private"
+      },
+      "type": "object",
+      "properties": {
+        "use": {
+          "default": "private",
+          "description": "Intended use of the finished drama, checked against sound licenses.",
+          "type": "string",
+          "enum": ["private", "non-commercial", "commercial"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "speakers": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+            "description": "Stable short slug. Keep it unchanged when the text changes."
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "voice": {
+            "type": "object",
+            "properties": {
+              "provider": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Provider ID, such as \"elevenlabs\". \"mock\" is always available."
+              },
+              "voiceId": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Voice ID at the provider."
+              },
+              "settings": {
+                "description": "Provider-specific settings, passed through as is.",
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {}
+              }
+            },
+            "required": ["provider", "voiceId"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["id", "name", "voice"],
+        "additionalProperties": false
+      }
+    },
+    "images": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+            "description": "Stable short slug. Keep it unchanged when the text changes."
+          },
+          "file": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Image file path, relative to assets/."
+          }
+        },
+        "required": ["id", "file"],
+        "additionalProperties": false
+      }
+    },
+    "scenes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+            "description": "Stable short slug. Keep it unchanged when the text changes."
+          },
+          "title": {
+            "type": "string"
+          },
+          "bgm": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "prompt": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Prompt for generated music."
+                  },
+                  "volume": {
+                    "default": 0.3,
+                    "description": "Volume, 0 to 1.",
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                },
+                "required": ["prompt"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "library": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+                    "description": "Entry ID in the shared sound library."
+                  },
+                  "volume": {
+                    "default": 0.3,
+                    "description": "Volume, 0 to 1.",
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  }
+                },
+                "required": ["library"],
+                "additionalProperties": false
+              }
+            ],
+            "description": "Music that loops under the whole scene. Exactly one of prompt or library."
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "line": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Spoken text."
+                    },
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+                      "description": "Stable short slug. Keep it unchanged when the text changes."
+                    },
+                    "speaker": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+                      "description": "Speaker ID."
+                    },
+                    "direction": {
+                      "description": "Delivery hint for TTS and for humans.",
+                      "type": "string"
+                    },
+                    "take": {
+                      "default": 0,
+                      "description": "Selected generation of the item. Regenerating increments it.",
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "gapBeforeSec": {
+                      "default": 0.3,
+                      "description": "Silence before the item in seconds. Negative values overlap the previous item.",
+                      "type": "number",
+                      "minimum": -1
+                    }
+                  },
+                  "required": ["line", "id", "speaker"],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "sfx": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "description": "Prompt for a generated sound."
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "library": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+                              "description": "Entry ID in the shared sound library."
+                            }
+                          },
+                          "required": ["library"],
+                          "additionalProperties": false
+                        }
+                      ],
+                      "description": "A prompt string, or { library: <entry-id> } for a library sound."
+                    },
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+                      "description": "Stable short slug. Keep it unchanged when the text changes."
+                    },
+                    "durationSec": {
+                      "description": "Requested length in seconds.",
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    },
+                    "overlap": {
+                      "default": false,
+                      "description": "Play under the following items instead of before them.",
+                      "type": "boolean"
+                    },
+                    "take": {
+                      "default": 0,
+                      "description": "Selected generation of the item. Regenerating increments it.",
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "gapBeforeSec": {
+                      "default": 0,
+                      "description": "Silence before the item in seconds. Negative values overlap the previous item.",
+                      "type": "number",
+                      "minimum": -1
+                    }
+                  },
+                  "required": ["sfx", "id"],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "pause": {
+                      "type": "number",
+                      "exclusiveMinimum": 0,
+                      "description": "Silence in seconds."
+                    },
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+                      "description": "Stable short slug. Keep it unchanged when the text changes."
+                    },
+                    "gapBeforeSec": {
+                      "default": 0,
+                      "description": "Silence before the item in seconds. Negative values overlap the previous item.",
+                      "type": "number",
+                      "minimum": -1
+                    }
+                  },
+                  "required": ["pause"],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "image": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+                      "description": "Image ID. Shows from here until the next image."
+                    },
+                    "id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+                      "description": "Stable short slug. Keep it unchanged when the text changes."
+                    },
+                    "gapBeforeSec": {
+                      "default": 0,
+                      "description": "Silence before the item in seconds. Negative values overlap the previous item.",
+                      "type": "number",
+                      "minimum": -1
+                    }
+                  },
+                  "required": ["image"],
+                  "additionalProperties": false
+                }
+              ],
+              "description": "Exactly one of line, sfx, pause, or image."
+            }
+          }
+        },
+        "required": ["id", "items"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["version", "title", "scenes"],
+  "additionalProperties": false,
+  "description": "vd-creator scenario, schema version 1.",
+  "title": "vd-creator scenario"
+}

@@ -1,2 +1,55 @@
-// Placeholder. Scenario schema, types, and load/save/validate for scenario.yaml.
-export const moduleName = "@vd-creator/scenario";
+// Scenario schema, types, and load/save/validate for scenario.yaml.
+export {
+  loadScenario,
+  parseScenario,
+  SCENARIO_FILE,
+  ScenarioDocument,
+  saveScenario,
+  updateItem,
+} from "./document.js";
+export { scenarioJsonSchema } from "./json-schema.js";
+export {
+  type Bgm,
+  BgmSchema,
+  DEFAULT_BGM_VOLUME,
+  DEFAULT_LINE_GAP_SEC,
+  IdSchema,
+  type Image,
+  type ImageItem,
+  ImageItemSchema,
+  ImageSchema,
+  ITEM_KINDS,
+  type Item,
+  type ItemKind,
+  type ItemPatch,
+  ItemSchema,
+  type LibraryRef,
+  LibraryRefSchema,
+  type LineItem,
+  LineItemSchema,
+  type PauseItem,
+  PauseItemSchema,
+  PUBLISH_USES,
+  PublishSchema,
+  type PublishUse,
+  type Scenario,
+  type ScenarioInput,
+  ScenarioSchema,
+  type Scene,
+  SceneSchema,
+  type SfxItem,
+  SfxItemSchema,
+  type SfxSource,
+  SfxSourceSchema,
+  type Speaker,
+  SpeakerSchema,
+  type Voice,
+  VoiceSchema,
+} from "./schema.js";
+export {
+  formatPath,
+  type Issue,
+  type IssuePath,
+  type ValidationResult,
+  validateScenarioData,
+} from "./validate.js";

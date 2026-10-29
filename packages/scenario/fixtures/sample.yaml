@@ -1,0 +1,62 @@
+# yaml-language-server: $schema=../schema/scenario.schema.json
+# Sample scenario that uses every item type. Tests check that it is valid.
+version: 1
+title: The Lighthouse Keeper
+publish:
+  use: private # private | non-commercial | commercial
+speakers:
+  - id: mira # Stable ID, referenced by lines
+    name: Mira
+    voice:
+      provider: elevenlabs
+      voiceId: 21m00Tcm4TlvDq8ikWAM
+      settings: { stability: 0.4, similarity: 0.8 } # Provider-specific, optional
+  - id: keeper
+    name: The Keeper
+    voice:
+      provider: mock
+      voiceId: old-man
+images:
+  - id: shore
+    file: images/shore.png # Relative to assets/
+  - id: lamp-room
+    file: images/lamp-room.png
+scenes:
+  - id: s1
+    title: Arrival
+    bgm:
+      prompt: "quiet piano, rain"
+      volume: 0.3
+    items:
+      - image: shore
+      - sfx: "waves on rocks" # A string is a prompt: the sound is generated
+        id: s1-waves
+        durationSec: 4
+        overlap: true
+      - sfx: { library: door-creak-wood-01 } # An entry in the shared library
+        id: s1-door
+      - line: "Is anyone up there?"
+        id: s1-l1
+        speaker: mira
+        direction: "shouting against the wind" # TODO: less shouty?
+      - pause: 1.5
+      - line: "..."
+        id: s1-l2
+        speaker: mira
+        take: 2
+        gapBeforeSec: 0.2
+
+  # The keeper answers.
+  - id: s2
+    title: The Lamp Room
+    bgm:
+      library: ambient-hum-low # BGM from the shared library
+    items:
+      - image: lamp-room
+        id: s2-img
+      - line: "Up here. Mind the stairs."
+        id: s2-l1
+        speaker: keeper
+        gapBeforeSec: -0.2 # Overlaps Mira's last line
+      - pause: 0.8
+        id: s2-p1
