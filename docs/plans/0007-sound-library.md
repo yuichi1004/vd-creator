@@ -210,6 +210,12 @@ The library package task fixes a file format and the license checks, so it is re
   - Ownership: `packages/core/src/library/` (new), the line in `packages/core/src/index.ts` that registers default resolvers, the `dependencies` field of `packages/core/package.json`, the root `package-lock.json`, and `apps/cli/`.
   - Notes from implementation: `defaultResolvers` stays unchanged. The CLI puts the library resolver first when a library root is set, and `vd serve` passes it through the server's `resolvers` option. The duration of each project copy is kept in `assets/library/durations.json`, keyed by SHA-256, because a credits entry has no duration; a missing or broken entry means the copy is made again from the library.
   - Acceptance: `npm test -w packages/core && npm test -w apps/cli` pass, with tests that render-check a project using one verified CC-BY entry (ok, attribution in credits) and one unverified entry under `use: commercial` (error).
+- [ ] Provider records in `credits.json`
+  - Target: `packages/core/`
+  - Change: after generation, `credits.json` records the provider of every generated asset in the project, as this plan's "Projects stay self-contained" section says, so that the provider rows of the project license check apply and `vd render` can list providers in `out/credits.txt`. The project integration task wrote only library entries. Until this is done, a project generated with a paid provider passes `vd validate` under `use: commercial` without the conditional-terms error.
+  - Constraints: no new dependencies. Keep `credits.json` deterministic. Never call a paid API in tests; use a fake provider. Depends on the project integration task.
+  - Ownership: `packages/core/`.
+  - Acceptance: `npm test -w packages/core` passes, with tests that a project generated with a fake paid provider lists it in `credits.json`, and that `checkProjectLicenses` then reports its terms under `use: commercial`.
 - [x] Agent guidance
   - Target: `AGENTS.md`, `docs/scenario-format.md`
   - Change: tell agents to search the library before generating SFX or BGM, how to reference entries, and the rules for importing downloaded sounds (source URL, evidence, never mark as verified). Agents must never run `vd library verify` or answer its prompt: an agent terminal is a pseudo-terminal, so the TTY check alone cannot stop it.
