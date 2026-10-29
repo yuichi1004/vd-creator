@@ -16,7 +16,7 @@ import {
 import { mp3DurationSec, mp3Frames } from "./mp3.js";
 import { containsSecret, redactKey } from "./redact.js";
 
-const FAKE_KEY = "test-key-not-real";
+const FAKE_KEY = "test-key-not-real-0001";
 const env = { ELEVENLABS_API_KEY: FAKE_KEY };
 /** A random-looking fake key, so that no English word in an error can match a piece of it. */
 const LEAK_KEY = "sk_9f3a7c1e5b2d8046aa71";
@@ -171,10 +171,10 @@ test("the API key header comes from the environment", async () => {
 
 test("the registered providers read process.env and the global fetch at call time", async () => {
   const stub = stubFetch(() => audioResponse());
-  vi.stubEnv("ELEVENLABS_API_KEY", "env-key-not-real");
+  vi.stubEnv("ELEVENLABS_API_KEY", "env-key-not-real-0001");
   vi.stubGlobal("fetch", stub.fetch);
   await createProviders("elevenlabs").music.generate({ prompt: "x", durationSec: 10, take: 0 });
-  expect(new Headers(stub.calls[0]?.init.headers).get("xi-api-key")).toBe("env-key-not-real");
+  expect(new Headers(stub.calls[0]?.init.headers).get("xi-api-key")).toBe("env-key-not-real-0001");
 });
 
 test("a missing key fails before any request and names the item", async () => {
@@ -671,7 +671,7 @@ test("leak: a key with a lone surrogate is redacted without throwing", async () 
     (set) => set.sfx.generate({ prompt: `say ${key} \uDC00`, take: 0 }),
   );
   expect(expectNoKey(error, key).message).toBe(
-    'ElevenLabs SFX failed for take 0, prompt "say [redacted] \\udc00": ELEVENLABS_API_KEY must be printable ASCII with no whitespace (malformed_api_key)',
+    'ElevenLabs SFX failed for take 0, prompt "say [redacted] \\udc00": ELEVENLABS_API_KEY must be at least 20 printable ASCII characters with no whitespace (malformed_api_key)',
   );
 });
 
@@ -826,20 +826,20 @@ test("key: an empty, whitespace, or control-character key is rejected before any
     expect(calls).toHaveLength(0);
   }
   for (const key of [
-    " sk_7f3q9z2x8k",
-    "sk_7f3q9z2x8k ",
-    "sk_7f3q9 z2x8k",
-    "sk_7f3q9\tz2x8k",
-    "sk_7f3q9z2x8k\n",
-    "sk_7f3q9\u0000z2x8k",
-    "sk_7f3q9\u007fz2x8k",
-    "sk_7f3q9\u00a0z2x8k",
-    "sk_7f3q9\u2028z2x8k",
+    " sk_7f3q9z2x8k4m6p1r",
+    "sk_7f3q9z2x8k4m6p1r ",
+    "sk_7f3q9 z2x8k4m6p1r",
+    "sk_7f3q9\tz2x8k4m6p1r",
+    "sk_7f3q9z2x8k4m6p1r\n",
+    "sk_7f3q9\u0000z2x8k4m6p1r",
+    "sk_7f3q9\u007fz2x8k4m6p1r",
+    "sk_7f3q9\u00a0z2x8k4m6p1r",
+    "sk_7f3q9\u2028z2x8k4m6p1r",
   ]) {
     const { error, calls } = await failWith(key, () => audioResponse(), sfx);
     const e = expectNoKey(error, key);
     expect(e.message, JSON.stringify(key)).toBe(
-      'ElevenLabs SFX failed for take 0, prompt "x": ELEVENLABS_API_KEY must be printable ASCII with no whitespace (malformed_api_key)',
+      'ElevenLabs SFX failed for take 0, prompt "x": ELEVENLABS_API_KEY must be at least 20 printable ASCII characters with no whitespace (malformed_api_key)',
     );
     expect(calls).toHaveLength(0);
   }
@@ -1154,4 +1154,29 @@ test.skipIf(!hasFfmpeg)("audio: ffmpeg audio passes the key guard with every fra
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("key: a key shorter than 20 characters is rejected before any request", async () => {
+  for (const key of ["a", "sk_9f3a7", "sk_9f3a7c1e5b2d8046"]) {
+    const { error, calls } = await failWith(
+      key,
+      () => audioResponse(),
+      (set) => set.sfx.generate({ prompt: `say ${key} again`, take: 0 }),
+    );
+    expect(error).toBeInstanceOf(ElevenLabsError);
+    // The fixed malformed_api_key error with none of the input, not the internal_error fallback.
+    expect((error as ElevenLabsError).message, `${key.length} characters`).toBe(
+      "ElevenLabs SFX failed: ELEVENLABS_API_KEY must be at least 20 printable ASCII characters with no whitespace (malformed_api_key)",
+    );
+    expect(calls).toHaveLength(0);
+  }
+  const key = "sk_9f3a7c1e5b2d8046a";
+  expect(key).toHaveLength(20);
+  const stub = stubFetch(() => audioResponse());
+  const result = await createElevenLabsProviders({
+    env: { ELEVENLABS_API_KEY: key },
+    fetch: stub.fetch,
+  }).sfx.generate({ prompt: "x", take: 0 });
+  expect(result.data).toEqual(fakeMp3(10));
+  expect(stub.calls).toHaveLength(1);
 });

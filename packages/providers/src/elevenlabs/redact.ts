@@ -15,6 +15,10 @@
 // 8-character piece of it, ignoring ASCII case, the result fails with a fixed error that holds
 // none of the response. An encoding of the key other than raw bytes, such as base64 or a hash, is
 // out of scope: only the trusted host, which already has the key, could produce one.
+//
+// A key shorter than 20 characters is rejected as malformed before any request, and its error
+// holds none of the input. Real keys are much longer, and with that minimum the fixed texts of
+// our errors can never contain the key or the 8-character pieces the guards look for.
 
 const REDACTED = "[redacted]";
 /** A key substring at least this long counts as a leak. Shorter keys are matched whole. */

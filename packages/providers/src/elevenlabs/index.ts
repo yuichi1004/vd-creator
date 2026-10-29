@@ -49,13 +49,15 @@ export type ElevenLabsOptions = {
 const MAX_LABEL_TEXT_LENGTH = 24;
 /** Printable ASCII with no spaces, so whitespace, control, and non-ASCII characters are rejected. */
 const API_KEY_TOKEN = /^[\x21-\x7e]+$/;
+/** Real keys are much longer. A shorter key could match our fixed texts, so it is rejected. */
+const MIN_API_KEY_LENGTH = 20;
 
 export type ElevenLabsKind = "tts" | "sfx" | "music";
 
 /** Failures on our side, with fixed English text. */
 const LOCAL_ERRORS = {
   missing_api_key: `${ELEVENLABS_API_KEY_ENV} is not set`,
-  malformed_api_key: `${ELEVENLABS_API_KEY_ENV} must be printable ASCII with no whitespace`,
+  malformed_api_key: `${ELEVENLABS_API_KEY_ENV} must be at least ${MIN_API_KEY_LENGTH} printable ASCII characters with no whitespace`,
   invalid_voice_id: "the voice ID is not a plain token",
   invalid_model_id: "the model ID is not a plain token",
   invalid_base_url: "the base URL must be https with no credentials, query, or fragment",
@@ -123,6 +125,12 @@ class ElevenLabsClient {
       const env = this.options.env ?? process.env;
       const rawKey = env[ELEVENLABS_API_KEY_ENV];
       apiKey = typeof rawKey === "string" && rawKey.trim() !== "" ? rawKey : undefined;
+      if (apiKey !== undefined && apiKey.length < MIN_API_KEY_LENGTH) {
+        // Too short to guard against, since it could match the fixed texts. The error holds none
+        // of the input, so the key is not used as a guard key.
+        apiKey = undefined;
+        throw fail("malformed_api_key");
+      }
       const prepared = prepare(apiKey);
       label = itemLabel(prepared.item, apiKey);
       if (!apiKey) throw fail("missing_api_key");
