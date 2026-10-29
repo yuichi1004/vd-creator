@@ -72,4 +72,5 @@ These rules apply when your prompt starts with an Orca orchestration preamble th
 - Do not call paid generation APIs such as ElevenLabs. Use the mock providers. Real calls need a decision gate, which only the coordinator opens.
 - Commit with English messages. Never commit secrets, `.env` files, personal paths, or local agent settings.
 - Run the Task's Acceptance checks before reporting `worker_done`. Report `--outcome failed` if they do not pass, and never report failure only in the summary text.
+- Do not start a reviewer of your own. The coordinator assigns review. Self-review only when the Task spec asks for it.
 - After `worker_done`, stop and stay idle.

@@ -101,7 +101,9 @@ Codex usage is limited, so choose the reviewer by what the change touches:
 - **A hard-to-undo change to a public interface or a file format**, such as the scenario schema, gets a Codex reviewer (`gpt-6-astra`).
 - **Everything else** gets a Claude reviewer (`--agent claude`), and so does every fix round, whoever did the first review. A small diff, such as a few lines of documentation, may be reviewed by the coordinator directly.
 
-If Codex is at its usage limit, either wait for the reset or ask the human whether a Claude review is enough for now.
+If Codex is at its usage limit, do not let reviews wait. Use a Claude reviewer for anything that is not security-sensitive, and note it in the task's review notes. For security-sensitive code, ask the human whether to wait for the reset or accept a Claude review.
+
+Implementers do not start reviewers of their own; the coordinator assigns every review. A spec may ask the implementer for a self-review when that is useful, but it never replaces the coordinator's review.
 
 Review fixes are capped at two rounds. After the second round, only a P1 finding or a real secret or token leak blocks the merge. Record the remaining P2 and P3 findings as follow-ups in the task's review notes in the plan.
 
@@ -167,7 +169,9 @@ Before ending the coordinator turn, this must return nothing:
 orca orchestration worker-list --run <run_id> --terminal-state reclaimable --json
 ```
 
-When every task in the plan is checked, set the plan's status to `Done`, update the [plans index](plans/README.md), and commit.
+When every task in the plan is checked, set the plan's status to `Done`, update the [plans index](plans/README.md), and commit. Then ask the human to approve pushing `main`. Push after each plan, not after many, so that each push stays small enough to read and the work is backed up.
+
+Follow-ups in review notes are not tracked anywhere else, so they pile up. When a plan is done, or at the latest after every few plans, collect them into a follow-up plan: schedule each one as a task, or list it as not scheduled with a reason.
 
 ## Decision gates
 
