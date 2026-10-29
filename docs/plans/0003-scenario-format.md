@@ -118,7 +118,7 @@ function updateItem(doc: ScenarioDocument, id: string, patch: ItemPatch): void;
 
 The schema task fixes a file format, so it is reviewed with `gpt-6-astra` (see the review section of the [workflow guide](../development-workflow.md)). The other tasks use the default reviewer. The CLI and the guide can run in parallel once the schema is merged.
 
-- [ ] Scenario schema and I/O
+- [x] Scenario schema and I/O
   - Target: `packages/scenario/`
   - Change: Zod schema and types for version 1 as described in this plan, `parseScenario`, `loadScenario`, `saveScenario`, `updateItem`, cross-reference and ID checks, the generated `schema/scenario.schema.json` with an up-to-date test, and a sample at `packages/scenario/fixtures/sample.yaml` that uses every item type.
   - Constraints: runtime dependencies `zod` and `yaml` only. No dependency on other workspaces. No network access.
