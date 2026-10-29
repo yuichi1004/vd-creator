@@ -1,6 +1,6 @@
 // The Hono app with the HTTP API of docs/plans/0005-review-ui.md, section "HTTP API".
 
-import { join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import {
   ASSETS_DIR,
   AssetCache,
@@ -61,6 +61,7 @@ import type {
 } from "./api.js";
 import { relativeUrlPath, serveFile } from "./files.js";
 import { hostCheck } from "./hosts.js";
+import { type MessageRoot, sanitizeMessage } from "./sanitize.js";
 import { documentData, sceneIndex, updateSceneBgm } from "./scene-edit.js";
 import { tokenCheck } from "./token.js";
 import type { ProjectEvents } from "./watcher.js";
@@ -194,10 +195,19 @@ export function createApp(options: AppOptions): Hono {
     return { ...base, scenario, issues, licenseIssues: await licenseIssues(scenario), timeline };
   }
 
-  // The check of `vd validate`, so the UI shows the same license issues as the CLI.
+  // Paths in license messages are shown relative to these.
+  const messageRoots: MessageRoot[] = [
+    { dir: resolvePath(projectDir), name: "the project folder" },
+    ...(library !== undefined ? [{ dir: resolvePath(library), name: "the library" }] : []),
+  ];
+
+  // The check of `vd validate`, so the UI shows the same license issues as the CLI. Its
+  // messages may quote the files it reads, such as a YAML excerpt or a key of credits.json,
+  // so they are sanitized before they leave the server.
   async function licenseIssues(scenario: Scenario): Promise<ProjectLicenseIssue[]> {
     try {
-      return await checkLibraryLicenses(projectDir, scenario, { library });
+      const issues = await checkLibraryLicenses(projectDir, scenario, { library });
+      return issues.map((i) => ({ ...i, message: sanitizeMessage(i.message, messageRoots) }));
     } catch {
       return [{ message: LICENSES_UNCHECKED, severity: "error" }];
     }

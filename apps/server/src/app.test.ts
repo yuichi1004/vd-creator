@@ -3,9 +3,10 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ASSETS_DIR, type AssetResolver } from "@vd-creator/core";
+import { ASSETS_DIR, type AssetResolver, checkLibraryLicenses } from "@vd-creator/core";
 import {
   CREDITS_FILE,
+  ENTRY_FILE,
   findEntry,
   importEntry,
   initLibrary,
@@ -13,7 +14,7 @@ import {
   toCreditEntry,
 } from "@vd-creator/library";
 import { SCENARIO_FILE } from "@vd-creator/scenario";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type {
   ApiError,
   ApprovedCost,
@@ -26,6 +27,12 @@ import type {
 } from "./api.js";
 import { type AppOptions, createApp, type ServerProviders } from "./app.js";
 import { TOKEN_COOKIE } from "./token.js";
+
+// The real check, which a test can make fail once.
+vi.mock("@vd-creator/core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@vd-creator/core")>();
+  return { ...actual, checkLibraryLicenses: vi.fn(actual.checkLibraryLicenses) };
+});
 
 const SAMPLE = fileURLToPath(
   new URL("../../../packages/scenario/fixtures/sample.yaml", import.meta.url),
@@ -231,6 +238,71 @@ describe("license issues of GET /api/project", () => {
       { message: expect.stringContaining(CREDITS_FILE), severity: "error" },
     ]);
     expect(JSON.stringify(body.licenseIssues)).not.toContain(dir);
+  });
+
+  test("drops a YAML excerpt of a library entry from the message", async () => {
+    await addLibraryEntry();
+    await writeScenario("private");
+    const entryFile = join(library, "sfx", "door-creak-01", ENTRY_FILE);
+    const yaml = await readFile(entryFile, "utf8");
+    // A duplicate key makes the YAML parser quote the lines around it.
+    await writeFile(
+      entryFile,
+      `${yaml}file: /private/sound-library/recording.wav\nfile: ${join(dir, "x.wav")}\n`,
+    );
+
+    const response = await makeApp({ library }).request("/api/project");
+    const text = await response.text();
+    expect(response.status).toBe(200);
+    expect(text).not.toContain("/private/");
+    expect(text).not.toContain(dir);
+    const issue = (JSON.parse(text) as ProjectResponse).licenseIssues.find(
+      (i) => i.target?.type === "entry",
+    );
+    expect(issue).toMatchObject({
+      target: { type: "entry", kind: "sfx", id: "door-creak-01" },
+      severity: "error",
+    });
+    expect(issue?.message).toMatch(/door-creak-01.*Map keys must be unique.*run vd validate/);
+  });
+
+  test("hides absolute paths in a key of credits.json", async () => {
+    const credits = {
+      version: 1,
+      entries: [],
+      providers: [],
+      "/private/credits/secret.wav": 1,
+      [join(project, "assets", "secret.wav")]: 2,
+    };
+    await writeFile(join(project, CREDITS_FILE), JSON.stringify(credits));
+
+    const response = await makeApp().request("/api/project");
+    const text = await response.text();
+    expect(response.status).toBe(200);
+    expect(text).not.toContain("/private/");
+    expect(text).not.toContain(dir);
+    const [issue] = (JSON.parse(text) as ProjectResponse).licenseIssues;
+    expect(issue?.target).toBeUndefined();
+    expect(issue?.message).toContain(CREDITS_FILE);
+    expect(issue?.message).toContain('"<path>"');
+    expect(issue?.message).toContain('"assets/secret.wav"');
+  });
+
+  test("an unexpected failure of the check gives a generic issue", async () => {
+    const failure = new Error(`EACCES: permission denied, open '${join(project, "secret")}'`);
+    vi.mocked(checkLibraryLicenses).mockRejectedValueOnce(failure);
+
+    const response = await makeApp().request("/api/project");
+    const text = await response.text();
+    expect(response.status).toBe(200);
+    expect(text).not.toContain(dir);
+    expect(text).not.toContain("EACCES");
+    expect(text).not.toMatch(/\n\s+at /);
+    const body = JSON.parse(text) as ProjectResponse;
+    expect(body.scenario).toBeDefined();
+    expect(body.licenseIssues).toEqual([
+      { message: "The licenses cannot be checked; run vd validate", severity: "error" },
+    ]);
   });
 
   test("a library entry not copied yet is checked from the library", async () => {
