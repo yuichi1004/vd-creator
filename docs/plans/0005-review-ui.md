@@ -138,7 +138,7 @@ The server task's first review uses `gpt-6-astra`, because the task handles file
   - Constraints: types only in `api.ts`, no runtime code. The viewport meta tag goes into `index.html`. Depends on 0003, 0004, and the 0007 library package being done.
   - Ownership: `apps/server/package.json`, `apps/server/src/api.ts`, `apps/server/src/index.ts`, `apps/web/package.json`, `apps/web/vite.config.ts`, `apps/web/index.html`, `apps/web/tsconfig*.json`, root `package-lock.json`.
   - Acceptance: the full acceptance chain from AGENTS.md passes, and `npm run build -w apps/web` produces `apps/web/dist/index.html`.
-- [ ] Server
+- [x] Server
   - Target: `apps/server/`
   - Change: the Hono app with every endpoint above, the file watcher with events, the token check, and `startServer({ projectDir, provider, port, host, library })`, which returns the URL including the token.
   - Constraints: no dependency changes. Listen on `127.0.0.1` unless `host` is given. Compare tokens in constant time. Mock provider and a temporary library in tests. Can run in parallel with the web task.
