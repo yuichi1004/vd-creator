@@ -7,7 +7,16 @@ export {
   cleanProject,
   GENERATED_ASSET_DIRS,
 } from "./clean.js";
-export { type CliOutput, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, run, USAGE } from "./cli.js";
+export {
+  type CliOutput,
+  EXIT_FAILURE,
+  EXIT_OK,
+  EXIT_USAGE,
+  type RunOptions,
+  run,
+  USAGE,
+} from "./cli.js";
+export * from "./config/index.js";
 export {
   DEFAULT_PROVIDER,
   failureReason,

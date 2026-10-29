@@ -70,6 +70,8 @@ async function vdWatching(onStdout: (line: string) => void, ...args: string[]) {
       stderr: (line) => stderr.push(line),
     },
     {},
+    // The temporary folder stands in for the repository, so no real local/ is read.
+    { repoRoot: tmp },
   );
   return { code, stdout: stdout.join("\n"), stderr: stderr.join("\n") };
 }

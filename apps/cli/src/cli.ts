@@ -15,6 +15,22 @@ import { providerIds } from "@vd-creator/providers";
 import { SCENARIO_FILE, type Scenario } from "@vd-creator/scenario";
 import { CleanInterruptedError, CleanRefusedError, cleanProject } from "./clean.js";
 import {
+  CONFIG_ENV_VARS,
+  ConfigError,
+  ConfigInitError,
+  describeRule,
+  type EffectiveConfig,
+  type Env,
+  findUserDir,
+  initUserDir,
+  LOCAL_DIR,
+  loadConfig,
+  REPO_ROOT,
+  SETTINGS,
+  type SettingName,
+  type SettingSource,
+} from "./config/index.js";
+import {
   DEFAULT_PROVIDER,
   failureReason,
   formatPlan,
@@ -47,6 +63,15 @@ Commands:
   clean [dir]       Remove files in assets/voice, assets/sfx, and assets/bgm, and cache.json
                     entries, that the scenario no longer uses
     --dry-run         List what would be removed and stop
+  config path       Print the user directory and the rule that selected it: VD_USER_DIR,
+                    local/ at the repository root, or vd-creator/ in XDG_CONFIG_HOME
+                    (default: ~/.config). The first that exists is used
+  config init       Create the user directory with config.yaml, AGENTS.md, and docs/.
+                    Keeps files that exist
+    --dir <path>      Where to create it (default: local/ at the repository root). A
+                      folder inside the repository must be local/
+  config show       Print each setting of config.yaml and where its value comes from
+    --json            Print JSON
 
 Options:
   -h, --help        Show this help
@@ -75,22 +100,43 @@ function fsErrorCode(e: unknown): string | undefined {
   return code !== undefined && /^E[A-Z]+$/.test(code) ? code : undefined;
 }
 
+export type RunOptions = {
+  /** The repository whose `local/` is a user directory candidate. Defaults to `REPO_ROOT`. */
+  repoRoot?: string;
+};
+
+/** What a command needs besides its arguments. */
+type Context = {
+  output: CliOutput;
+  debug: (e: unknown) => void;
+  env: Env;
+  repoRoot: string;
+};
+
 /**
  * Runs the vd command with `args` (without the node and script paths). Returns the exit code.
  * Messages name paths as the user typed them. Raw error messages and stacks, which can hold
- * absolute paths, are printed only when `env.VD_DEBUG` is "1".
+ * absolute paths, are printed only when `env.VD_DEBUG` is "1". The user directory and the home
+ * folder are found from `env` only.
  */
 export async function run(
   args: string[],
   output: CliOutput = consoleOutput,
-  env: Record<string, string | undefined> = process.env,
+  env: Env = process.env,
+  options: RunOptions = {},
 ): Promise<number> {
   const debug = (e: unknown) => {
-    if (env.VD_DEBUG === "1")
-      output.stderr(e instanceof Error ? (e.stack ?? e.message) : String(e));
+    if (env.VD_DEBUG !== "1") return;
+    // Print the chain of causes too, such as the file system error behind a clean error.
+    for (let error = e, depth = 0; error !== undefined && depth < 5; depth++) {
+      const text = error instanceof Error ? (error.stack ?? error.message) : String(error);
+      output.stderr(depth === 0 ? text : `Caused by: ${text}`);
+      error = error instanceof Error ? error.cause : undefined;
+    }
   };
+  const context: Context = { output, debug, env, repoRoot: options.repoRoot ?? REPO_ROOT };
   try {
-    return await dispatch(args, output, debug);
+    return await dispatch(args, context);
   } catch (e) {
     const code = errorCode(e);
     output.stderr(`vd: unexpected error${code ? ` (${code})` : ""}`);
@@ -100,11 +146,8 @@ export async function run(
   }
 }
 
-async function dispatch(
-  args: string[],
-  output: CliOutput,
-  debug: (e: unknown) => void,
-): Promise<number> {
+async function dispatch(args: string[], context: Context): Promise<number> {
+  const { output, debug } = context;
   let parsed: ReturnType<typeof parse>;
   try {
     parsed = parse(args);
@@ -132,13 +175,15 @@ async function dispatch(
   }
   switch (command) {
     case "init":
-      return init(rest, output, debug);
+      return init(rest, context);
     case "validate":
       return validate(rest, output, debug);
     case "generate":
       return generate(rest, parsed.values, output, debug);
     case "clean":
       return clean(rest, parsed.values, output, debug);
+    case "config":
+      return config(rest, parsed.values, context);
     case undefined:
       output.stderr(USAGE);
       return EXIT_USAGE;
@@ -159,6 +204,8 @@ function parse(args: string[]) {
       only: { type: "string", multiple: true },
       "dry-run": { type: "boolean" },
       yes: { type: "boolean" },
+      dir: { type: "string" },
+      json: { type: "boolean" },
     },
   });
 }
@@ -171,20 +218,21 @@ const COMMAND_OPTIONS: Partial<Record<string, readonly string[]>> = {
   validate: [],
   generate: ["provider", "only", "dry-run", "yes"],
   clean: ["dry-run"],
+  // Each subcommand checks which of these it takes.
+  config: ["dir", "json"],
 };
 
-async function init(
-  args: string[],
-  output: CliOutput,
-  debug: (e: unknown) => void,
-): Promise<number> {
+async function init(args: string[], context: Context): Promise<number> {
+  const { output, debug } = context;
   const [dir, ...extra] = args;
   if (!dir || extra.length > 0) {
     output.stderr("Usage: vd init <dir>");
     return EXIT_USAGE;
   }
+  const config = await loadUserConfig("init", context);
+  if (typeof config === "number") return config;
   try {
-    await initProject(dir);
+    await initProject(dir, { publishUse: config.settings["init.publishUse"].value });
   } catch (e) {
     if (e instanceof InitError) {
       output.stderr(`vd init: ${e.message}`);
@@ -342,6 +390,7 @@ async function clean(
   } catch (e) {
     if (e instanceof CleanInterruptedError) {
       output.stderr(`vd clean: stopped cleaning ${dir}: ${e.message}`);
+      debug(e);
       return EXIT_FAILURE;
     }
     if (e instanceof CleanRefusedError) {
@@ -394,6 +443,157 @@ async function loadProject(
       if (code === undefined) throw e;
       output.stderr(`vd ${command}: cannot read ${CACHE_FILE} in ${dir}: ${code}`);
     }
+    debug(e);
+    return EXIT_FAILURE;
+  }
+}
+
+const CONFIG_USAGE =
+  "Usage: vd config path | vd config init [--dir <path>] | vd config show [--json]";
+
+async function config(args: string[], options: Options, context: Context): Promise<number> {
+  const { output } = context;
+  const [subcommand, ...extra] = args;
+  const allowed: Partial<Record<string, readonly string[]>> = {
+    path: [],
+    init: ["dir"],
+    show: ["json"],
+  };
+  const accepted =
+    subcommand !== undefined && Object.hasOwn(allowed, subcommand)
+      ? allowed[subcommand]
+      : undefined;
+  const given = Object.keys(options).filter((name) => name !== "help");
+  if (!accepted || extra.length > 0 || given.some((name) => !accepted.includes(name))) {
+    output.stderr(CONFIG_USAGE);
+    return EXIT_USAGE;
+  }
+  switch (subcommand) {
+    case "path":
+      return configPath(context);
+    case "init":
+      return configInit(options.dir, context);
+    default:
+      return configShow(options.json === true, context);
+  }
+}
+
+async function configPath(context: Context): Promise<number> {
+  const { output, env, repoRoot } = context;
+  const search = await findUserDir({ env, repoRoot });
+  if (search.userDirEnvSkipped) {
+    output.stderr("vd config path: VD_USER_DIR is set, but it is not a folder; skipping it");
+  }
+  if (!search.found) {
+    output.stdout("No user directory; vd uses its built-in defaults. Checked, in order:");
+    for (const candidate of search.candidates) output.stdout(`  ${candidate.dir}`);
+    return EXIT_OK;
+  }
+  output.stdout(search.found.dir);
+  output.stdout(`Selected by ${describeRule(search.found.rule)}`);
+  return EXIT_OK;
+}
+
+async function configInit(dir: string | undefined, context: Context): Promise<number> {
+  const { output, debug, env, repoRoot } = context;
+  if (dir === "") {
+    output.stderr(CONFIG_USAGE);
+    return EXIT_USAGE;
+  }
+  let result: Awaited<ReturnType<typeof initUserDir>>;
+  try {
+    result = await initUserDir(dir, { repoRoot });
+  } catch (e) {
+    if (e instanceof ConfigInitError) {
+      output.stderr(`vd config init: ${e.message}`);
+      return EXIT_FAILURE;
+    }
+    const code = fsErrorCode(e);
+    if (code === undefined) throw e;
+    output.stderr(`vd config init: cannot create ${dir ?? `${LOCAL_DIR}/`}: ${code}`);
+    debug(e);
+    return EXIT_FAILURE;
+  }
+  const shown = dir ?? result.dir;
+  output.stdout(
+    result.created.length > 0
+      ? `Created ${result.created.join(", ")} in ${shown}`
+      : `Nothing to create: ${shown} already has config.yaml, AGENTS.md, and docs/`,
+  );
+  const { found } = await findUserDir({ env, repoRoot });
+  if (found && found.dir !== result.dir) {
+    output.stderr(
+      `vd config init: note: vd uses ${found.dir}, selected by ${describeRule(found.rule)}, not this folder`,
+    );
+  }
+  return EXIT_OK;
+}
+
+async function configShow(json: boolean, context: Context): Promise<number> {
+  const { output } = context;
+  const config = await loadUserConfig("config show", context);
+  if (typeof config === "number") return config;
+  if (json) {
+    const settings = Object.fromEntries(
+      SETTINGS.map((name) => {
+        const { value, source } = config.settings[name];
+        const envName = source === "env" ? { env: CONFIG_ENV_VARS[name] } : {};
+        return [name, { value: value ?? null, source, ...envName }];
+      }),
+    );
+    const userDir = config.userDir ?? null;
+    output.stdout(JSON.stringify({ userDir, configFile: config.file ?? null, settings }, null, 2));
+    return EXIT_OK;
+  }
+  output.stdout(
+    config.userDir
+      ? `User directory: ${config.userDir.dir} (${describeRule(config.userDir.rule)})`
+      : "User directory: none",
+  );
+  output.stdout(`Config file: ${config.file ?? "none"}`);
+  for (const name of SETTINGS) {
+    const { value, source } = config.settings[name];
+    output.stdout(`${name}: ${value ?? "(not set)"} (${sourceLabel(name, source)})`);
+  }
+  return EXIT_OK;
+}
+
+function sourceLabel(name: SettingName, source: SettingSource): string {
+  switch (source) {
+    case "flag":
+      return "command-line flag";
+    case "env":
+      return `environment variable ${CONFIG_ENV_VARS[name]}`;
+    case "file":
+      return "config.yaml";
+    case "default":
+      return "default";
+  }
+}
+
+/**
+ * Loads the user config for `command`. Prints the problems and returns an exit code if it
+ * cannot be used.
+ */
+async function loadUserConfig(
+  command: string,
+  context: Context,
+): Promise<EffectiveConfig | number> {
+  const { output, debug, env, repoRoot } = context;
+  try {
+    const config = await loadConfig({ env, repoRoot });
+    if (config.userDirEnvSkipped) {
+      output.stderr(`vd ${command}: VD_USER_DIR is set, but it is not a folder; skipping it`);
+    }
+    return config;
+  } catch (e) {
+    if (e instanceof ConfigError) {
+      for (const problem of e.problems) output.stderr(`vd ${command}: ${e.file}: ${problem}`);
+      return EXIT_FAILURE;
+    }
+    const code = fsErrorCode(e);
+    if (code === undefined) throw e;
+    output.stderr(`vd ${command}: cannot read the user config: ${code}`);
     debug(e);
     return EXIT_FAILURE;
   }

@@ -76,13 +76,19 @@ afterEach(async () => {
   await rm(tmp, { recursive: true, force: true });
 });
 
-async function vd(...args: string[]) {
+function vd(...args: string[]) {
+  return vdWith({}, ...args);
+}
+
+async function vdWith(env: Record<string, string>, ...args: string[]) {
   const stdout: string[] = [];
   const stderr: string[] = [];
   const code = await run(
     args,
     { stdout: (line) => stdout.push(line), stderr: (line) => stderr.push(line) },
-    {},
+    env,
+    // The temporary folder stands in for the repository, so no real local/ is read.
+    { repoRoot: tmp },
   );
   return { code, stdout: stdout.join("\n"), stderr: stderr.join("\n") };
 }
@@ -223,6 +229,30 @@ describe("vd clean when a folder is swapped while it runs", () => {
     expect(result.stderr).toBe(
       `vd clean: stopped cleaning ${dir}: could not remove a file under assets (EACCES); stopped after removing 1 file`,
     );
+    expect(existsSync(join(voice, "stray1.wav"))).toBe(false);
+    expect(existsSync(join(voice, "stray2.wav"))).toBe(true);
+  });
+
+  test("a check that cannot look at a folder after one removal stops and reports the count", async () => {
+    let unlinked = false;
+    let failed = false;
+    fsHook.after = (name) => {
+      if (name === "unlink") unlinked = true;
+    };
+    fsHook.before = (name) => {
+      if (unlinked && !failed && name === "lstat") {
+        failed = true;
+        throw Object.assign(new Error("denied by the test"), { code: "EACCES" });
+      }
+    };
+    const result = await vdWith({ VD_DEBUG: "1" }, "clean", dir);
+    expect(result.code).toBe(EXIT_FAILURE);
+    const [message, ...details] = result.stderr.split("\n");
+    expect(message).toBe(
+      `vd clean: stopped cleaning ${dir}: could not check a folder or file under assets (EACCES); stopped after removing 1 file`,
+    );
+    // With VD_DEBUG=1, the underlying error is printed as the cause.
+    expect(details.join("\n")).toContain("Caused by: Error: denied by the test");
     expect(existsSync(join(voice, "stray1.wav"))).toBe(false);
     expect(existsSync(join(voice, "stray2.wav"))).toBe(true);
   });

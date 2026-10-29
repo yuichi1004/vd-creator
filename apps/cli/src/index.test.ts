@@ -49,6 +49,8 @@ async function vdWith(env: Record<string, string>, output: Partial<CliOutput>, a
       stderr: output.stderr ?? ((line) => stderr.push(line)),
     },
     env,
+    // The temporary folder stands in for the repository, so no real local/ is read.
+    { repoRoot: tmp },
   );
   return { code, stdout: stdout.join("\n"), stderr: stderr.join("\n") };
 }
@@ -318,13 +320,22 @@ describe("bin/vd.js", () => {
     expect(debug.stderr).toContain(tmp);
   });
 
-  test.skipIf(!built)("passes exit codes through", async () => {
+  // Three node processes can take more than the default 5 s while other test files run.
+  test.skipIf(!built)("passes exit codes through", { timeout: 30_000 }, async () => {
     const dir = join(tmp, "proc");
-    expect(spawnSync(bin, ["init", dir], { encoding: "utf8" }).status).toBe(EXIT_OK);
-    expect(spawnSync(bin, ["validate", dir], { encoding: "utf8" }).status).toBe(EXIT_OK);
+    // An empty user directory comes first, and there is no HOME, so neither the real home
+    // folder nor a local/ in this repository is read.
+    const userDir = join(tmp, "user");
+    await mkdir(userDir);
+    const options = {
+      encoding: "utf8",
+      env: { PATH: process.env.PATH, VD_USER_DIR: userDir },
+    } as const;
+    expect(spawnSync(bin, ["init", dir], options).status).toBe(EXIT_OK);
+    expect(spawnSync(bin, ["validate", dir], options).status).toBe(EXIT_OK);
     const file = join(dir, "scenario.yaml");
     await writeFile(file, (await readFile(file, "utf8")).replace("version: 1", "version: 9"));
-    const broken = spawnSync(bin, ["validate", dir], { encoding: "utf8" });
+    const broken = spawnSync(bin, ["validate", dir], options);
     expect(broken.status).toBe(EXIT_FAILURE);
     expect(broken.stderr).toMatch(/^version: /);
   });

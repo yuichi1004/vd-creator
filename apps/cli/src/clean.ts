@@ -39,7 +39,8 @@ export type CleanResult = {
  * The folders are checked and every file to remove is listed before anything is removed, so a
  * refusal never follows a removal: it happens while listing or, in a dry run, in the final
  * check of the listing. Before each removal, the folders and the file must still be the ones
- * that were listed. If one changed, an unlink fails, or cache.json cannot be saved, it stops
+ * that were listed. If one changed or cannot be checked, an unlink fails, or cache.json cannot
+ * be saved, it stops
  * and throws a `CleanInterruptedError` with the number of files already removed.
  */
 export async function cleanProject(
@@ -108,15 +109,24 @@ export async function cleanProject(
   const project = await realpath(cache.projectDir);
   let removed = 0;
   const interrupt = () => new CleanInterruptedError(removed, "changed");
+  // A check that cannot look at a folder or file, such as on EACCES, also stops the removal.
+  const check = async (target: Target, file: Target | undefined) => {
+    try {
+      await ensureUnchanged(cache, folders, target.dir, file, interrupt);
+    } catch (e) {
+      if (e instanceof CleanInterruptedError) throw e;
+      throw new CleanInterruptedError(removed, "check", errorCode(e), e);
+    }
+  };
   for (const target of targets) {
     const path = cache.assetPath(target.file);
-    await ensureUnchanged(cache, folders, target.dir, undefined, interrupt);
+    await check(target, undefined);
     if (!(await realpath(path).catch(() => path)).startsWith(project + sep)) throw interrupt();
-    await ensureUnchanged(cache, folders, target.dir, target, interrupt);
+    await check(target, target);
     try {
       await unlink(path);
     } catch (e) {
-      throw new CleanInterruptedError(removed, "unlink", errorCode(e));
+      throw new CleanInterruptedError(removed, "unlink", errorCode(e), e);
     }
     removed++;
   }
@@ -127,7 +137,7 @@ export async function cleanProject(
       // AssetCache has no delete, so a cache without those entries replaces cache.json.
       await new AssetCache(cache.projectDir, { version: CACHE_VERSION, entries }).save();
     } catch (e) {
-      throw new CleanInterruptedError(removed, "cache", errorCode(e));
+      throw new CleanInterruptedError(removed, "cache", errorCode(e), e);
     }
   }
   return { files, keys };
@@ -159,23 +169,28 @@ export class CleanRefusedError extends Error {
 }
 
 /**
- * Thrown when the removal phase stops early: a folder or file changed after the listing, an
- * unlink failed, or cache.json could not be saved. `removed` files were already removed. The
- * message is fixed text with a file system error code, and never a path.
+ * Thrown when the removal phase stops early: a folder or file changed after the listing, could
+ * not be checked, an unlink failed, or cache.json could not be saved. `removed` files were
+ * already removed. The message is fixed text with a file system error code, and never a path.
+ * The underlying error, which can hold a path, is the `cause`.
  */
 export class CleanInterruptedError extends Error {
   constructor(
     readonly removed: number,
-    readonly reason: "changed" | "unlink" | "cache",
+    readonly reason: "changed" | "check" | "unlink" | "cache",
     readonly code = "error",
+    cause?: unknown,
   ) {
     const count = `${removed} ${removed === 1 ? "file" : "files"}`;
     super(
       reason === "changed"
         ? `a folder or file under ${ASSETS_DIR} changed while cleaning; stopped after removing ${count}`
-        : reason === "unlink"
-          ? `could not remove a file under ${ASSETS_DIR} (${code}); stopped after removing ${count}`
-          : `removed ${count}, but could not update cache.json (${code})`,
+        : reason === "check"
+          ? `could not check a folder or file under ${ASSETS_DIR} (${code}); stopped after removing ${count}`
+          : reason === "unlink"
+            ? `could not remove a file under ${ASSETS_DIR} (${code}); stopped after removing ${count}`
+            : `removed ${count}, but could not update cache.json (${code})`,
+      cause === undefined ? undefined : { cause },
     );
     this.name = "CleanInterruptedError";
   }

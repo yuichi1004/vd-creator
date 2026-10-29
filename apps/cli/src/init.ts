@@ -2,7 +2,7 @@ import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { SCENARIO_FILE } from "@vd-creator/scenario";
+import { type PublishUse, SCENARIO_FILE } from "@vd-creator/scenario";
 
 /** Folders that `vd init` creates next to scenario.yaml. */
 export const PROJECT_FOLDERS = ["assets", "out"] as const;
@@ -23,14 +23,18 @@ export function scenarioSchemaPath(): string {
  * The scenario.yaml that `vd init` writes: a minimal valid scenario derived from the
  * `@vd-creator/scenario` sample. `schemaRef` goes into the yaml-language-server comment.
  */
-export function scenarioTemplate(title: string, schemaRef: string): string {
+export function scenarioTemplate(
+  title: string,
+  schemaRef: string,
+  publishUse: PublishUse = "private",
+): string {
   // A JSON string is a valid YAML double-quoted scalar, so any title is safe.
   return `# yaml-language-server: $schema=${schemaRef}
 # Created by vd init. Run "vd validate" after editing.
 version: 1
 title: ${JSON.stringify(title)}
 publish:
-  use: private # private | non-commercial | commercial
+  use: ${publishUse} # private | non-commercial | commercial
 speakers:
   - id: narrator # Stable ID, referenced by lines
     name: Narrator
@@ -70,8 +74,12 @@ export const ALLOWED_EXISTING_ENTRIES: readonly string[] = [
  * Creates a project folder with a minimal valid scenario.yaml and empty `assets/` and
  * `out/` folders. Throws an `InitError`, naming `dir` as given, if the folder has entries
  * other than `ALLOWED_EXISTING_ENTRIES`. Returns the absolute path of the project folder.
+ * `publishUse` is the scenario's publish.use, private by default.
  */
-export async function initProject(dir: string): Promise<string> {
+export async function initProject(
+  dir: string,
+  options: { publishUse?: PublishUse } = {},
+): Promise<string> {
   const projectDir = resolve(dir);
   const existing = await readdir(projectDir).catch((e: NodeJS.ErrnoException) => {
     if (e.code === "ENOENT") return [];
@@ -83,7 +91,11 @@ export async function initProject(dir: string): Promise<string> {
   }
 
   // Build the content first, so a failure here does not leave an empty folder behind.
-  const text = scenarioTemplate(basename(projectDir) || "Untitled", scenarioSchemaUrl());
+  const text = scenarioTemplate(
+    basename(projectDir) || "Untitled",
+    scenarioSchemaUrl(),
+    options.publishUse,
+  );
   await mkdir(projectDir, { recursive: true });
   // "wx" fails instead of overwriting if another process created the file meanwhile.
   await writeFile(join(projectDir, SCENARIO_FILE), text, {
