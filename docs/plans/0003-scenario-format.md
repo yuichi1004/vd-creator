@@ -1,6 +1,6 @@
 # 0003: Scenario format
 
-- Status: In progress
+- Status: Done
 - Date: 2026-10-29
 
 ## Background
@@ -136,12 +136,13 @@ The schema task fixes a file format, so it is reviewed with `gpt-6-astra` (see t
   - Constraints: depends on the schema task being merged. English.
   - Ownership: `docs/scenario-format.md`, `AGENTS.md`.
   - Acceptance: the example in the guide passes `vd validate`.
-- [ ] Plain JSON values in `voice.settings`
+- [x] Plain JSON values in `voice.settings`
   - Target: `packages/scenario/`, `docs/scenario-format.md`
   - Change: `voice.settings` keeps taking any keys, but its values, at any depth, must be plain JSON: strings, finite numbers, `true`, `false`, `null`, lists, and mappings with string keys. Anything else, such as `.inf`, `.nan`, a date, binary data, or an alias that refers to itself, is a validation error at the path of that value. Before this, such values passed `vd validate` and the item was only marked `invalid` at generation (see [0004](0004-providers-and-generation.md)), which stays as a safety net. Update the generated JSON Schema and the guide.
   - Constraints: no new dependencies. Valid scenarios, including the sample, stay valid. Do not change `packages/core`.
   - Ownership: `packages/scenario/`, `docs/scenario-format.md`.
   - Acceptance: `npm test -w packages/scenario` passes, with a failing case for each kind of value above, at the top level and nested in a list and a mapping, and the guide's example still passes `vd validate`.
+  - Review notes: the check lives in `validate.ts`, not the Zod schema, so that an alias to `settings` itself is caught. With approval, two test files outside the ownership were adjusted: the `scenarioWith()` helper in `packages/core`, and `apps/cli/src/generate.test.ts`, whose invalid-item fixture used `.inf`. Low-severity follow-ups: the walk is recursive, which only matters for data deeper than YAML can parse; it copies the path at every node; the guide's note on dates should say that a plain date is a string under YAML 1.2.
 
 ## Open questions
 
