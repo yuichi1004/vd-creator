@@ -66,6 +66,27 @@ Run these from the repository root:
 
 To run `build`, `typecheck`, or `test` for a single workspace, add `-w` with the workspace path or package name, for example `npm test -w packages/core` or `npm run build -w @vd-creator/core`.
 
+## Your own settings
+
+Settings and notes that belong to you and your machine go in a user directory, never in the repository. vd-creator uses the first of these that exists:
+
+1. The folder named by the `VD_USER_DIR` environment variable, if it is set. It can be any folder, such as a private repository you keep elsewhere.
+2. `local/` at the root of this repository. It is gitignored, so nothing in it is committed. A symbolic link named `local` to another folder works the same way.
+3. `$XDG_CONFIG_HOME/vd-creator/`, or `~/.config/vd-creator/` when `XDG_CONFIG_HOME` is not set.
+
+Only one directory is used; they are not merged. If none exists, vd-creator uses its built-in defaults. `local/` suits a single clone. The other two suit several clones or worktrees, which do not share `local/` unless it is a link.
+
+The user directory can hold these files, all optional:
+
+```
+<user dir>/
+├── config.yaml   # Defaults for vd commands
+├── AGENTS.md     # Your own instructions for coding agents
+└── docs/         # Free-form private notes for you and your agents
+```
+
+Agents read your `AGENTS.md` and `docs/` before working, as described in [`AGENTS.md`](AGENTS.md). Your `AGENTS.md` can add rules but cannot loosen the repository's rules. Don't put API keys in the user directory; keep them in environment variables or a gitignored `.env`. See [plan 0008](docs/plans/0008-user-config.md) for the design.
+
 ## Development
 
 vd-creator is developed by coding agents coordinated with Orca orchestration. See [`docs/development-workflow.md`](docs/development-workflow.md).

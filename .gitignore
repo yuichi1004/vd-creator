@@ -8,6 +8,9 @@ CLAUDE.local.md
 .vscode/
 .idea/
 *.local
+# User directory: config.yaml, AGENTS.md, and docs/ of the user (plan 0008).
+# No trailing slash, so that a symbolic link named local is ignored too.
+/local
 
 # Dependencies and build output
 node_modules/

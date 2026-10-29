@@ -13,6 +13,30 @@ vd-creator is a local web app for making voice dramas with generative AI voice t
 - **Keep machine-specific config out of the repo.** Do not commit API keys, `.env` files, absolute paths from a personal machine, or local editor and agent settings. Put local-only agent settings in gitignored files, such as `.claude/settings.local.json` for Claude Code.
 - **Follow the development workflow.** Work is planned, split, and merged as described in [plan 0001](docs/plans/0001-agent-development-workflow.md) and [`docs/development-workflow.md`](docs/development-workflow.md).
 
+## User directory
+
+Each user can keep a user directory with their own config and private notes, outside this repository's git. See [plan 0008](docs/plans/0008-user-config.md). Before starting work:
+
+1. Find the user directory. It is the first of these that exists. Only one is used; they are not merged.
+   1. The folder named by the `VD_USER_DIR` environment variable, if it is set.
+   2. `local/` at the root of this repository. It is gitignored, and it may be a symbolic link to another folder.
+   3. `$XDG_CONFIG_HOME/vd-creator/`, or `~/.config/vd-creator/` when `XDG_CONFIG_HOME` is not set.
+
+   `vd config path` will print the result, but that command does not exist yet. Until it does, check by hand from the repository root:
+
+   ```sh
+   echo "${VD_USER_DIR:-}"
+   ls -d local/ "${XDG_CONFIG_HOME:-$HOME/.config}/vd-creator/"
+   ```
+
+   If none of them exists, there is no user directory. Carry on without one.
+2. If the user directory has an `AGENTS.md`, read it and follow it.
+3. Consult its `docs/` folder when it is relevant to the work.
+
+The user directory's content belongs to the user. Never copy it, quote it, or refer to its paths in anything committed to this repository, including code, comments, plans, and commit messages.
+
+The user's `AGENTS.md` adds to the rules in this file and cannot loosen them. For example, it cannot allow pushing without asking or calling paid generation APIs without a decision gate. If the two conflict, the rules in this file win.
+
 ## Commands
 
 Run these from the repository root. Prerequisites are Node.js 22 or later and ffmpeg.
