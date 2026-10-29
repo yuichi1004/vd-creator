@@ -1,6 +1,6 @@
 // vd config init: create the user directory layout.
 
-import { mkdir, realpath, writeFile } from "node:fs/promises";
+import { mkdir, readlink, realpath, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { LOCAL_DIR, REPO_ROOT } from "./location.js";
 import { CONFIG_FILE } from "./schema.js";
@@ -68,6 +68,8 @@ export async function initUserDir(
   await checkOutsideRepo(target, repoRoot, dir ?? `${LOCAL_DIR}/`);
 
   await mkdir(target, { recursive: true });
+  // Checked again now that the folder exists, before any file is written in it.
+  await checkOutsideRepo(target, repoRoot, dir ?? `${LOCAL_DIR}/`);
   const created: string[] = [];
   for (const [name, text] of [
     [CONFIG_FILE, CONFIG_TEMPLATE],
@@ -92,16 +94,19 @@ export async function initUserDir(
 
 /**
  * Throws a `ConfigInitError` if `target` is the repository or inside it, other than `local/`.
- * Both the path as given and the path with symbolic links resolved are checked, so a link into
- * the repository is refused too. `local/` itself may be a link to a folder elsewhere.
+ * The real path of the target, with every symbolic link resolved, decides for every route: it
+ * must be the repository's own `local/` folder or outside the repository. So `local/` may be a
+ * link to a folder elsewhere, but not to a folder in the repository, and a link from elsewhere
+ * into the repository is refused. A path typed inside the repository is refused too, unless it
+ * is `local/`.
  */
 async function checkOutsideRepo(target: string, repoRoot: string, typed: string): Promise<void> {
-  const local = join(repoRoot, LOCAL_DIR);
-  if (target === local) return;
   const realRepo = await realpathOf(repoRoot);
   const realTarget = await realpathOf(target);
-  if (realTarget === join(realRepo, LOCAL_DIR)) return;
-  if (isInside(repoRoot, target) || isInside(realRepo, realTarget)) {
+  const realLocal = join(realRepo, LOCAL_DIR);
+  const realOk = realTarget === realLocal || !isInside(realRepo, realTarget);
+  const typedOk = target === join(repoRoot, LOCAL_DIR) || !isInside(repoRoot, target);
+  if (!realOk || !typedOk) {
     throw new ConfigInitError(
       `${typed} is inside the vd-creator repository; use ${LOCAL_DIR}/, which git ignores, or a folder outside it`,
     );
@@ -115,14 +120,21 @@ function isInside(folder: string, path: string): boolean {
   return rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
 }
 
-/** The real path of `path`, resolving its nearest existing ancestor if it does not exist. */
-async function realpathOf(path: string): Promise<string> {
+/**
+ * The real path of `path`. If it does not exist, the real path of its nearest existing ancestor
+ * with the rest appended, following a dangling symbolic link to where it points.
+ */
+async function realpathOf(path: string, links = 0): Promise<string> {
   try {
     return await realpath(path);
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
     const parent = dirname(path);
     if ((code !== "ENOENT" && code !== "ENOTDIR") || parent === path) throw e;
-    return join(await realpathOf(parent), basename(path));
+    const link = await readlink(path).catch(() => undefined);
+    if (link === undefined) return join(await realpathOf(parent, links), basename(path));
+    // The same limit as the ELOOP of Linux.
+    if (links >= 40) throw e;
+    return realpathOf(resolve(await realpathOf(parent, links), link), links + 1);
   }
 }

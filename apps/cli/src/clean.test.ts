@@ -257,6 +257,27 @@ describe("vd clean when a folder is swapped while it runs", () => {
     expect(existsSync(join(voice, "stray2.wav"))).toBe(true);
   });
 
+  test("a realpath that fails other than ENOENT after one removal stops and keeps the file", async () => {
+    let unlinked = false;
+    fsHook.after = (name) => {
+      if (name === "unlink") unlinked = true;
+    };
+    fsHook.before = (name, path) => {
+      if (unlinked && name === "realpath" && path.startsWith(`${voice}/`)) {
+        throw Object.assign(new Error("denied by the test"), { code: "EACCES" });
+      }
+    };
+    const result = await vdWith({ VD_DEBUG: "1" }, "clean", dir);
+    expect(result.code).toBe(EXIT_FAILURE);
+    const [message, ...details] = result.stderr.split("\n");
+    expect(message).toBe(
+      `vd clean: stopped cleaning ${dir}: could not check a folder or file under assets (EACCES); stopped after removing 1 file`,
+    );
+    expect(details.join("\n")).toContain("Caused by: Error: denied by the test");
+    expect(existsSync(join(voice, "stray1.wav"))).toBe(false);
+    expect(existsSync(join(voice, "stray2.wav"))).toBe(true);
+  });
+
   // Root can write to a read-only folder, so the save would not fail.
   test.skipIf(process.getuid?.() === 0)(
     "a cache.json save that fails after removals reports the count",

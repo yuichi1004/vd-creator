@@ -3,8 +3,8 @@
 
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
-import type { PublishUse } from "@vd-creator/scenario";
-import { parseDocument } from "yaml";
+import { PUBLISH_USES, type PublishUse } from "@vd-creator/scenario";
+import { isAlias, isMap, isNode, isScalar, isSeq, LineCounter, parseDocument } from "yaml";
 import {
   type Env,
   findUserDir,
@@ -131,28 +131,123 @@ export async function readUserConfig(file: string): Promise<UserConfig | undefin
   return parseUserConfig(text, file);
 }
 
-/** Parses the text of a config file. `file` names it in errors. */
+/**
+ * What each key path of the schema must hold. A problem names only these paths and this fixed
+ * text, never a key or value from the file, so that a pasted secret is not printed.
+ */
+const KEY_RULES: Record<string, string> = {
+  "": "must be a mapping of settings",
+  version: "must be 1",
+  library: "must be a non-empty path",
+  serve: "must be a mapping",
+  "serve.port": "must be a whole number from 1 to 65535",
+  "serve.host": "must be a non-empty host name or address",
+  init: "must be a mapping",
+  "init.publishUse": `must be one of ${PUBLISH_USES.join(", ")}`,
+  render: "must be a mapping",
+  "render.creditsTemplate": "must be a non-empty path",
+};
+
+/**
+ * Parses the text of a config file. `file` names it in errors.
+ *
+ * No text, key, or value from the file reaches an error, a process warning, or the cause of an
+ * error: problems name a line, a key path of the schema, and fixed text. The YAML is checked
+ * node by node and converted by hand, never with `toJS`, which can emit process warnings that
+ * quote the source. Aliases, anchors, tags, and keys that are not plain scalars are rejected.
+ */
 export function parseUserConfig(text: string, file: string): UserConfig {
-  const doc = parseDocument(text);
-  if (doc.errors.length > 0) {
-    // The YAML error message quotes the source, which could hold a secret, so only the line.
-    const problems = doc.errors.map((error) => {
-      const line = error.linePos?.[0].line;
-      return line === undefined ? "not valid YAML" : `not valid YAML at line ${line}`;
-    });
-    throw new ConfigError(file, problems);
+  let result: { config: UserConfig } | { problems: string[] };
+  try {
+    result = checkUserConfig(text);
+  } catch {
+    // An unexpected failure could quote the source, so it is replaced, without a cause.
+    result = { problems: ["could not be read as YAML"] };
   }
-  const data: unknown = doc.toJS() ?? { version: 1 };
-  const result = UserConfigSchema.safeParse(data);
-  if (result.success) return result.data;
-  const problems = result.error.issues.flatMap((issue) => {
-    const path = issue.path.map(String).join(".");
-    if (issue.code === "unrecognized_keys") {
-      return issue.keys.map((key) => `unknown key "${path ? `${path}.${key}` : key}"`);
+  if ("problems" in result) throw new ConfigError(file, result.problems);
+  return result.config;
+}
+
+function checkUserConfig(text: string): { config: UserConfig } | { problems: string[] } {
+  const lineCounter = new LineCounter();
+  // "silent" keeps the library from writing warnings; they are collected in doc.warnings.
+  const doc = parseDocument(text, { lineCounter, logLevel: "silent", prettyErrors: false });
+  const lineOf = (offset: number | undefined) =>
+    offset === undefined ? "" : ` at line ${lineCounter.linePos(offset).line}`;
+  // The messages of YAML errors and warnings quote the source, so only the line.
+  const yamlProblems = [
+    ...doc.errors.map((error) => `not valid YAML${lineOf(error.pos[0])}`),
+    ...doc.warnings.map((warning) => `unsupported YAML${lineOf(warning.pos[0])}`),
+  ];
+  if (yamlProblems.length > 0) return { problems: yamlProblems };
+
+  const problems: string[] = [];
+  // Unknown keys are found here, with their line, so that the schema never sees one.
+  const toPlain = (node: unknown, path: string, known: boolean): unknown => {
+    if (node === null || node === undefined) return null;
+    if (isAlias(node)) {
+      problems.push(`aliases are not allowed${lineOf(node.range?.[0])}`);
+      return null;
     }
-    return [`${path || "the top level"}: ${issue.message}`];
+    if (!isNode(node)) {
+      problems.push(`unsupported YAML${lineOf(undefined)}`);
+      return null;
+    }
+    const at = lineOf(node.range?.[0]);
+    if (node.anchor !== undefined || node.tag !== undefined) {
+      problems.push(`anchors and tags are not allowed${at}`);
+      return null;
+    }
+    if (isScalar(node)) return node.value;
+    if (isSeq(node)) return node.items.map((item) => toPlain(item, path, false));
+    if (!isMap(node)) {
+      problems.push(`unsupported YAML${at}`);
+      return null;
+    }
+    const object: Record<string, unknown> = {};
+    for (const pair of node.items) {
+      const key = pair.key;
+      const keyAt = lineOf(isNode(key) ? key.range?.[0] : node.range?.[0]);
+      if (
+        !isScalar(key) ||
+        key.anchor !== undefined ||
+        key.tag !== undefined ||
+        (typeof key.value !== "string" && typeof key.value !== "number")
+      ) {
+        problems.push(`keys must be plain text${keyAt}`);
+        continue;
+      }
+      const name = String(key.value);
+      const child = path ? `${path}.${name}` : name;
+      // A key is checked only inside a mapping of the schema.
+      if (known && !(child in KEY_RULES)) {
+        problems.push(`unknown key${path ? ` in ${path}` : ""}${keyAt}`);
+        continue;
+      }
+      // defineProperty, because assigning "__proto__" would replace the prototype.
+      Object.defineProperty(object, name, {
+        value: toPlain(pair.value, child, known && child in KEY_RULES),
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+    return object;
+  };
+  const data = doc.contents === null ? { version: 1 } : toPlain(doc.contents, "", true);
+  if (problems.length > 0) return { problems };
+
+  const result = UserConfigSchema.safeParse(data);
+  if (result.success) return { config: result.data };
+  const issues = result.error.issues.map((issue) => {
+    const path = issue.path.map(String).join(".");
+    // Every path is a key of the schema, as unknown keys were rejected above; anything else is
+    // not named.
+    const rule = KEY_RULES[path];
+    if (rule === undefined) return "a setting is not valid";
+    return `${path || "the top level"}: ${rule}`;
   });
-  throw new ConfigError(file, problems);
+  return { problems: [...new Set(issues)] };
 }
 
 /**

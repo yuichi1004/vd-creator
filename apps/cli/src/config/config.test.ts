@@ -266,38 +266,112 @@ describe("config.yaml schema", () => {
     return [];
   };
 
-  test("an unknown key such as apiKey is rejected without printing its value", async () => {
+  test("an unknown key such as apiKey is rejected without printing its name or value", async () => {
     const text = "version: 1\napiKey: sk-secret-value\n";
-    expect(problems(text)).toEqual(['unknown key "apiKey"']);
+    expect(problems(text)).toEqual(["unknown key at line 2"]);
     await writeConfig(userDir, text);
     const result = await vd(envWith({ VD_USER_DIR: userDir }), "config", "show");
     expect(result.code).toBe(EXIT_FAILURE);
     expect(result.stderr).toBe(
-      `vd config show: ${join(userDir, "config.yaml")}: unknown key "apiKey"`,
+      `vd config show: ${join(userDir, "config.yaml")}: unknown key at line 2`,
     );
     expect(result.stderr).not.toContain("sk-secret-value");
   });
 
   test("an unknown nested key, such as a typo or a provider, is rejected", () => {
-    expect(problems("version: 1\nserve:\n  prot: 80\n")).toEqual(['unknown key "serve.prot"']);
-    expect(problems("version: 1\nprovider: elevenlabs\n")).toEqual(['unknown key "provider"']);
+    expect(problems("version: 1\nserve:\n  prot: 80\n")).toEqual([
+      "unknown key in serve at line 3",
+    ]);
+    expect(problems("version: 1\nprovider: elevenlabs\n")).toEqual(["unknown key at line 2"]);
+    // A key that is itself a secret is not printed either.
+    expect(problems("version: 1\nsk-secret-value: 1\n")).toEqual(["unknown key at line 2"]);
   });
 
-  test("wrong values are rejected by key", () => {
-    expect(problems("version: 2\n")).toHaveLength(1);
-    expect(problems("library: x\n")[0]).toMatch(/^version: /);
-    expect(problems("version: 1\nserve:\n  port: 70000\n")[0]).toMatch(/^serve\.port: /);
-    expect(problems("version: 1\ninit:\n  publishUse: everyone\n")[0]).toMatch(
-      /^init\.publishUse: /,
-    );
+  test("wrong values are rejected by key, with fixed text", () => {
+    expect(problems("version: 2\n")).toEqual(["version: must be 1"]);
+    expect(problems("library: x\n")).toEqual(["version: must be 1"]);
+    expect(problems("version: 1\nserve:\n  port: 70000\n")).toEqual([
+      "serve.port: must be a whole number from 1 to 65535",
+    ]);
+    expect(problems("version: 1\ninit:\n  publishUse: sk-secret-value\n")).toEqual([
+      "init.publishUse: must be one of private, non-commercial, commercial",
+    ]);
     expect(problems("version: 1\nlibrary: ''\n")[0]).toMatch(/^library: /);
     expect(problems("- a list\n")[0]).toMatch(/^the top level: /);
+    expect(problems("version: 1\nserve:\n  host: [sk-secret-value]\n")).toEqual([
+      "serve.host: must be a non-empty host name or address",
+    ]);
   });
 
   test("invalid YAML names the line but not the text", () => {
     expect(problems('version: 1\nlibrary: "sk-unclosed\n')).toEqual([
       expect.stringMatching(/^not valid YAML at line \d+$/),
     ]);
+    expect(problems("version: 1\nlibrary: a\nlibrary: sk-secret-value\n")).toEqual([
+      "not valid YAML at line 3",
+    ]);
+  });
+
+  test.each([
+    [
+      "a collection key under an unknown key",
+      "version: 1\napiKey: { [sk-secret-value]: ignored }\n",
+      "unknown key at line 2",
+    ],
+    [
+      "a collection key",
+      "version: 1\nserve: { [sk-secret-value]: ignored }\n",
+      "keys must be plain text at line 2",
+    ],
+    [
+      "a complex key",
+      "version: 1\n? [sk-secret-value]\n: x\n",
+      "keys must be plain text at line 2",
+    ],
+    [
+      "an anchor",
+      "version: 1\nlibrary: &a sk-secret-value\n",
+      "anchors and tags are not allowed at line 2",
+    ],
+    [
+      "an alias",
+      "version: 1\nserve: &s { host: sk-secret-value }\nrender: *s\n",
+      "anchors and tags are not allowed at line 2",
+    ],
+    [
+      "an unresolved alias",
+      "version: 1\nlibrary: *sk-secret-value\n",
+      "aliases are not allowed at line 2",
+    ],
+    [
+      "a tag",
+      "version: 1\nlibrary: !!str sk-secret-value\n",
+      "anchors and tags are not allowed at line 2",
+    ],
+    [
+      "a custom tag",
+      "version: 1\nlibrary: !secret sk-secret-value\n",
+      "unsupported YAML at line 2",
+    ],
+  ])("rejects %s without printing or warning its content", async (_, text, problem) => {
+    const warnings: string[] = [];
+    const onWarning = (warning: Error) => warnings.push(`${warning.name}: ${warning.message}`);
+    process.on("warning", onWarning);
+    try {
+      expect(problems(text)).toContain(problem);
+      await writeConfig(userDir, text);
+      for (const debug of [{}, { VD_DEBUG: "1" }]) {
+        const result = await vd(envWith({ VD_USER_DIR: userDir, ...debug }), "config", "show");
+        expect(result.code).toBe(EXIT_FAILURE);
+        expect(result.stderr).not.toContain("sk-secret-value");
+        expect(result.stdout).not.toContain("sk-secret-value");
+      }
+      // process.emitWarning is asynchronous.
+      await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+      process.off("warning", onWarning);
+    }
+    expect(warnings.join("\n")).not.toContain("sk-secret-value");
   });
 
   test("an empty file has no settings", () => {
@@ -332,7 +406,7 @@ describe("vd init with a user config", () => {
     const project = join(tmp, "drama");
     const result = await vd(envWith(), "init", project);
     expect(result.code).toBe(EXIT_FAILURE);
-    expect(result.stderr).toBe(`vd init: ${join(local, "config.yaml")}: unknown key "apiKey"`);
+    expect(result.stderr).toBe(`vd init: ${join(local, "config.yaml")}: unknown key at line 2`);
     expect(existsSync(project)).toBe(false);
   });
 });
@@ -400,6 +474,32 @@ describe("vd config init", () => {
     // local/ through the link is still local/.
     await initUserDir(join(link, "local"), { repoRoot: repo });
     expect(existsSync(join(local, "config.yaml"))).toBe(true);
+  });
+
+  test.each([
+    ["a folder in the repository", true, () => join(repo, "apps")],
+    ["a folder in the repository that does not exist yet", false, () => join(repo, "apps")],
+    ["the repository itself", false, () => repo],
+  ])("refuses local/ as a symbolic link to %s and creates nothing", async (_, make, to) => {
+    if (make) await mkdir(to());
+    await symlink(to(), local);
+    const before = await readdir(repo);
+    const result = await vd(envWith(), "config", "init");
+    expect(result.code).toBe(EXIT_FAILURE);
+    expect(result.stderr).toBe(
+      "vd config init: local/ is inside the vd-creator repository; use local/, which git ignores, or a folder outside it",
+    );
+    expect(await readdir(repo)).toEqual(before);
+    if (existsSync(join(repo, "apps"))) expect(await readdir(join(repo, "apps"))).toEqual([]);
+    // Through --dir too.
+    expect((await vd(envWith(), "config", "init", "--dir", local)).code).toBe(EXIT_FAILURE);
+  });
+
+  test("accepts local/ as a symbolic link to a folder outside the repository", async () => {
+    await mkdir(userDir);
+    await symlink(userDir, local);
+    expect((await vd(envWith(), "config", "init")).code).toBe(EXIT_OK);
+    expect(existsSync(join(userDir, "config.yaml"))).toBe(true);
   });
 
   test("refuses a path inside the real repository other than local/", async () => {

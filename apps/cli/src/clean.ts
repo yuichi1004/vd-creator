@@ -105,23 +105,27 @@ export async function cleanProject(
   }
 
   // Phase 2: remove the listed files, checking each one and its folders right before. Any
-  // change, including a listed file that is gone, stops the removal at once.
-  const project = await realpath(cache.projectDir);
+  // change, including a listed file that is gone, stops the removal at once. Only ENOENT means
+  // gone: any other error from a check, such as EACCES, stops it as a CleanInterruptedError
+  // with its code and the error as the cause.
   let removed = 0;
   const interrupt = () => new CleanInterruptedError(removed, "changed");
-  // A check that cannot look at a folder or file, such as on EACCES, also stops the removal.
-  const check = async (target: Target, file: Target | undefined) => {
+  const checked = async <T>(step: () => Promise<T>): Promise<T> => {
     try {
-      await ensureUnchanged(cache, folders, target.dir, file, interrupt);
+      return await step();
     } catch (e) {
       if (e instanceof CleanInterruptedError) throw e;
+      if (errorCode(e) === "ENOENT") throw interrupt();
       throw new CleanInterruptedError(removed, "check", errorCode(e), e);
     }
   };
+  const project = await checked(() => realpath(cache.projectDir));
+  const check = (target: Target, file: Target | undefined) =>
+    checked(() => ensureUnchanged(cache, folders, target.dir, file, interrupt));
   for (const target of targets) {
     const path = cache.assetPath(target.file);
     await check(target, undefined);
-    if (!(await realpath(path).catch(() => path)).startsWith(project + sep)) throw interrupt();
+    if (!(await checked(() => realpath(path))).startsWith(project + sep)) throw interrupt();
     await check(target, target);
     try {
       await unlink(path);
