@@ -1,10 +1,34 @@
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { rmSync } from "node:fs";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type CacheData, cacheKey } from "@vd-creator/core";
-import { MockMusicProvider, MockSfxProvider, MockTtsProvider } from "@vd-creator/providers";
+import {
+  createMockProviders,
+  MockMusicProvider,
+  MockSfxProvider,
+  MockTtsProvider,
+} from "@vd-creator/providers";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { EXIT_FAILURE, EXIT_OK, EXIT_USAGE, run } from "./index.js";
+import {
+  EXIT_FAILURE,
+  EXIT_OK,
+  EXIT_USAGE,
+  gateProviders,
+  PaidCallRefusedError,
+  run,
+} from "./index.js";
 
 let tmp: string;
 let dir: string;
@@ -28,12 +52,23 @@ afterEach(async () => {
   await rm(tmp, { recursive: true, force: true });
 });
 
-async function vd(...args: string[]) {
+function vd(...args: string[]) {
+  return vdWatching(() => {}, ...args);
+}
+
+/** Runs vd and calls `onStdout` with each stdout line as it is printed. */
+async function vdWatching(onStdout: (line: string) => void, ...args: string[]) {
   const stdout: string[] = [];
   const stderr: string[] = [];
   const code = await run(
     args,
-    { stdout: (line) => stdout.push(line), stderr: (line) => stderr.push(line) },
+    {
+      stdout: (line) => {
+        stdout.push(line);
+        onStdout(line);
+      },
+      stderr: (line) => stderr.push(line),
+    },
     {},
   );
   return { code, stdout: stdout.join("\n"), stderr: stderr.join("\n") };
@@ -282,5 +317,179 @@ describe("vd clean", () => {
     expect(result.code).toBe(EXIT_FAILURE);
     expect(result.stderr).toMatch(/^version: /);
     expect(Object.keys((await readCache()).entries)).toHaveLength(3);
+  });
+});
+
+describe("vd generate with a paid provider", () => {
+  const API_KEY = "test-key-0123456789-abcdefghij";
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.stubEnv("ELEVENLABS_API_KEY", API_KEY);
+    fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ detail: { status: "quota_exceeded" } }), { status: 401 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  /** Adds a line whose speaker settings hold a non-finite number, so its request is invalid. */
+  async function addInvalidLine() {
+    await editScenario((text) =>
+      text
+        .replace(
+          "scenes:\n",
+          "  - id: odd\n    name: Odd\n    voice:\n      provider: mock\n      voiceId: odd\n      settings:\n        speed: .inf\nscenes:\n",
+        )
+        .concat('      - line: "Strange."\n        id: s1-l2\n        speaker: odd\n'),
+    );
+  }
+
+  /**
+   * Generates with the mock, then copies the assets of the given kinds as if ElevenLabs had made
+   * them. Returns the copied asset paths by kind.
+   */
+  async function cacheAsElevenLabs(kinds: string[]): Promise<Record<string, string>> {
+    await vd("generate", dir);
+    const cache = await readCache();
+    const paths: Record<string, string> = {};
+    for (const entry of Object.values(cache.entries)) {
+      if (!kinds.includes(entry.kind)) continue;
+      const key = cacheKey(entry.kind, "elevenlabs", entry.request);
+      const file = `${entry.file.split("/")[0]}/${key.slice(0, 16)}.mp3`;
+      cache.entries[key] = { ...entry, providerId: "elevenlabs", file };
+      paths[entry.kind] = join(dir, "assets", file);
+      await writeFile(paths[entry.kind] as string, "mp3");
+    }
+    await writeFile(join(dir, "cache.json"), JSON.stringify(cache));
+    return paths;
+  }
+
+  /** Removes `path` right after the plan is printed, before any generation. */
+  const removeAfterPlan = (path: string) => (line: string) => {
+    if (line.startsWith("Estimated cost")) rmSync(path);
+  };
+
+  test("never requests without --yes when the plan has only cached and invalid items", async () => {
+    await addInvalidLine();
+    const paths = await cacheAsElevenLabs(["tts", "sfx", "music"]);
+    const result = await vdWatching(
+      removeAfterPlan(paths.tts as string),
+      "generate",
+      dir,
+      "--provider",
+      "elevenlabs",
+    );
+    expect(result.stdout).toContain("0 to generate, 3 cached, 0 unresolved, 1 invalid");
+    expect(result.code).toBe(EXIT_OK);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    [["generate", "DIR", "--provider", "elevenlabs"]],
+    [["generate", "--provider", "elevenlabs", "DIR"]],
+    [["generate", "--provider=elevenlabs", "DIR"]],
+    [["generate", "DIR", "--provider", "elevenlabs", "--only", "s1-l1,s1-l2"]],
+    [["generate", "--dry-run", "--provider", "elevenlabs", "DIR"]],
+    [["generate", "--yes", "--dry-run", "DIR", "--provider", "elevenlabs"]],
+    [["generate", "DIR", "--provider", "elevenlabs", "--dry-run", "--yes"]],
+  ])("never calls fetch without --yes or with --dry-run: %j", async (args) => {
+    await addInvalidLine();
+    const paths = await cacheAsElevenLabs(["tts", "sfx", "music"]);
+    const result = await vdWatching(
+      removeAfterPlan(paths.tts as string),
+      ...args.map((arg) => (arg === "DIR" ? dir : arg)),
+    );
+    expect(result.code).toBe(EXIT_OK);
+    expect(result.stdout).toContain("Plan with provider elevenlabs:");
+    expect(result.stdout).not.toContain("Generated");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("with --yes generates only the items the plan showed as to-generate", async () => {
+    const paths = await cacheAsElevenLabs(["tts", "music"]);
+    const result = await vdWatching(
+      removeAfterPlan(paths.tts as string),
+      "generate",
+      dir,
+      "--provider",
+      "elevenlabs",
+      "--yes",
+    );
+    expect(result.stdout).toContain("1 to generate, 2 cached");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/v1/sound-generation");
+    expect(result.stderr).toBe('vd generate: failed sfx "s1-sfx1" (quota_exceeded, HTTP 401)');
+    expect(result.code).toBe(EXIT_FAILURE);
+  });
+
+  test("gateProviders refuses a paid call before the provider runs", async () => {
+    const mock = createMockProviders();
+    const synthesize = vi.fn(() => mock.tts.synthesize({ text: "x", voiceId: "v", take: 0 }));
+    const paidTts = {
+      ...mock.tts,
+      id: "paid",
+      paid: true,
+      estimate: mock.tts.estimate,
+      synthesize,
+    };
+    const gated = gateProviders({ ...mock, tts: paidTts }, false);
+    await expect(gated.tts.synthesize({ text: "x", voiceId: "v", take: 0 })).rejects.toBeInstanceOf(
+      PaidCallRefusedError,
+    );
+    expect(synthesize).not.toHaveBeenCalled();
+    // An unpaid provider and estimates still work.
+    expect((await gated.sfx.generate({ prompt: "x", take: 0 })).format).toBe("wav");
+    expect(gated.tts.estimate({ text: "abc", voiceId: "v", take: 0 }).requests).toBe(1);
+    expect(gateProviders({ ...mock, tts: paidTts }, true).tts).toBe(paidTts);
+  });
+});
+
+describe("vd clean with symbolic links", () => {
+  let outside: string;
+
+  beforeEach(async () => {
+    expect((await vd("generate", dir)).code).toBe(EXIT_OK);
+    outside = join(tmp, "outside");
+  });
+
+  test("refuses a symlinked assets/voice and deletes nothing outside", async () => {
+    await rename(join(dir, "assets", "voice"), outside);
+    await symlink(outside, join(dir, "assets", "voice"));
+    await writeFile(join(outside, "stray.wav"), "keep me");
+    const before = await readdir(outside);
+    const result = await vd("clean", dir);
+    expect(result.code).toBe(EXIT_FAILURE);
+    expect(result.stderr).toBe(
+      `vd clean: refusing to clean ${dir}: assets/voice is a symbolic link or not a folder`,
+    );
+    expect(await readdir(outside)).toEqual(before);
+    expect(Object.keys((await readCache()).entries)).toHaveLength(3);
+  });
+
+  test("refuses a symlinked assets/ and deletes nothing outside", async () => {
+    await rename(join(dir, "assets"), outside);
+    await symlink(outside, join(dir, "assets"));
+    await writeFile(join(outside, "sfx", "stray.wav"), "keep me");
+    const result = await vd("clean", dir);
+    expect(result.code).toBe(EXIT_FAILURE);
+    expect(result.stderr).toBe(
+      `vd clean: refusing to clean ${dir}: assets is a symbolic link or not a folder`,
+    );
+    expect(await exists(join(outside, "sfx", "stray.wav"))).toBe(true);
+  });
+
+  test("skips a symlink inside assets/voice that points outside", async () => {
+    await writeFile(outside, "keep me");
+    const link = join(dir, "assets", "voice", "link.wav");
+    await symlink(outside, link);
+    await writeFile(join(dir, "assets", "voice", "stray.wav"), "stray");
+    const result = await vd("clean", dir);
+    expect(result.code).toBe(EXIT_OK);
+    expect(result.stdout).toBe(
+      "Removed assets/voice/stray.wav\nRemoved 1 file and 0 cache entries",
+    );
+    expect((await lstat(link)).isSymbolicLink()).toBe(true);
+    expect(await readFile(outside, "utf8")).toBe("keep me");
   });
 });

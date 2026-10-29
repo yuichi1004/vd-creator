@@ -11,10 +11,17 @@ import {
   runGeneration,
   scenarioItems,
 } from "@vd-creator/core";
-import { createProviders, providerIds } from "@vd-creator/providers";
+import { providerIds } from "@vd-creator/providers";
 import { SCENARIO_FILE, type Scenario } from "@vd-creator/scenario";
-import { cleanProject } from "./clean.js";
-import { DEFAULT_PROVIDER, failureReason, formatPlan, plural } from "./generate.js";
+import { CleanRefusedError, cleanProject } from "./clean.js";
+import {
+  DEFAULT_PROVIDER,
+  failureReason,
+  formatPlan,
+  isPaid,
+  plural,
+  providersFor,
+} from "./generate.js";
 import { InitError, initProject } from "./init.js";
 import { formatIssue, validateProject } from "./validate.js";
 
@@ -256,7 +263,9 @@ async function generate(
     }
   }
 
-  const providers = createProviders(providerId);
+  // Only --yes, outside a dry run, lets a paid provider reach the network.
+  const authorized = options.yes === true && options["dry-run"] !== true;
+  const providers = providersFor(providerId, authorized);
   const resolvers = defaultResolvers(providers);
   let plan: Awaited<ReturnType<typeof planGeneration>>;
   try {
@@ -269,47 +278,48 @@ async function generate(
   }
   for (const line of formatPlan(plan, providerId)) output.stdout(line);
 
+  // The gate: whatever the plan holds, a dry run, or a paid provider without --yes, stops here.
   if (options["dry-run"]) {
     output.stdout("Dry run: nothing was generated.");
     return EXIT_OK;
   }
-  const paid = providers.tts.paid || providers.sfx.paid || providers.music.paid;
-  const toGenerate = plan.items.filter((item) => item.status === "to-generate").length;
-  const invalid = new Set(
-    plan.items.filter((item) => item.status === "invalid").map((item) => item.id),
-  );
-  if (toGenerate === 0 && invalid.size === 0) {
-    output.stdout("Nothing to generate.");
-    return EXIT_OK;
-  }
-  if (paid && toGenerate > 0 && !options.yes) {
+  if (isPaid(providers) && !authorized) {
     output.stdout(
       `Provider ${providerId} is paid, so nothing was generated. Run again with --yes to generate.`,
     );
     return EXIT_OK;
   }
 
-  const failed: Extract<ItemResult, { status: "failed" }>[] = [];
-  const result = await runGeneration(scenario, cache, resolvers, {
-    only,
-    onItem: (item) => {
-      if (item.status === "generated") {
-        output.stdout(`Generated ${itemLabel(item)}: assets/${item.file}`);
-      } else if (item.status === "failed") {
-        failed.push(item);
-      }
-    },
-  });
-  const generated = result.items.filter((item) => item.status === "generated").length;
-  output.stdout(`Generated ${plural(generated, "item")}, ${result.failed} failed`);
+  // Generation is limited to the items the printed plan showed as to-generate, so that a
+  // replan can never add one the user did not see.
+  const planned = plan.items.filter((item) => item.status === "to-generate").map((i) => i.id);
+  const invalid = plan.items.filter((item) => item.status === "invalid");
+  let failed: Extract<ItemResult, { status: "failed" }>[] = [];
+  if (planned.length === 0) {
+    output.stdout("Nothing to generate.");
+  } else {
+    const result = await runGeneration(scenario, cache, resolvers, {
+      only: planned,
+      onItem: (item) => {
+        if (item.status === "generated") {
+          output.stdout(`Generated ${itemLabel(item)}: assets/${item.file}`);
+        }
+      },
+    });
+    const generated = result.items.filter((item) => item.status === "generated").length;
+    failed = result.items.filter((item) => item.status === "failed");
+    output.stdout(`Generated ${plural(generated, "item")}, ${failed.length} failed`);
+  }
   // Only the kind, ID, and a fixed reason are printed: an error message can hold the item's text.
-  for (const item of result.items) {
-    if (item.status !== "failed") continue;
-    const reason = failureReason(item.error, invalid.has(item.id), fsErrorCode);
-    output.stderr(`vd generate: failed ${itemLabel(item)} (${reason})`);
+  for (const item of invalid)
+    output.stderr(`vd generate: failed ${itemLabel(item)} (invalid request)`);
+  for (const item of failed) {
+    output.stderr(
+      `vd generate: failed ${itemLabel(item)} (${failureReason(item.error, fsErrorCode)})`,
+    );
     debug(item.error);
   }
-  return result.failed > 0 ? EXIT_FAILURE : EXIT_OK;
+  return invalid.length + failed.length > 0 ? EXIT_FAILURE : EXIT_OK;
 }
 
 async function clean(
@@ -330,6 +340,10 @@ async function clean(
   try {
     result = await cleanProject(project.scenario, project.cache, { dryRun });
   } catch (e) {
+    if (e instanceof CleanRefusedError) {
+      output.stderr(`vd clean: refusing to clean ${dir}: ${e.message}`);
+      return EXIT_FAILURE;
+    }
     const code = fsErrorCode(e);
     if (code === undefined) throw e;
     output.stderr(`vd clean: cannot clean the assets in ${dir}: ${code}`);

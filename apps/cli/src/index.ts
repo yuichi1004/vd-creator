@@ -1,8 +1,21 @@
 // The vd command: init, validate, generate, render, serve.
 
-export { type CleanResult, cleanProject, GENERATED_ASSET_DIRS } from "./clean.js";
+export {
+  CleanRefusedError,
+  type CleanResult,
+  cleanProject,
+  GENERATED_ASSET_DIRS,
+} from "./clean.js";
 export { type CliOutput, EXIT_FAILURE, EXIT_OK, EXIT_USAGE, run, USAGE } from "./cli.js";
-export { DEFAULT_PROVIDER, failureReason, formatPlan } from "./generate.js";
+export {
+  DEFAULT_PROVIDER,
+  failureReason,
+  formatPlan,
+  gateProviders,
+  isPaid,
+  PaidCallRefusedError,
+  providersFor,
+} from "./generate.js";
 export {
   ALLOWED_EXISTING_ENTRIES,
   InitError,
