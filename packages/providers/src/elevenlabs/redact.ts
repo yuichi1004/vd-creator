@@ -6,9 +6,10 @@
 //    non-ASCII characters, or shorter than 20 characters, fails at once with a fixed error.
 //    Nothing else, such as reading the request or building a label, happens before. The
 //    20-character minimum is a sanity check on the key, since real keys are much longer.
-// 2. Every error the provider throws has its stack set to exactly its name and message, and its
-//    cause removed, where it leaves the provider. A stack hook, such as Error.prepareStackTrace,
-//    can then never add anything.
+// 2. Every error the provider throws, from a call or an estimate, has its stack set to exactly
+//    its name and message, and its cause removed, where it leaves the provider. An estimate
+//    needs no key, and any error while it reads the request leaves as a fixed internal_error.
+//    A stack hook, such as Error.prepareStackTrace, can then never add anything.
 // 3. The only text from outside the code in an error is the item label, built from our own
 //    inputs (text, prompt, IDs), which may hold the key by mistake. It is redacted as it is
 //    built, and as defense in depth a label whose item fields still hold the key or an

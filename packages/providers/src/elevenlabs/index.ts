@@ -241,7 +241,7 @@ export class ElevenLabsTtsProvider implements TtsProvider {
 
   /** ElevenLabs bills TTS by the characters sent, including a direction tag. */
   estimate(req: TtsRequest): Cost {
-    return { characters: [...ttsText(req)].length, requests: 1 };
+    return estimated("tts", "TTS", () => ({ characters: [...ttsText(req)].length, requests: 1 }));
   }
 }
 
@@ -270,7 +270,7 @@ export class ElevenLabsSfxProvider implements SfxProvider {
 
   /** ElevenLabs bills SFX by duration or generation, not by prompt characters, so only the request counts. */
   estimate(_req: SfxRequest): Cost {
-    return { characters: 0, requests: 1 };
+    return estimated("sfx", "SFX", () => ({ characters: 0, requests: 1 }));
   }
 }
 
@@ -299,7 +299,7 @@ export class ElevenLabsMusicProvider implements MusicProvider {
 
   /** ElevenLabs bills music by duration or generation, not by prompt characters, so only the request counts. */
   estimate(_req: MusicRequest): Cost {
-    return { characters: 0, requests: 1 };
+    return estimated("music", "music", () => ({ characters: 0, requests: 1 }));
   }
 }
 
@@ -358,6 +358,18 @@ function httpStatus(value: unknown): number | undefined {
   return typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599
     ? value
     : undefined;
+}
+
+/**
+ * The synchronous boundary of every estimate. It needs no key, so it can run in a dry run. Any
+ * error while reading the request is untrusted and leaves as a fixed, sealed internal_error.
+ */
+function estimated(kind: ElevenLabsKind, what: string, compute: () => Cost): Cost {
+  try {
+    return compute();
+  } catch {
+    throw sealed(new ElevenLabsError(kind, `ElevenLabs ${what} estimate failed`, "internal_error"));
+  }
 }
 
 /**

@@ -1293,3 +1293,79 @@ test("key: a key sharing text with the fixed label gets the normal error, not in
     'ElevenLabs SFX failed for take 0, prompt "x": network error (network_error)',
   );
 });
+
+/** A request whose every field throws an error holding the key. */
+function throwingRequest(): never {
+  return new Proxy(
+    {},
+    {
+      get() {
+        throw new Error(`boom ${LEAK_KEY}`);
+      },
+    },
+  ) as never;
+}
+
+test("leak: an estimate whose request throws gives a fixed, sealed error, with or without a stack hook", () => {
+  const set = createElevenLabsProviders({ env: {}, fetch: stubFetch(() => audioResponse()).fetch });
+  const ttsDirection = {
+    text: "Hi.",
+    voiceId: "v",
+    take: 0,
+    get direction(): string {
+      throw new Error(`boom ${LEAK_KEY}`);
+    },
+  } as unknown as TtsRequest;
+  const estimates = [
+    ["TTS", () => set.tts.estimate(ttsDirection)],
+    ["TTS", () => set.tts.estimate(throwingRequest())],
+    ["SFX", () => set.sfx.estimate(throwingRequest())],
+    ["music", () => set.music.estimate(throwingRequest())],
+  ] as const;
+  const original = Error.prepareStackTrace;
+  try {
+    for (const hook of [undefined, () => LEAK_KEY]) {
+      Error.prepareStackTrace = hook ?? original;
+      for (const [what, estimate] of estimates) {
+        let thrown: unknown;
+        let cost: unknown;
+        try {
+          cost = estimate();
+        } catch (e) {
+          thrown = e;
+        }
+        if (thrown === undefined) {
+          // SFX and music estimates do not read the request, so nothing can throw.
+          expect(what).not.toBe("TTS");
+          expect(cost).toEqual({ characters: 0, requests: 1 });
+          continue;
+        }
+        expect(thrown).toBeInstanceOf(ElevenLabsError);
+        const e = thrown as ElevenLabsError;
+        expect(e.message).toBe(
+          `ElevenLabs ${what} estimate failed: internal error (internal_error)`,
+        );
+        expect(e.stack).toBe(`ElevenLabsError: ${e.message}`);
+        expect(Object.hasOwn(e, "cause")).toBe(false);
+        expectNoLeak(serialize(e), LEAK_KEY);
+      }
+    }
+  } finally {
+    Error.prepareStackTrace = original;
+  }
+});
+
+test("estimate works without ELEVENLABS_API_KEY for every kind", () => {
+  const stub = stubFetch(() => audioResponse());
+  const set = createElevenLabsProviders({ env: {}, fetch: stub.fetch });
+  expect(set.tts.estimate({ text: "Hello", voiceId: "v", take: 0 })).toEqual({
+    characters: 5,
+    requests: 1,
+  });
+  expect(set.sfx.estimate({ prompt: "x", take: 0 })).toEqual({ characters: 0, requests: 1 });
+  expect(set.music.estimate({ prompt: "x", durationSec: 10, take: 0 })).toEqual({
+    characters: 0,
+    requests: 1,
+  });
+  expect(stub.calls).toHaveLength(0);
+});
