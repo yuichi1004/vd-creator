@@ -116,7 +116,7 @@ The interfaces task is reviewed with `gpt-6-astra`, because it fixes a public in
   - Constraints: no new dependencies. Never call the real API. Tests stub `fetch`. Depends on the interfaces task.
   - Ownership: `packages/providers/src/elevenlabs/`, and the one registration line in `packages/providers/src/index.ts`.
   - Acceptance: `npm test -w packages/providers` passes, with tests for the request body, headers (key from the environment), and error handling, all against a stubbed `fetch`.
-- [ ] Cache, generation pipeline, and timeline
+- [x] Cache, generation pipeline, and timeline
   - Target: `packages/core/`
   - Change: the cache, the `AssetResolver` hook with the generated-item resolver, `planGeneration(scenario, cache, resolvers)` (items with cached, to-generate, unresolved, or invalid status and a cost total), `runGeneration` (concurrency 4, writes assets as they finish), and `computeTimeline`.
   - Constraints: no new dependencies. Uses only the mock provider in tests. Depends on the interfaces task. Can run in parallel with the ElevenLabs task.
