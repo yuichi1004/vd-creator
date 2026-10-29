@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import {
@@ -6,17 +7,23 @@ import {
   CACHE_FILE,
   CacheFormatError,
   checkLibraryLicenses,
+  computeTimeline,
   defaultResolvers,
   GenerationError,
   type ItemResult,
   itemLabel,
   libraryResolver,
+  ProjectCreditsError,
   type ProjectLicenseIssue,
   planGeneration,
+  readCredits,
   runGeneration,
   scenarioItems,
+  type Timeline,
 } from "@vd-creator/core";
+import { buildCreditsText } from "@vd-creator/library";
 import { providerIds } from "@vd-creator/providers";
+import { buildSrt, RenderError, renderAudio, renderVideo } from "@vd-creator/render";
 import { SCENARIO_FILE, type Scenario } from "@vd-creator/scenario";
 import {
   DEFAULT_HOST,
@@ -51,6 +58,19 @@ import {
 } from "./generate.js";
 import { InitError, initProject } from "./init.js";
 import { LIBRARY_OPTIONS, LIBRARY_USAGE, libraryCommand, safeLibraryText } from "./library.js";
+import {
+  CREDITS_TEXT_FILE,
+  CreditsTemplateError,
+  missingAudio,
+  missingImages,
+  onPath,
+  PROJECT_CREDITS_TEMPLATE,
+  RENDER_FORMATS,
+  RENDER_USAGE,
+  readCreditsTemplate,
+  renderCommands,
+  SRT_FILE,
+} from "./render.js";
 import {
   aborted,
   DEFAULT_SERVE_PORT,
@@ -87,6 +107,14 @@ Commands:
     --only <id,...>   Only these items. A BGM uses its scene's ID
     --dry-run         Print the plan and stop
     --yes             Run a paid provider. Without it, a paid provider stops after the plan
+  render [dir]      Mix the audio into out/drama.mp3 and write out/credits.txt. Checks first
+                    that ffmpeg is on PATH, that every item has an asset, and that the
+                    licenses pass as in vd validate
+    --video           Also write out/drama.mp4 with the still images
+    --srt             Also write out/drama.srt with the lines
+    --format <f>      mp3 (default) or wav, for out/drama.wav
+    --print-command   Print the ffmpeg commands as a shell script after the checks, and
+                      render nothing. ffmpeg need not be on PATH
   clean [dir]       Remove files in assets/voice, assets/sfx, and assets/bgm, and cache.json
                     entries, that the scenario no longer uses. assets/library/ is kept
     --dry-run         List what would be removed and stop
@@ -238,6 +266,8 @@ async function dispatch(args: string[], context: Context): Promise<number> {
       return validate(rest, context);
     case "generate":
       return generate(rest, parsed.values, context);
+    case "render":
+      return render(rest, parsed.values, context);
     case "clean":
       return clean(rest, parsed.values, context);
     case "config":
@@ -284,6 +314,10 @@ function parse(args: string[]) {
       port: { type: "string" },
       host: { type: "string" },
       "allow-host": { type: "string", multiple: true },
+      video: { type: "boolean" },
+      srt: { type: "boolean" },
+      format: { type: "string" },
+      "print-command": { type: "boolean" },
     },
   });
 }
@@ -295,6 +329,7 @@ const COMMAND_OPTIONS: Partial<Record<string, readonly string[]>> = {
   init: [],
   validate: [],
   generate: ["provider", "only", "dry-run", "yes"],
+  render: ["video", "srt", "format", "print-command"],
   clean: ["dry-run"],
   // Each subcommand checks which of these it takes.
   config: ["dir", "json"],
@@ -480,6 +515,158 @@ async function generate(args: string[], options: Options, context: Context): Pro
     debug(item.error);
   }
   return invalid.length + failed.length + unresolved.length > 0 ? EXIT_FAILURE : EXIT_OK;
+}
+
+async function render(args: string[], options: Options, context: Context): Promise<number> {
+  const { output, debug, env } = context;
+  const [dir = ".", ...extra] = args;
+  const format = RENDER_FORMATS.find((f) => f === (options.format ?? "mp3"));
+  if (extra.length > 0 || format === undefined) {
+    output.stderr(RENDER_USAGE);
+    return EXIT_USAGE;
+  }
+  const video = options.video === true;
+  const printOnly = options["print-command"] === true;
+
+  const project = await loadProject("render", dir, output, debug);
+  if (typeof project === "number") return project;
+  const { scenario, cache } = project;
+  const config = await loadUserConfig("render", context);
+  if (typeof config === "number") return config;
+  const library = libraryRoot(config);
+  // Playback finds an asset whichever provider made it, so the free mock is enough here.
+  const resolvers = [
+    libraryResolver(library),
+    ...defaultResolvers(providersFor(DEFAULT_PROVIDER, false)),
+  ];
+
+  // Every check runs, so that one run lists every problem.
+  let ok = true;
+  // Only the PATH of `env` is searched; outside tests it is the PATH ffmpeg is started from.
+  if (!printOnly && !(await onPath("ffmpeg", env))) {
+    output.stderr("vd render: ffmpeg is not on PATH; install it, or add its folder to PATH");
+    ok = false;
+  }
+  let timeline: Timeline | undefined;
+  try {
+    timeline = await computeTimeline(scenario, cache, resolvers);
+  } catch (e) {
+    if (!(e instanceof GenerationError)) throw e;
+    output.stderr(`vd render: cannot plan ${itemLabel({ kind: e.kind, id: e.itemId })}`);
+    debug(e);
+    ok = false;
+  }
+  const missing =
+    timeline === undefined
+      ? []
+      : [...missingAudio(timeline), ...(video ? await missingImages(dir, timeline) : [])];
+  if (missing.length > 0) {
+    output.stderr(
+      `vd render: ${plural(missing.length, "item")} without an asset; run vd generate first:`,
+    );
+    for (const label of missing) output.stderr(`  ${label}`);
+    ok = false;
+  }
+  let licenses: ProjectLicenseIssue[];
+  try {
+    licenses = await checkLibraryLicenses(dir, scenario, { library });
+  } catch (e) {
+    const code = fsErrorCode(e);
+    if (code === undefined) throw e;
+    output.stderr(`vd render: cannot check the licenses in ${dir}: ${code}`);
+    debug(e);
+    return EXIT_FAILURE;
+  }
+  for (const issue of licenses) output.stderr(formatLicenseIssue(issue));
+  if (licenses.some((issue) => issue.severity === "error")) {
+    output.stderr("vd render: the license check has errors; fix them before rendering");
+    ok = false;
+  }
+  if (!ok || timeline === undefined) return EXIT_FAILURE;
+  if (timeline.durationSec <= 0) {
+    output.stderr("vd render: the timeline is empty: nothing to render");
+    return EXIT_FAILURE;
+  }
+
+  if (printOnly) {
+    output.stdout(`# Run in ${dir}:`);
+    for (const line of renderCommands(timeline, { format, video })) output.stdout(line);
+    return EXIT_OK;
+  }
+
+  // The credits are built before rendering, so that a render never ships without them.
+  let template: string | undefined;
+  try {
+    template = await readCreditsTemplate(dir, config.settings["render.creditsTemplate"].value);
+  } catch (e) {
+    if (!(e instanceof CreditsTemplateError)) throw e;
+    const what =
+      e.source === "project" ? `${PROJECT_CREDITS_TEMPLATE} in ${dir}` : "render.creditsTemplate";
+    output.stderr(`vd render: cannot read ${what}: ${e.code ?? "error"}`);
+    debug(e);
+    return EXIT_FAILURE;
+  }
+  let credits: Awaited<ReturnType<typeof readCredits>>;
+  try {
+    credits = await readCredits(dir);
+  } catch (e) {
+    if (e instanceof ProjectCreditsError) {
+      output.stderr(`vd render: ${safeLibraryText(e.message)}`);
+      return EXIT_FAILURE;
+    }
+    const code = fsErrorCode(e);
+    if (code === undefined) throw e;
+    output.stderr(`vd render: cannot read the credits in ${dir}: ${code}`);
+    debug(e);
+    return EXIT_FAILURE;
+  }
+  const creditsText = buildCreditsText(credits, template);
+
+  let rendered: Awaited<ReturnType<typeof renderAudio>>;
+  try {
+    if (video) {
+      const result = await renderVideo(dir, { resolvers, format });
+      rendered = result.audio;
+      output.stdout(`Rendered ${rendered.file}`);
+      output.stdout(`Rendered ${result.file}`);
+    } else {
+      rendered = await renderAudio(dir, { resolvers, format });
+      output.stdout(`Rendered ${rendered.file}`);
+    }
+  } catch (e) {
+    if (!(e instanceof RenderError)) throw e;
+    // A RenderError holds no absolute path, and an ffmpeg error ends with stderr lines.
+    for (const line of e.message.split("\n")) output.stderr(`vd render: ${line}`);
+    debug(e);
+    return EXIT_FAILURE;
+  }
+
+  const write = async (file: string, text: string): Promise<boolean> => {
+    try {
+      await writeFile(join(dir, file), text);
+      output.stdout(`Wrote ${file}`);
+      return true;
+    } catch (e) {
+      const code = fsErrorCode(e);
+      if (code === undefined) throw e;
+      output.stderr(`vd render: cannot write ${file} in ${dir}: ${code}`);
+      debug(e);
+      return false;
+    }
+  };
+  if (options.srt) {
+    let srt: string;
+    try {
+      srt = buildSrt(rendered.timeline, rendered.scenario);
+    } catch (e) {
+      if (!(e instanceof RenderError)) throw e;
+      output.stderr(`vd render: ${e.message}`);
+      return EXIT_FAILURE;
+    }
+    if (!(await write(SRT_FILE, srt))) return EXIT_FAILURE;
+  }
+  if (!(await write(CREDITS_TEXT_FILE, creditsText))) return EXIT_FAILURE;
+  return EXIT_OK;
 }
 
 async function clean(args: string[], options: Options, context: Context): Promise<number> {
