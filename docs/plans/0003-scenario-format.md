@@ -124,7 +124,7 @@ The schema task fixes a file format, so it is reviewed with `gpt-6-astra` (see t
   - Constraints: runtime dependencies `zod` and `yaml` only. No dependency on other workspaces. No network access.
   - Ownership: `packages/scenario/`, plus the root `package-lock.json`.
   - Acceptance: `npm run build && npm run lint && npm run typecheck && npm test -w packages/scenario` passes. The tests include: the sample is valid, every rule above has a failing case, and `updateItem` followed by `saveScenario` keeps the comments and changes only the edited line.
-- [ ] CLI init and validate
+- [x] CLI init and validate
   - Target: `apps/cli/`
   - Change: a `vd` bin entry, and the `init` and `validate` commands described in this plan.
   - Constraints: no new dependencies. Depends on the schema task being merged.
