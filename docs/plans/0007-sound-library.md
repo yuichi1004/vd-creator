@@ -208,13 +208,15 @@ The library package task fixes a file format and the license checks, so it is re
   - Change: a library `AssetResolver` (the hook from 0004) that copies entries into `assets/library/` and writes `credits.json`, so the plan and the timeline use library durations; `vd validate` runs the project license check; `vd library promote`, `status`, and `sync`.
   - Constraints: no new dependencies. Do not change the pipeline itself; only add a resolver. Depends on the 0004 core and CLI tasks. `--library` is already accepted by `validate`, `generate`, and `clean` but ignored; this task makes it choose the library root for them.
   - Ownership: `packages/core/src/library/` (new), the line in `packages/core/src/index.ts` that registers default resolvers, the `dependencies` field of `packages/core/package.json`, the root `package-lock.json`, and `apps/cli/`.
+  - Notes from implementation: `defaultResolvers` stays unchanged. The CLI puts the library resolver first when a library root is set, and `vd serve` passes it through the server's `resolvers` option. The duration of each project copy is kept in `assets/library/durations.json`, keyed by SHA-256, because a credits entry has no duration; a missing or broken entry means the copy is made again from the library.
   - Acceptance: `npm test -w packages/core && npm test -w apps/cli` pass, with tests that render-check a project using one verified CC-BY entry (ok, attribution in credits) and one unverified entry under `use: commercial` (error).
-- [ ] Agent guidance
+- [x] Agent guidance
   - Target: `AGENTS.md`, `docs/scenario-format.md`
   - Change: tell agents to search the library before generating SFX or BGM, how to reference entries, and the rules for importing downloaded sounds (source URL, evidence, never mark as verified). Agents must never run `vd library verify` or answer its prompt: an agent terminal is a pseudo-terminal, so the TTY check alone cannot stop it.
   - Constraints: depends on the library commands task.
   - Ownership: `AGENTS.md`, `docs/scenario-format.md`.
   - Acceptance: the coordinator checks that the documented commands match `vd library --help`.
+  - Review notes: only `init`, `import`, `search`, `verify`, and `check` are documented. When project integration merges, add `promote`, `status`, and `sync`, and remove the "Not everything is built yet" note in the scenario guide.
 
 ## Open questions
 
