@@ -1,15 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { copyFile, link, mkdir, mkdtemp, rename, rm, stat, writeFile } from "node:fs/promises";
-import { extname, join } from "node:path";
+import { basename, extname, join } from "node:path";
 import { IdSchema } from "@vd-creator/scenario";
 import { Document, parseDocument } from "yaml";
 import { checkEntry } from "./check.js";
 import {
   assertManagedDir,
+  errnoCode,
   exists,
   findEntry,
+  fsProblem,
+  guardFs,
   hashFile,
+  hashManaged,
   inspectManagedPath,
   isErrno,
   type Library,
@@ -41,15 +45,21 @@ import {
 /** Audio file extensions that an entry may have. */
 export const AUDIO_EXTENSIONS = [".wav", ".mp3", ".flac", ".ogg", ".m4a"] as const;
 
+type TestHook = (operation: "import" | "verify") => Promise<void> | void;
+
 /**
- * For tests only: called at the two points where a write can be interrupted, so that a
- * test can swap a folder for a symbolic link there. `validated` runs after the folders
- * are validated and before anything is written; `staged` runs after the new files are
- * written to a temporary place and before they are moved into place.
+ * For tests only: called at the points where a write can be interrupted, so that a test
+ * can move a folder or swap it for a symbolic link there. `validated` runs after the
+ * folders are validated and before their identities are checked; `writing` runs after
+ * that check, just before the first write to a temporary place; `staged` runs after the
+ * new files are written there and before the second check; `renaming` runs after that
+ * check, just before they are moved into place.
  */
 export const testHooks: {
-  validated?: (operation: "import" | "verify") => Promise<void> | void;
-  staged?: (operation: "import" | "verify") => Promise<void> | void;
+  validated?: TestHook;
+  writing?: TestHook;
+  staged?: TestHook;
+  renaming?: TestHook;
 } = {};
 
 const IMPORT_CHANGED =
@@ -170,7 +180,8 @@ export async function promoteEntry(
 
 /**
  * Result of `verifyEntry`. `verified` is false, with `message` set, when the library
- * folders changed on disk during the write; entry.yaml was then left as it was.
+ * folders changed on disk during the write, or the write failed; entry.yaml was then left
+ * as it was.
  */
 export type VerifyEntryResult = { verified: boolean; entry: LibraryEntry; message?: string };
 
@@ -206,7 +217,7 @@ export async function verifyEntry(
   refuse((await checkEntry(library, found)).filter((i) => i.severity === "error"));
 
   const entryDir = join(root, ...found.dir.split("/"));
-  const ids = await recordIdentity([root, join(root, found.kind), entryDir]);
+  const ids = await recordIdentity(root, [".", found.kind, found.dir]);
   await assertManagedDir(root, found.dir);
   const original = await readManagedText(root, entryFile, "Entry file");
   if (original === undefined) throw new LibraryError(`Entry file ${entryFile} not found`);
@@ -222,11 +233,28 @@ export async function verifyEntry(
   await testHooks.validated?.("verify");
   if (!(await sameIdentity(ids))) return unchanged;
   const temp = join(entryDir, `.${ENTRY_FILE}.${randomUUID()}.tmp`);
-  await writeFile(temp, text, { encoding: "utf8", flag: "wx" });
-  await testHooks.staged?.("verify");
-  // On a change, the temporary file is left alone: its folder may now be anywhere.
-  if (!(await sameIdentity(ids))) return unchanged;
-  await rename(temp, join(entryDir, ENTRY_FILE));
+  // Set before the write, since a write that fails partway may leave part of the file.
+  // The name is random and "wx" refuses an existing file, so the file can only be ours.
+  let attempted = false;
+  let action = `write a temporary file in ${found.dir}`;
+  try {
+    await testHooks.writing?.("verify");
+    attempted = true;
+    await writeFile(temp, text, { encoding: "utf8", flag: "wx" });
+    await testHooks.staged?.("verify");
+    // On a change, the temporary file is left alone: its folder may now be anywhere.
+    if (!(await sameIdentity(ids))) return unchanged;
+    action = `replace ${entryFile}`;
+    await testHooks.renaming?.("verify");
+    await rename(temp, join(entryDir, ENTRY_FILE));
+  } catch (e) {
+    // Likewise, the temporary file is removed only if no folder on its way changed.
+    if (attempted && (await sameIdentity(ids))) await rm(temp, { force: true }).catch(() => {});
+    // Only filesystem failures are a failed write; anything else is a bug, and is thrown.
+    if (errnoCode(e) === "unknown") throw e;
+    const message = `Could not ${action} (${errnoCode(e)}); the entry was not verified`;
+    return { verified: false, entry: found, message };
+  }
   return { verified: true, entry: { ...found, entry: data } };
 }
 
@@ -323,14 +351,18 @@ async function addEntry(
   const dir = `${kind}/${id}`;
   if (
     library.entries.some((e) => e.kind === kind && e.entry.id === id) ||
-    (await exists(join(root, kind, id)))
+    (await exists(root, dir))
   ) {
     throw new LibraryError(`${dir} already exists; entry IDs are never reused`);
   }
   await requireFile(file, "Sound file");
   if (extra.evidence !== undefined) await requireFile(extra.evidence, "Evidence file");
 
-  const evidenceHash = extra.evidence === undefined ? undefined : await hashFile(extra.evidence);
+  const evidencePath = extra.evidence;
+  const evidenceHash =
+    evidencePath === undefined
+      ? undefined
+      : await guardFs("read", evidencePath, () => hashFile(evidencePath));
   const evidence =
     evidenceHash === undefined
       ? undefined
@@ -342,7 +374,7 @@ async function addEntry(
     title: options.title ?? id,
     tags: options.tags ?? [],
     file: soundName,
-    sha256: await hashFile(file),
+    sha256: await guardFs("read", file, () => hashFile(file)),
     durationSec: options.durationSec,
     loopable: options.loopable,
     source: dropUndefined(source),
@@ -364,14 +396,14 @@ async function addEntry(
   const kindDir = join(root, kind);
   const evidenceDir = join(root, EVIDENCE_DIR);
   await assertManagedDir(root, kind);
-  await mkdir(kindDir, { recursive: true });
+  await guardFs("create", kind, () => mkdir(kindDir, { recursive: true }));
   if (evidence !== undefined) {
     await assertManagedDir(root, EVIDENCE_DIR);
-    await mkdir(evidenceDir, { recursive: true });
+    await guardFs("create", EVIDENCE_DIR, () => mkdir(evidenceDir, { recursive: true }));
   }
   // The folders are validated after their identities are recorded, so the recorded
   // identities are those of the validated folders.
-  const ids = await recordIdentity([root, kindDir, ...(evidence ? [evidenceDir] : [])]);
+  const ids = await recordIdentity(root, [".", kind, ...(evidence ? [EVIDENCE_DIR] : [])]);
   await assertManagedDir(root, kind);
   if (evidence !== undefined) {
     await assertManagedDir(root, EVIDENCE_DIR);
@@ -382,22 +414,27 @@ async function addEntry(
 
   // The whole entry is written to a new dot folder in the kind folder, which readLibrary
   // skips, and moved into place only if no folder on the way changed meanwhile.
-  const staging = await mkdtemp(join(kindDir, `.${id}.`));
-  const stagedIds = [...ids, ...(await recordIdentity([staging]))];
+  const staging = await guardFs("create a staging folder in", kind, () =>
+    mkdtemp(join(kindDir, `.${id}.`)),
+  );
+  const stagedIds = [...ids, ...(await recordIdentity(root, [`${kind}/${basename(staging)}`]))];
   const stagedEvidence = join(staging, ".evidence");
   try {
     // Also confirms that mkdtemp created the folder in the validated kind folder.
     if (!(await sameIdentity(ids))) throw new LibraryError(IMPORT_CHANGED);
-    await copyFile(file, join(staging, soundName), constants.COPYFILE_EXCL);
+    await testHooks.writing?.("import");
+    await guardFs("copy", file, () =>
+      copyFile(file, join(staging, soundName), constants.COPYFILE_EXCL),
+    );
     if ((await hashFile(join(staging, soundName))) !== entry.sha256) {
       throw new LibraryError(`Sound file ${file} changed while it was being imported`);
     }
-    if (extra.evidence !== undefined && evidence !== undefined) {
-      await copyFile(extra.evidence, stagedEvidence, constants.COPYFILE_EXCL);
+    if (evidencePath !== undefined && evidence !== undefined) {
+      await guardFs("copy", evidencePath, () =>
+        copyFile(evidencePath, stagedEvidence, constants.COPYFILE_EXCL),
+      );
       if ((await hashFile(stagedEvidence)) !== EVIDENCE_PATH.exec(evidence)?.[1]) {
-        throw new LibraryError(
-          `Evidence file ${extra.evidence} changed while it was being imported`,
-        );
+        throw new LibraryError(`Evidence file ${evidencePath} changed while it was being imported`);
       }
     }
     await writeFile(join(staging, ENTRY_FILE), text, { encoding: "utf8", flag: "wx" });
@@ -407,19 +444,18 @@ async function addEntry(
       await placeEvidence(root, stagedEvidence, evidence);
       await rm(stagedEvidence);
     }
+    await testHooks.renaming?.("import");
     await rename(staging, join(kindDir, id));
   } catch (e) {
-    // After a change, nothing is removed: the staging folder may now be anywhere.
-    if (!(await sameIdentity(stagedIds))) {
-      throw new LibraryError(IMPORT_CHANGED, [], { cause: e });
-    }
-    await rm(staging, { recursive: true, force: true });
+    // After a change, nothing is removed: the staging folder may now be anywhere. Raw
+    // errors are not kept as the cause, since their messages hold absolute paths.
+    if (!(await sameIdentity(stagedIds))) throw new LibraryError(IMPORT_CHANGED);
+    await rm(staging, { recursive: true, force: true }).catch(() => {});
+    if (e instanceof LibraryError) throw e;
     if (isErrno(e, "ENOTEMPTY") || isErrno(e, "EEXIST")) {
-      throw new LibraryError(`${dir} already exists; entry IDs are never reused`, [], {
-        cause: e,
-      });
+      throw new LibraryError(`${dir} already exists; entry IDs are never reused`);
     }
-    throw e;
+    throw new LibraryError(`${fsProblem("write", dir, e)}; nothing was added`);
   }
   const added: LibraryEntry = { kind, dir, entry: entry as Entry };
   return { entry: added, issues: await checkEntry(library, added) };
@@ -433,7 +469,7 @@ async function checkExistingEvidence(root: string, evidence: string): Promise<vo
   if (state.status !== "file")
     throw new LibraryError(pathProblem("Evidence file", evidence, state));
   const expected = EVIDENCE_PATH.exec(evidence)?.[1];
-  if ((await hashFile(join(root, evidence))) !== expected) {
+  if ((await hashManaged(root, evidence)) !== expected) {
     throw new LibraryError(
       `Evidence file ${evidence} already exists with different content; check the library`,
     );
@@ -463,7 +499,8 @@ async function requireFile(path: string, what: string): Promise<void> {
   try {
     isFile = (await stat(path)).isFile();
   } catch (e) {
-    if (!isErrno(e, "ENOENT")) throw e;
+    if (!isErrno(e, "ENOENT"))
+      throw new LibraryError(`${what} ${path}: could not read it (${errnoCode(e)})`);
   }
   if (!isFile) throw new LibraryError(`${what} ${path} not found`);
 }

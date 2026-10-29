@@ -1,4 +1,5 @@
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readdir,
@@ -10,7 +11,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { parse, stringify } from "yaml";
 import { testHooks } from "./entries.js";
 import {
@@ -28,6 +29,19 @@ import {
   searchEntries,
   verifyEntry,
 } from "./index.js";
+
+// Lets a test make the next rename fail with a given error, such as EXDEV.
+const fsControl = vi.hoisted(() => ({ renameError: undefined as Error | undefined }));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  const rename: typeof actual.rename = async (from, to) => {
+    const failure = fsControl.renameError;
+    fsControl.renameError = undefined;
+    if (failure) throw failure;
+    return actual.rename(from, to);
+  };
+  return { ...actual, rename };
+});
 
 let dir: string;
 let root: string;
@@ -501,13 +515,14 @@ async function linkOut(rel: string, outside: string) {
 }
 
 describe("managed metadata files (P2-B)", () => {
-  test("a linked library.yaml is refused by read, check, and verify", async () => {
+  test("a linked library.yaml is refused by read and verify, and reported by check", async () => {
     await importEntry(root, sound, { ...download, evidence });
     await linkOut(LIBRARY_FILE, join(dir, "library.yaml"));
-    const refused = /Library file library\.yaml: library\.yaml is a symbolic link/;
-    await expect(readLibrary(root)).rejects.toThrow(refused);
-    await expect(checkLibrary(root)).rejects.toThrow(refused);
-    await expect(verifyEntry(root, "door-creak-01")).rejects.toThrow(refused);
+    const message =
+      "Library file library.yaml: library.yaml is a symbolic link; the library does not follow links";
+    await expect(readLibrary(root)).rejects.toThrow(message);
+    expect(await checkLibrary(root)).toEqual([{ file: LIBRARY_FILE, message, severity: "error" }]);
+    await expect(verifyEntry(root, "door-creak-01")).rejects.toThrow(message);
   });
 
   test("a linked licenses.yaml is reported, and verification refused", async () => {
@@ -597,5 +612,131 @@ describe("folders swapped during a write (P2-C)", () => {
     expect(result.verified).toBe(true);
     expect(result.message).toBeUndefined();
     expect(await readdir(join(root, "sfx", "door-creak-01"))).toEqual([ENTRY_FILE, "sound.wav"]);
+  });
+});
+
+// File permissions do not stop root, so these tests are skipped when running as root.
+const isRoot = process.getuid?.() === 0;
+
+describe("unreadable managed files (P2-B)", () => {
+  async function unreadable(rel: string) {
+    await chmod(join(root, ...rel.split("/")), 0o000);
+  }
+
+  test.skipIf(isRoot)("an unreadable library.yaml is a check issue", async () => {
+    await unreadable(LIBRARY_FILE);
+    const message = "Library file library.yaml: could not read it (EACCES)";
+    const issues = await checkLibrary(root);
+    expect(issues).toEqual([{ file: LIBRARY_FILE, message, severity: "error" }]);
+    expect(JSON.stringify(issues)).not.toContain(dir);
+    await expect(readLibrary(root)).rejects.toThrow(message);
+  });
+
+  test.skipIf(isRoot)("an unreadable licenses.yaml is a check issue", async () => {
+    await importEntry(root, sound, { ...download, evidence });
+    await unreadable(LICENSES_FILE);
+    const message = "License registry licenses.yaml: could not read it (EACCES)";
+    const issues = await checkLibrary(root);
+    expect(issues).toContainEqual({ file: LICENSES_FILE, message, severity: "error" });
+    expect(JSON.stringify(issues)).not.toContain(dir);
+    await expect(verifyEntry(root, "door-creak-01")).rejects.toThrow(message);
+  });
+
+  test.skipIf(isRoot)("an unreadable entry.yaml is a check issue", async () => {
+    const { entry } = await importEntry(root, sound, { ...download, evidence });
+    await unreadable(`${entry.dir}/${ENTRY_FILE}`);
+    const file = "sfx/door-creak-01/entry.yaml";
+    const issues = await checkLibrary(root);
+    expect(issues).toEqual([
+      { file, message: `Entry file ${file}: could not read it (EACCES)`, severity: "error" },
+    ]);
+    expect(JSON.stringify(issues)).not.toContain(dir);
+  });
+
+  test.skipIf(isRoot)("an unreadable kind folder is a check issue", async () => {
+    await importEntry(root, sound, { ...download, evidence });
+    await unreadable("sfx");
+    try {
+      const issues = await checkLibrary(root);
+      expect(issues).toEqual([
+        { file: "sfx", message: "Could not list sfx (EACCES)", severity: "error" },
+      ]);
+      expect(JSON.stringify(issues)).not.toContain(dir);
+    } finally {
+      await chmod(join(root, "sfx"), 0o755);
+    }
+  });
+
+  test.skipIf(isRoot)("unreadable sound and evidence files are check issues", async () => {
+    const { entry } = await importEntry(root, sound, { ...download, evidence });
+    await unreadable(`${entry.dir}/sound.wav`);
+    await unreadable(entry.entry.license.evidence ?? "");
+    const issues = await checkLibrary(root);
+    expect(messages(issues)).toEqual([
+      "Could not read sfx/door-creak-01/sound.wav (EACCES)",
+      `Could not read ${entry.entry.license.evidence} (EACCES)`,
+    ]);
+    expect(JSON.stringify(issues)).not.toContain(dir);
+  });
+});
+
+describe("failed writes (P2-C)", () => {
+  afterEach(() => {
+    testHooks.writing = undefined;
+    testHooks.renaming = undefined;
+    fsControl.renameError = undefined;
+  });
+
+  const moved = () => join(root, "sfx", ".door-creak-01-moved");
+  const moveEntry = () => rename(join(root, "sfx", "door-creak-01"), moved());
+  const exdev = () =>
+    Object.assign(new Error(`EXDEV: cross-device link not permitted, rename '${dir}'`), {
+      code: "EXDEV",
+    });
+
+  test.each([
+    ["writing", "write a temporary file in sfx/door-creak-01 (ENOENT)"],
+    ["renaming", "replace sfx/door-creak-01/entry.yaml (ENOENT)"],
+  ] as const)(
+    "verifyEntry is not verified when the entry folder moves before %s",
+    async (point, what) => {
+      await importEntry(root, sound, { ...download, evidence });
+      testHooks[point] = moveEntry;
+      const result = await verifyEntry(root, "door-creak-01");
+      expect(result).toMatchObject({
+        verified: false,
+        message: `Could not ${what}; the entry was not verified`,
+      });
+      expect(result.message).not.toContain(dir);
+      const kept = parse(await readFile(join(moved(), ENTRY_FILE), "utf8"));
+      expect(kept.license.verified).toBe(false);
+      // The folder changed, so a temporary file written before the move is left alone.
+      const temps = (await readdir(moved())).filter((f) => f.endsWith(".tmp"));
+      expect(temps).toHaveLength(point === "renaming" ? 1 : 0);
+    },
+  );
+
+  test("verifyEntry is not verified on EXDEV at rename, and leaves no temporary file", async () => {
+    await importEntry(root, sound, { ...download, evidence });
+    fsControl.renameError = exdev();
+    const result = await verifyEntry(root, "door-creak-01");
+    expect(result).toMatchObject({
+      verified: false,
+      message: "Could not replace sfx/door-creak-01/entry.yaml (EXDEV); the entry was not verified",
+    });
+    const entryDir = join(root, "sfx", "door-creak-01");
+    expect(await readdir(entryDir)).toEqual([ENTRY_FILE, "sound.wav"]);
+    expect(parse(await readFile(join(entryDir, ENTRY_FILE), "utf8")).license.verified).toBe(false);
+  });
+
+  test("import adds nothing and leaves no staging folder on EXDEV at rename", async () => {
+    testHooks.renaming = () => {
+      fsControl.renameError = exdev();
+    };
+    const failure = importEntry(root, sound, { ...download, evidence });
+    await expect(failure).rejects.toThrow(
+      "Could not write sfx/door-creak-01 (EXDEV); nothing was added",
+    );
+    expect(await readdir(join(root, "sfx"))).toEqual([]);
   });
 });

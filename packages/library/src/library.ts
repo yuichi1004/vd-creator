@@ -1,7 +1,7 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import type { Stats } from "node:fs";
 import { createReadStream } from "node:fs";
-import { lstat, mkdir, readdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { basename, join, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Document, parseDocument } from "yaml";
@@ -66,8 +66,8 @@ export type Library = {
  */
 export async function initLibrary(root: string, options: { name?: string } = {}): Promise<Library> {
   const meta = LibraryMetaSchema.parse({ version: 1, name: options.name ?? basename(root) });
-  await mkdir(root, { recursive: true });
-  const existing = new Set(await readdir(root));
+  await guardFs("create", ".", () => mkdir(root, { recursive: true }));
+  const existing = new Set(await guardFs("list", ".", () => readdir(root)));
   for (const file of [LIBRARY_FILE, LICENSES_FILE]) {
     if (existing.has(file)) throw new LibraryError(`${root} already has ${file}`);
   }
@@ -77,24 +77,33 @@ export async function initLibrary(root: string, options: { name?: string } = {})
     " The Creative Commons licenses below have fixed terms. Add site-specific and provider\n" +
     " licenses yourself; any term may be unknown.";
   // "wx" fails instead of overwriting, in case another process created the files meanwhile.
-  await writeFile(join(root, LICENSES_FILE), String(licenses), { encoding: "utf8", flag: "wx" });
+  await guardFs("write", LICENSES_FILE, () =>
+    writeFile(join(root, LICENSES_FILE), String(licenses), { encoding: "utf8", flag: "wx" }),
+  );
   for (const dir of [...LIBRARY_KINDS, EVIDENCE_DIR]) {
-    await mkdir(join(root, dir), { recursive: true });
+    await guardFs("create", dir, () => mkdir(join(root, dir), { recursive: true }));
   }
-  await writeFile(join(root, LIBRARY_FILE), String(new Document(meta)), {
-    encoding: "utf8",
-    flag: "wx",
-  });
+  await guardFs("write", LIBRARY_FILE, () =>
+    writeFile(join(root, LIBRARY_FILE), String(new Document(meta)), {
+      encoding: "utf8",
+      flag: "wx",
+    }),
+  );
   return readLibrary(root);
 }
 
 /**
  * Reads the library at `root`. Throws a `LibraryError` if library.yaml is missing, invalid,
- * or not a regular file inside the library. Every managed file is read like sound and
- * evidence files are checked: no symbolic links, and inside the root.
+ * unreadable, or not a regular file inside the library; except when it is missing, the
+ * error's `issues` say why. Every managed file is read like sound and evidence files are
+ * checked: no symbolic links, and inside the root. Filesystem failures on other managed
+ * files are returned as issues.
  */
 export async function readLibrary(root: string): Promise<Library> {
-  const metaText = await readManagedText(root, LIBRARY_FILE, "Library file");
+  const metaIssues: LibraryIssue[] = [];
+  const metaText = await readManagedIssue(root, LIBRARY_FILE, "Library file", metaIssues);
+  const [metaIssue] = metaIssues;
+  if (metaIssue) throw new LibraryError(metaIssue.message, metaIssues);
   if (metaText === undefined) {
     throw new LibraryError(`Not a sound library: ${LIBRARY_FILE} not found in ${root}`);
   }
@@ -124,7 +133,8 @@ export async function readLibrary(root: string): Promise<Library> {
       issues.push(error(kind, kindState));
       continue;
     }
-    const { dirs, links } = await listEntryDirs(root, kind);
+    const { dirs, links, problem } = await listEntryDirs(root, kind);
+    if (problem) issues.push(error(kind, problem));
     for (const name of links) {
       issues.push(
         error(
@@ -188,15 +198,37 @@ export async function hashFile(path: string): Promise<string> {
   return hash.digest("hex");
 }
 
-/** Writes a file by renaming a temporary file over it, so readers never see half a file. */
-export async function writeFileAtomic(path: string, text: string): Promise<void> {
-  const temp = `${path}.${randomUUID()}.tmp`;
+/** `hashFile` of `rel` in the library, with a failure as a `LibraryError` (see `guardFs`). */
+export async function hashManaged(root: string, rel: string): Promise<string> {
+  return guardFs("read", rel, () => hashFile(join(root, ...rel.split("/"))));
+}
+
+/** The error code of a failed filesystem call, such as EACCES, or "unknown". */
+export function errnoCode(e: unknown): string {
+  const code = e instanceof Error ? (e as NodeJS.ErrnoException).code : undefined;
+  return typeof code === "string" && /^[A-Z0-9_]+$/.test(code) ? code : "unknown";
+}
+
+/**
+ * Message for a filesystem call on `rel` that failed. It names only `rel`, which callers
+ * give relative to the library root or as the path they were passed, and the error code:
+ * the raw message holds the absolute path.
+ */
+export function fsProblem(action: string, rel: string, e: unknown): string {
+  return `Could not ${action} ${rel} (${errnoCode(e)})`;
+}
+
+/**
+ * Runs a filesystem call on `rel`, and turns any failure other than a `LibraryError` into
+ * a `LibraryError` with the `fsProblem` message. The raw error is not kept as the cause,
+ * since its message holds the absolute path.
+ */
+export async function guardFs<T>(action: string, rel: string, call: () => Promise<T>): Promise<T> {
   try {
-    await writeFile(temp, text, "utf8");
-    await rename(temp, path);
+    return await call();
   } catch (e) {
-    await rm(temp, { force: true });
-    throw e;
+    if (e instanceof LibraryError) throw e;
+    throw new LibraryError(fsProblem(action, rel, e));
   }
 }
 
@@ -233,7 +265,8 @@ export function error(file: string, message: string): LibraryIssue {
 /**
  * Reads `rel`, a managed text file, after the same checks as sound and evidence files:
  * a regular file, no symbolic link at any segment, and inside the root. Returns undefined
- * if it does not exist, and throws a `LibraryError` for any other problem.
+ * if it does not exist, and throws a `LibraryError` for any other problem, including a
+ * failed read, with a message that names only `rel` and the error code.
  */
 export async function readManagedText(
   root: string,
@@ -243,7 +276,11 @@ export async function readManagedText(
   const state = await inspectManagedPath(root, rel);
   if (state.status === "missing") return undefined;
   if (state.status !== "file") throw new LibraryError(pathProblem(what, rel, state));
-  return readFile(join(root, ...rel.split("/")), "utf8");
+  try {
+    return await readFile(join(root, ...rel.split("/")), "utf8");
+  } catch (e) {
+    throw new LibraryError(`${what} ${rel}: could not read it (${errnoCode(e)})`);
+  }
 }
 
 // `readManagedText`, with a refusal added to `issues` as an error on `rel`.
@@ -256,8 +293,7 @@ async function readManagedIssue(
   try {
     return await readManagedText(root, rel, what);
   } catch (e) {
-    if (!(e instanceof LibraryError)) throw e;
-    issues.push(error(rel, e.message));
+    issues.push(error(rel, e instanceof LibraryError ? e.message : fsProblem("read", rel, e)));
     return undefined;
   }
 }
@@ -273,6 +309,8 @@ export function pathProblem(what: string, rel: string, state: ManagedPathState):
       return `${what} ${rel}: ${state.at} is a symbolic link; the library does not follow links`;
     case "outside":
       return `${what} ${rel} resolves outside the library`;
+    case "error":
+      return `${what} ${rel}: could not inspect ${state.at} (${state.code})`;
     default:
       return `${what} ${rel} is fine`;
   }
@@ -285,17 +323,16 @@ async function inspectKindDir(root: string, kind: LibraryKind): Promise<string |
     await assertManagedDir(root, kind);
     return undefined;
   } catch (e) {
-    if (e instanceof LibraryError) return e.message;
-    throw e;
+    return e instanceof LibraryError ? e.message : fsProblem("inspect", kind, e);
   }
 }
 
 // Entry folders of one kind, and symbolic links where an entry folder would be. Dot
-// folders are skipped: imports stage entries in them.
+// folders are skipped: imports stage entries in them. A failure to list is `problem`.
 async function listEntryDirs(
   root: string,
   kind: LibraryKind,
-): Promise<{ dirs: string[]; links: string[] }> {
+): Promise<{ dirs: string[]; links: string[]; problem?: string }> {
   try {
     const dirents = (await readdir(join(root, kind), { withFileTypes: true }))
       .filter((d) => !d.name.startsWith("."))
@@ -306,7 +343,7 @@ async function listEntryDirs(
     };
   } catch (e) {
     if (isErrno(e, "ENOENT")) return { dirs: [], links: [] };
-    throw e;
+    return { dirs: [], links: [], problem: fsProblem("list", kind, e) };
   }
 }
 
@@ -316,13 +353,15 @@ export type ManagedPathState =
   | { status: "missing" }
   | { status: "not-file" }
   | { status: "symlink"; at: string }
-  | { status: "outside" };
+  | { status: "outside" }
+  | { status: "error"; at: string; code: string };
 
 /**
  * Inspects `rel`, a "/"-separated path inside the library, without following symbolic
  * links. A link at the path or at any parent folder below the root is reported as
  * `symlink`, with the library-relative path of the link. As a second line of defense, a
- * regular file whose resolved path is not inside the resolved root is `outside`.
+ * regular file whose resolved path is not inside the resolved root is `outside`. A failed
+ * filesystem call is `error`, with the library-relative path it failed on and its code.
  */
 export async function inspectManagedPath(root: string, rel: string): Promise<ManagedPathState> {
   const segments = rel.split("/");
@@ -332,19 +371,24 @@ export async function inspectManagedPath(root: string, rel: string): Promise<Man
       info = await lstat(join(root, ...segments.slice(0, i)));
     } catch (e) {
       if (isErrno(e, "ENOENT") || isErrno(e, "ENOTDIR")) return { status: "missing" };
-      throw e;
+      return { status: "error", at: segments.slice(0, i).join("/"), code: errnoCode(e) };
     }
     if (info.isSymbolicLink()) return { status: "symlink", at: segments.slice(0, i).join("/") };
     if (i === segments.length && !info.isFile()) return { status: "not-file" };
   }
-  return (await isInside(root, join(root, ...segments)))
-    ? { status: "file" }
-    : { status: "outside" };
+  try {
+    return (await isInside(root, join(root, ...segments)))
+      ? { status: "file" }
+      : { status: "outside" };
+  } catch (e) {
+    return { status: "error", at: rel, code: errnoCode(e) };
+  }
 }
 
 /**
  * Throws a `LibraryError` if a folder of `rel` that exists is a symbolic link, or resolves
- * outside the root. Folders that do not exist yet are fine; the caller creates them.
+ * outside the root, or cannot be inspected. Folders that do not exist yet are fine; the
+ * caller creates them.
  */
 export async function assertManagedDir(root: string, rel: string): Promise<void> {
   const segments = rel.split("/");
@@ -355,13 +399,16 @@ export async function assertManagedDir(root: string, rel: string): Promise<void>
       info = await lstat(join(root, ...segments.slice(0, i)));
     } catch (e) {
       if (isErrno(e, "ENOENT")) return;
-      throw e;
+      throw new LibraryError(fsProblem("inspect", at, e));
     }
     if (info.isSymbolicLink()) {
       throw new LibraryError(`${at} is a symbolic link; the library does not follow links`);
     }
     if (!info.isDirectory()) throw new LibraryError(`${at} is not a folder`);
-    if (!(await isInside(root, join(root, ...segments.slice(0, i))))) {
+    const inside = await guardFs("inspect", at, () =>
+      isInside(root, join(root, ...segments.slice(0, i))),
+    );
+    if (!inside) {
       throw new LibraryError(`${at} resolves outside the library`);
     }
   }
@@ -372,21 +419,23 @@ async function isInside(root: string, path: string): Promise<boolean> {
   return realPath.startsWith(realRoot.endsWith(sep) ? realRoot : realRoot + sep);
 }
 
-/** Device and inode numbers of a path, recorded when it was validated. */
+/** Device and inode numbers of a library folder, recorded when it was validated. */
 export type PathIdentity = { path: string; dev: bigint; ino: bigint };
 
 /**
  * Records the identity of the folders a write goes through, right after they were
- * validated. `sameIdentity` compares them again just before the write is committed.
+ * validated, given relative to the root ("." for the root itself). `sameIdentity` compares
+ * them again just before the write is committed.
  *
  * Node has no openat, so a write still goes by path. A folder swapped for a symbolic link
  * between the last `sameIdentity` and the write itself is not detected; these checks only
  * narrow that window, and fail closed when they see a change.
  */
-export async function recordIdentity(paths: string[]): Promise<PathIdentity[]> {
+export async function recordIdentity(root: string, rels: string[]): Promise<PathIdentity[]> {
   const ids: PathIdentity[] = [];
-  for (const path of paths) {
-    const info = await lstat(path, { bigint: true });
+  for (const rel of rels) {
+    const path = join(root, ...rel.split("/"));
+    const info = await guardFs("inspect", rel, () => lstat(path, { bigint: true }));
     ids.push({ path, dev: info.dev, ino: info.ino });
   }
   return ids;
@@ -405,14 +454,14 @@ export async function sameIdentity(ids: PathIdentity[]): Promise<boolean> {
   return true;
 }
 
-/** True if something, even a dangling symbolic link, exists at `path`. */
-export async function exists(path: string): Promise<boolean> {
+/** True if something, even a dangling symbolic link, exists at `rel` in the library. */
+export async function exists(root: string, rel: string): Promise<boolean> {
   try {
-    await lstat(path);
+    await lstat(join(root, ...rel.split("/")));
     return true;
   } catch (e) {
     if (isErrno(e, "ENOENT")) return false;
-    throw e;
+    throw new LibraryError(fsProblem("inspect", rel, e));
   }
 }
 
