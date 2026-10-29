@@ -11,9 +11,16 @@ export const ASSET_DIRS: Record<AssetKind, string> = { tts: "voice", sfx: "sfx",
 /** Number of hex characters of the cache key used in asset file names. */
 export const ASSET_KEY_PREFIX_LENGTH = 16;
 
+/** The message of the `TypeError` that `canonicalJson` throws. It never holds the value. */
+export const CANONICAL_JSON_UNSUPPORTED = "canonicalJson supports only plain JSON values";
+
 /**
- * JSON with object keys sorted at every level and `undefined` values dropped, so that
- * equal requests always give the same text.
+ * JSON with object keys sorted at every level, so that equal requests always give the same
+ * text. Supported values are plain JSON values: null, booleans, finite numbers, strings,
+ * arrays, and plain objects (whose prototype is `Object.prototype` or null). An `undefined`
+ * object value is dropped and an `undefined` array element is written as null, as
+ * `JSON.stringify` does. Anything else, such as a function, symbol, bigint, non-finite number,
+ * or an object like a `Date` or `Map`, throws a `TypeError` with a fixed message.
  */
 export function canonicalJson(value: unknown): string {
   // The text is written directly from the sorted own keys, never copied onto a new object,
@@ -22,6 +29,9 @@ export function canonicalJson(value: unknown): string {
     return `[${value.map((v) => (v === undefined ? "null" : canonicalJson(v))).join(",")}]`;
   }
   if (value !== null && typeof value === "object") {
+    const proto = Object.getPrototypeOf(value);
+    if (proto !== Object.prototype && proto !== null)
+      throw new TypeError(CANONICAL_JSON_UNSUPPORTED);
     const record = value as Record<string, unknown>;
     const parts: string[] = [];
     for (const key of Object.keys(record).sort()) {
@@ -30,7 +40,17 @@ export function canonicalJson(value: unknown): string {
     }
     return `{${parts.join(",")}}`;
   }
-  return JSON.stringify(value) ?? "null";
+  switch (typeof value) {
+    case "string":
+    case "boolean":
+      return JSON.stringify(value);
+    case "number":
+      if (Number.isFinite(value)) return JSON.stringify(value);
+      break;
+    default:
+      if (value === null) return "null";
+  }
+  throw new TypeError(CANONICAL_JSON_UNSUPPORTED);
 }
 
 /** The SHA-256, in hex, of the canonical JSON of `{ kind, providerId, request }`. */

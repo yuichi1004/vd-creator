@@ -6,7 +6,7 @@ import { access, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises
 import { dirname, join } from "node:path";
 import type { AudioFormat } from "@vd-creator/providers";
 import { AssetPathSchema } from "@vd-creator/scenario";
-import { ASSET_DIRS, ASSET_KEY_PREFIX_LENGTH, type AssetKind } from "./canonical.js";
+import { ASSET_DIRS, ASSET_KEY_PREFIX_LENGTH, type AssetKind, canonicalJson } from "./canonical.js";
 
 /** File name of the cache inside a project folder. */
 export const CACHE_FILE = "cache.json";
@@ -91,17 +91,42 @@ export class AssetCache {
   }
 
   /**
-   * The entry of a key if its asset file exists. This is the one rule for "cached": an entry
-   * whose file is missing counts as not cached, in planning, generation, and the timeline.
+   * The entry of a key if its asset file exists. This is the rule for "cached" in planning and
+   * generation: an entry whose file is missing counts as not cached. `playbackAsset` applies
+   * the same file rule for the timeline.
    */
   async cachedAsset(key: string): Promise<CacheEntry | undefined> {
     const entry = this.#entries.get(key);
-    if (!entry) return undefined;
+    return entry && (await this.#fileExists(entry)) ? entry : undefined;
+  }
+
+  /**
+   * The asset to play for a request, from any provider: among the entries with this kind and
+   * the same canonical request, whose file exists, the newest by `createdAt`. Generation uses
+   * `cachedAsset` instead, which is strict about the provider.
+   */
+  async playbackAsset(
+    kind: AssetKind,
+    request: object,
+  ): Promise<{ key: string; entry: CacheEntry } | undefined> {
+    const wanted = canonicalJson(request);
+    // An unreadable createdAt counts as the oldest.
+    const time = (entry: CacheEntry) => Date.parse(entry.createdAt) || Number.NEGATIVE_INFINITY;
+    const matches = [...this.#entries]
+      .filter(([, entry]) => entry.kind === kind && canonicalJson(entry.request) === wanted)
+      .sort(([, a], [, b]) => time(b) - time(a));
+    for (const [key, entry] of matches) {
+      if (await this.#fileExists(entry)) return { key, entry };
+    }
+    return undefined;
+  }
+
+  async #fileExists(entry: CacheEntry): Promise<boolean> {
     try {
       await access(this.assetPath(entry.file));
-      return entry;
+      return true;
     } catch {
-      return undefined;
+      return false;
     }
   }
 

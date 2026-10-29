@@ -8,7 +8,18 @@ import { type AssetCache, assetFileFor } from "./cache.js";
 import { cacheKey } from "./canonical.js";
 import { type GenerationRequest, generationRequest, type ScenarioItem } from "./items.js";
 
-export type ResolveContext = { scenario: Scenario; cache: AssetCache };
+export type ResolveContext = {
+  scenario: Scenario;
+  cache: AssetCache;
+  /**
+   * Why the asset is wanted. "generate" (the default) is for `planGeneration` and
+   * `runGeneration`: a generated asset counts only if it comes from the chosen provider.
+   * "playback" is for the timeline and anything else that plays assets: an asset for the same
+   * request from any provider counts. Resolvers whose assets do not depend on a provider,
+   * such as a library resolver, can ignore it.
+   */
+  purpose?: "generate" | "playback";
+};
 
 export type PlannedAsset =
   | { status: "cached"; key?: string; file: string; durationSec: number }
@@ -57,12 +68,19 @@ export class GeneratedItemResolver implements AssetResolver {
 
   async plan(item: ScenarioItem, ctx: ResolveContext): Promise<PlannedAsset> {
     const { gen, providerId } = this.#request(item, ctx);
-    const key = cacheKey(gen.kind, providerId, gen.request);
-    const entry = await ctx.cache.cachedAsset(key);
-    if (entry) {
+    const strictKey = cacheKey(gen.kind, providerId, gen.request);
+    // For playback, the key is that of the entry found, which may be another provider's.
+    const found =
+      ctx.purpose === "playback"
+        ? await ctx.cache.playbackAsset(gen.kind, gen.request)
+        : await ctx.cache
+            .cachedAsset(strictKey)
+            .then((entry) => entry && { key: strictKey, entry });
+    if (found) {
+      const { key, entry } = found;
       return { status: "cached", key, file: entry.file, durationSec: entry.durationSec };
     }
-    return { status: "to-generate", key, cost: this.#estimate(gen) };
+    return { status: "to-generate", key: strictKey, cost: this.#estimate(gen) };
   }
 
   async resolve(item: ScenarioItem, ctx: ResolveContext): Promise<ResolvedAsset> {

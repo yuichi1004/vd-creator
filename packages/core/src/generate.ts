@@ -61,7 +61,7 @@ export async function planGeneration(
   resolvers: readonly AssetResolver[],
   options: GenerationOptions = {},
 ): Promise<GenerationPlan> {
-  const ctx: ResolveContext = { scenario, cache };
+  const ctx: ResolveContext = { scenario, cache, purpose: "generate" };
   const items: PlannedItem[] = [];
   const cost: Cost = { characters: 0, requests: 0 };
   const counted = new Set<string>();
@@ -75,6 +75,23 @@ export async function planGeneration(
     items.push(planned);
   }
   return { items, cost };
+}
+
+/**
+ * Plans every item for playback: like `planGeneration`, but a generated asset for the same
+ * request counts whichever provider made it, so a project generated with one provider plays
+ * with the resolvers of another. Used by the timeline. Throws a `GenerationError` if planning
+ * an item fails.
+ */
+export async function planPlayback(
+  scenario: Scenario,
+  cache: AssetCache,
+  resolvers: readonly AssetResolver[],
+): Promise<PlannedItem[]> {
+  const ctx: ResolveContext = { scenario, cache, purpose: "playback" };
+  const items: PlannedItem[] = [];
+  for (const item of scenarioItems(scenario)) items.push(await planItem(item, ctx, resolvers));
+  return items;
 }
 
 export type ItemResult = {
@@ -114,7 +131,7 @@ export async function runGeneration(
   resolvers: readonly AssetResolver[],
   options: RunGenerationOptions = {},
 ): Promise<GenerationResult> {
-  const ctx: ResolveContext = { scenario, cache };
+  const ctx: ResolveContext = { scenario, cache, purpose: "generate" };
   const targets = selectItems(scenario, options);
   const requested = Math.floor(options.concurrency ?? GENERATION_CONCURRENCY);
   const concurrency = Number.isNaN(requested)

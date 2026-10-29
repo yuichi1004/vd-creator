@@ -73,30 +73,45 @@ afterAll(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-/** A cache in a new folder with an asset file of the given length for each item ID. */
+type CacheOptions = {
+  /** Add to this cache instead of a new one. */
+  cache?: AssetCache;
+  providerId?: string;
+  createdAt?: string;
+};
+
+/**
+ * A cache with an asset file of the given length for each item ID, made by the mock provider
+ * unless another provider ID is given. A new cache gets a new folder.
+ */
 async function cacheWith(
   scenario: Scenario,
   durations: Record<string, number>,
+  options: CacheOptions = {},
 ): Promise<AssetCache> {
-  const cache = new AssetCache(await mkdtemp(join(dir, "project-")));
+  const providerId = options.providerId ?? "mock";
+  const cache = options.cache ?? new AssetCache(await mkdtemp(join(dir, "project-")));
   for (const item of scenarioItems(scenario)) {
     const durationSec = durations[item.id];
     const gen = generationRequest(scenario, item);
     if (durationSec === undefined || !gen) continue;
-    const key = cacheKey(gen.kind, "mock", gen.request);
+    const key = cacheKey(gen.kind, providerId, gen.request);
     const file = assetFileFor(gen.kind, key, "wav");
     await cache.writeAsset(file, new Uint8Array([0]));
     cache.set(key, {
       kind: gen.kind,
       file,
-      providerId: "mock",
+      providerId,
       request: gen.request,
       durationSec,
-      createdAt: "2026-10-29T00:00:00.000Z",
+      createdAt: options.createdAt ?? "2026-10-29T00:00:00.000Z",
     });
   }
   return cache;
 }
+
+/** A provider ID that stands for a real provider. No provider with this ID is ever called. */
+const OTHER_PROVIDER = "fake-elevenlabs";
 
 const round = (n: number) => Math.round(n * 1000) / 1000;
 
@@ -297,5 +312,49 @@ scenes:
       ["q", 4],
     ]);
     for (const span of t.images) expect(span.endSec).toBeGreaterThan(span.startSec);
+  });
+
+  test("a project generated with another provider plays with the mock resolvers", async () => {
+    const all = { s1: 30, l1: 2, fx1: 4, l2: 1, fx2: 0.5, l3: 1.5, l4: 0.8 };
+    const other = await cacheWith(scenario, all, { providerId: OTHER_PROVIDER });
+    const t = await computeTimeline(scenario, other, resolvers);
+    // Only the library sounds, which no default resolver supplies, have no asset.
+    expect(
+      [...t.items, ...t.bgm.map((b) => ({ ...b, id: b.sceneId }))]
+        .filter((i) => i.missing)
+        .map((i) => i.id),
+    ).toEqual(["fx3", "s2"]);
+    expect(t.items.find((i) => i.id === "l4")).toMatchObject({ durationSec: 0.8 });
+    expect(t.bgm[0]).toMatchObject({ assetDurationSec: 30 });
+    // Generation stays strict: the mock resolvers would still make their own assets.
+    const plan = await planGeneration(scenario, other, resolvers);
+    expect(plan.items.filter((i) => i.status === "cached")).toEqual([]);
+  });
+
+  test("when two providers have an asset for the request, the newer one plays", async () => {
+    const both = await cacheWith(scenario, { l1: 2 }, { createdAt: "2026-10-29T00:00:00.000Z" });
+    await cacheWith(
+      scenario,
+      { l1: 3 },
+      { cache: both, providerId: OTHER_PROVIDER, createdAt: "2026-10-29T01:00:00.000Z" },
+    );
+    const l1 = (t: Timeline) => t.items.find((i) => i.id === "l1");
+    const newerOther = l1(await computeTimeline(scenario, both, resolvers));
+    expect(newerOther).toMatchObject({ durationSec: 3 });
+    expect(newerOther?.missing).toBeUndefined();
+
+    await cacheWith(scenario, { l1: 4 }, { cache: both, createdAt: "2026-10-29T02:00:00.000Z" });
+    const newerMock = l1(await computeTimeline(scenario, both, resolvers));
+    expect(newerMock).toMatchObject({ durationSec: 4 });
+    expect(newerMock?.assetFile).not.toBe(newerOther?.assetFile);
+  });
+
+  test("a changed line text shows missing, whichever provider made the old asset", async () => {
+    const other = await cacheWith(scenario, { l1: 2, l2: 1 }, { providerId: OTHER_PROVIDER });
+    const changed = parse(YAML.replace("line: One", "line: One, changed"));
+    const t = await computeTimeline(changed, other, resolvers);
+    expect(t.items.find((i) => i.id === "l1")).toMatchObject({ missing: true });
+    expect(t.items.find((i) => i.id === "l1")?.assetFile).toBeUndefined();
+    expect(t.items.find((i) => i.id === "l2")?.missing).toBeUndefined();
   });
 });

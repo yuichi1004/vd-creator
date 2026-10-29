@@ -10,7 +10,7 @@ import {
   CacheFormatError,
   parseCacheData,
 } from "./cache.js";
-import { cacheKey, canonicalJson } from "./canonical.js";
+import { CANONICAL_JSON_UNSUPPORTED, cacheKey, canonicalJson } from "./canonical.js";
 
 let dir: string;
 
@@ -76,6 +76,36 @@ describe("canonicalJson and cacheKey", () => {
     }
   });
 
+  test("anything but plain JSON values throws a TypeError with a fixed message", () => {
+    const secret = "secret line text";
+    const unsupported: unknown[] = [
+      () => secret,
+      Symbol(secret),
+      10n,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      new Date(0),
+      new Map([[secret, 1]]),
+      new (class Settings {
+        text = secret;
+      })(),
+    ];
+    for (const value of unsupported) {
+      for (const wrapped of [value, { text: secret, value }, [secret, value]]) {
+        let error: unknown;
+        try {
+          canonicalJson(wrapped);
+        } catch (e) {
+          error = e;
+        }
+        expect(error).toBeInstanceOf(TypeError);
+        expect((error as TypeError).message).toBe(CANONICAL_JSON_UNSUPPORTED);
+      }
+    }
+    expect(() => cacheKey("tts", "mock", { ...request, at: new Date(0) })).toThrow(TypeError);
+    expect(canonicalJson(Object.assign(Object.create(null), { b: 1, a: 2 }))).toBe('{"a":2,"b":1}');
+  });
+
   test("asset files go under the kind's folder, named by the first 16 hex characters", () => {
     expect(entry.file).toBe(`voice/${key.slice(0, 16)}.wav`);
     expect(assetFileFor("sfx", key, "mp3")).toBe(`sfx/${key.slice(0, 16)}.mp3`);
@@ -107,6 +137,36 @@ describe("AssetCache", () => {
     await cache.writeAsset(entry.file, new Uint8Array([1, 2, 3]));
     expect(await cache.cachedAsset(key)).toEqual(entry);
     expect(await readFile(join(dir, "assets", entry.file))).toEqual(Buffer.from([1, 2, 3]));
+  });
+
+  test("playbackAsset takes the newest entry for the request from any provider whose file exists", async () => {
+    const cache = new AssetCache(dir);
+    const add = async (providerId: string, createdAt: string, withFile = true) => {
+      const k = cacheKey("tts", providerId, request);
+      const e: CacheEntry = {
+        ...entry,
+        providerId,
+        createdAt,
+        file: assetFileFor("tts", k, "wav"),
+      };
+      cache.set(k, e);
+      if (withFile) await cache.writeAsset(e.file, new Uint8Array([0]));
+      return { key: k, entry: e };
+    };
+    expect(await cache.playbackAsset("tts", request)).toBeUndefined();
+    const older = await add("fake-remote", "2026-10-29T00:00:00.000Z");
+    expect(await cache.playbackAsset("tts", request)).toEqual(older);
+    const newer = await add("mock", "2026-10-29T01:00:00.000Z");
+    // Key order in the request does not matter.
+    expect(await cache.playbackAsset("tts", { take: 0, voiceId: "v1", text: "Hello" })).toEqual(
+      newer,
+    );
+    // The newest entry without its file is skipped.
+    await add("other-fake", "2026-10-29T02:00:00.000Z", false);
+    expect(await cache.playbackAsset("tts", request)).toEqual(newer);
+    // Another kind or another request does not match.
+    expect(await cache.playbackAsset("sfx", request)).toBeUndefined();
+    expect(await cache.playbackAsset("tts", { ...request, text: "Bye" })).toBeUndefined();
   });
 
   test("concurrent saves all complete and the last state wins", async () => {

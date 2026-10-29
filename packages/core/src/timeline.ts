@@ -3,7 +3,7 @@
 
 import type { ItemKind, Scenario } from "@vd-creator/scenario";
 import type { AssetCache } from "./cache.js";
-import { type PlannedItem, planGeneration } from "./generate.js";
+import { type PlannedItem, planPlayback } from "./generate.js";
 import type { AssetResolver } from "./resolver.js";
 
 /** Speaking rate used to estimate the length of a line that has no asset yet. */
@@ -64,8 +64,9 @@ export type Timeline = {
  * from its start time but does not move the next item. The order continues across scenes.
  * Items without an asset get an estimated duration and `missing: true`.
  *
- * Assets come from `planGeneration` with the same resolvers, so the timeline shows an asset
- * exactly when the plan reports it as cached. Throws a `GenerationError` if planning fails.
+ * Assets come from `planPlayback` with the given resolvers. A generated asset counts whichever
+ * provider made it, so a project generated with one provider still plays when the resolvers
+ * use another, such as the mock. Throws a `GenerationError` if planning fails.
  */
 export async function computeTimeline(
   scenario: Scenario,
@@ -74,7 +75,7 @@ export async function computeTimeline(
 ): Promise<Timeline> {
   // A BGM uses its scene's ID, and IDs are unique in a scenario, so one map holds both.
   const plans = new Map<string, PlannedItem>();
-  for (const planned of (await planGeneration(scenario, cache, resolvers)).items) {
+  for (const planned of await planPlayback(scenario, cache, resolvers)) {
     plans.set(planned.id, planned);
   }
   const lookup = (
