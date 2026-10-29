@@ -38,8 +38,9 @@ Non-goals:
 
 ### Video
 
-- Each image span from the timeline becomes one entry in an ffmpeg concat list with its duration. If no image is shown at the start, a black frame fills the gap.
-- Images are scaled and padded to 1920x1080 without cropping.
+- Each distinct image is fitted once, without cropping, into a 1920x1080 PNG still over black, in a temporary folder under `out/` that is removed after the render. Transparent areas show black.
+- Each image span from the timeline becomes one entry in a concat demuxer list that names a still and its duration. If no image is shown at the start, a black still fills the gap. One ffmpeg input per span used several GB of memory for 120 spans, which is why the stills are made first.
+- `buildVideoArgs` returns `{ stills, concatList, args }`: the commands that make the stills, the list text, and the final encode. `vd render --print-command` prints all of them.
 - The video is H.264 (`yuv420p`, 30 fps, `-tune stillimage`) and the audio is the mixed audio as AAC, in `out/drama.mp4`.
 
 ### Subtitles
@@ -62,15 +63,16 @@ It checks that ffmpeg is on `PATH`, that every item has an asset, and that the p
   - Constraints: no new dependencies. ffmpeg is the only external program.
   - Ownership: `packages/render/` except `src/video.ts` and `src/video.test.ts`.
   - Acceptance: `npm test -w packages/render` passes, including: unit tests for the argument builder (delays, BGM loop and ducking, loudnorm), an SRT snapshot for the 0003 sample, and an integration test that renders a mock-generated project with the real ffmpeg and checks the output duration with `ffprobe`.
-- [ ] Video export
+- [x] Video export
   - Target: `packages/render/src/video.ts`, `packages/render/src/video.test.ts`
   - Change: `buildVideoArgs(timeline, options)` and `renderVideo(projectDir, options)` as described above, exported from the package index.
   - Constraints: no new dependencies. Depends on the audio task.
   - Ownership: `packages/render/src/video.ts`, `packages/render/src/video.test.ts`, and the export line in `packages/render/src/index.ts`.
   - Acceptance: `npm test -w packages/render` passes, including an integration test that renders a mock project with two images and checks with `ffprobe` that the video is 1920x1080 and as long as the audio.
+  - Review notes: EXIF rotation of phone JPEGs is not applied. Low-severity follow-ups: pass `-safe 1` to the concat demuxer explicitly, although the list holds only generated names; libx264 uses the `medium` preset, so 1080p encodes at about real time, and a faster preset may be worth it.
 - [ ] `vd render`
   - Target: `apps/cli/`
-  - Change: the command described above.
+  - Change: the command described above. The video step uses the `{ stills, concatList, args }` shape from `buildVideoArgs`.
   - Constraints: no new dependencies. Depends on the video task and on the 0007 project integration task. Must not run at the same time as another task that owns `apps/cli/`, such as `vd serve` in 0005.
   - Ownership: `apps/cli/`.
   - Acceptance: `npm test -w apps/cli` passes, with a test that runs `init`, `generate` with the mock, and `render --video --srt`, then checks that the output files, including `credits.txt`, exist. A test checks that a missing asset fails with the item IDs listed, and that a license error stops the render.
