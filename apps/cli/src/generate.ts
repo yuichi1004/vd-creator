@@ -2,6 +2,7 @@
 // See "vd generate" in docs/plans/0004-providers-and-generation.md.
 
 import { type GenerationError, type GenerationPlan, itemLabel } from "@vd-creator/core";
+import { LibraryError } from "@vd-creator/library";
 import {
   createElevenLabsProviders,
   createProviders,
@@ -33,7 +34,12 @@ export function formatPlan(plan: GenerationPlan, providerId: string): string[] {
   const counts = { "to-generate": 0, cached: 0, unresolved: 0, invalid: 0 };
   for (const item of plan.items) {
     counts[item.status]++;
-    lines.push(`  ${STATUS_LABELS[item.status].padEnd(width)}  ${itemLabel(item)}`);
+    // A library sound is copied, not generated, and costs nothing.
+    const label =
+      item.status === "to-generate" && item.resolver === "library"
+        ? "copy"
+        : STATUS_LABELS[item.status];
+    lines.push(`  ${label.padEnd(width)}  ${itemLabel(item)}`);
   }
   if (plan.items.length === 0) lines.push("  (no items)");
   lines.push(
@@ -108,7 +114,9 @@ export function gateProviders(providers: ProviderSet, authorized: boolean): Prov
 /**
  * A short reason for a failed item, from a fixed set: an ElevenLabs error code and HTTP
  * status, a refused paid call, or a file system error code. The error messages themselves
- * are never used, because they can hold the item's text.
+ * are never used, because they can hold the item's text. A library error is the exception:
+ * its message names only library files, relative to the library, so it is returned for the
+ * caller to make safe to print.
  */
 export function failureReason(
   error: GenerationError,
@@ -116,6 +124,7 @@ export function failureReason(
 ): string {
   const cause = error.cause;
   if (cause instanceof PaidCallRefusedError) return "paid call refused without --yes";
+  if (cause instanceof LibraryError) return cause.message;
   if (cause instanceof ElevenLabsError) {
     return cause.status === undefined ? cause.code : `${cause.code}, HTTP ${cause.status}`;
   }

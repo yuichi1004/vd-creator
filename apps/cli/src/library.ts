@@ -1,5 +1,17 @@
-import { isAbsolute, win32 } from "node:path";
+import { stat } from "node:fs/promises";
+import { basename, isAbsolute, join, resolve, win32 } from "node:path";
 import { createInterface } from "node:readline/promises";
+import {
+  AssetCache,
+  CacheFormatError,
+  generationRequest,
+  type LibraryCopyState,
+  libraryRef,
+  libraryStatus,
+  ProjectCreditsError,
+  scenarioItems,
+  syncLibrary,
+} from "@vd-creator/core";
 import {
   checkEntry,
   checkLibrary,
@@ -11,13 +23,15 @@ import {
   LibraryError,
   type LibraryIssue,
   type LibraryKind,
+  promoteEntry,
   readLibrary,
   searchEntries,
   verifyEntry,
 } from "@vd-creator/library";
-import { IdSchema } from "@vd-creator/scenario";
+import { IdSchema, SCENARIO_FILE } from "@vd-creator/scenario";
 import type { CliOutput } from "./cli.js";
 import { ConfigError, type Env, loadConfig } from "./config/index.js";
+import { validateProject } from "./validate.js";
 
 export const LIBRARY_USAGE = `Usage: vd library <command> [options]
 
@@ -44,6 +58,18 @@ Commands:
     --approve-commercial
                       Also approve conditional or unknown terms for commercial use
   check             Check hashes, licenses, attribution, evidence, and IDs
+  promote [dir] --item <item-id> --id <id> --license <license-id>
+                    Add the generated sound of an SFX or BGM in the project in <dir>
+                    (default: the current folder) to the library. A BGM uses its scene's
+                    ID. It starts unverified. The scenario is not changed
+    --title <text>    Title (default: the ID)
+    --tags <a,b>      Comma-separated tags
+    --attribution <text>
+                      Credit line, if the license requires attribution
+  status [dir]      List the library sounds in the project's credits.json whose sound or
+                    records changed in the library, or that the library no longer has
+  sync [dir]        Update the project's copies of the library sounds that changed. Old
+                    copies stay in assets/library/
 
 Options:
   --library <path>  The library (overrides VD_LIBRARY and config.yaml; no default)
@@ -62,6 +88,7 @@ export const LIBRARY_OPTIONS = [
   "title",
   "json",
   "approve-commercial",
+  "item",
 ] as const;
 
 type LibraryOptions = Partial<Record<(typeof LIBRARY_OPTIONS)[number], string | boolean>> & {
@@ -87,7 +114,13 @@ const SUBCOMMAND_OPTIONS: Partial<Record<string, readonly string[]>> = {
   search: ["kind", "json"],
   verify: ["kind", "approve-commercial"],
   check: [],
+  promote: ["item", "id", "license", "title", "tags", "attribution"],
+  status: [],
+  sync: [],
 };
+
+/** Subcommands that take an optional project folder. */
+const PROJECT_COMMANDS = new Set(["promote", "status", "sync"]);
 
 /**
  * For tests only: answers the verify confirmation instead of a human in a terminal. There is
@@ -147,14 +180,19 @@ export async function libraryCommand(
       : undefined;
   const given = Object.keys(options).filter((key) => key !== "library" && key !== "help");
   const positionals =
-    command === "search" ? rest.length > 0 : rest.length === (command === "check" ? 0 : 1);
+    command === "search"
+      ? rest.length > 0
+      : command !== undefined && PROJECT_COMMANDS.has(command)
+        ? rest.length <= 1
+        : rest.length === (command === "check" ? 0 : 1);
   if (
     !accepted ||
     given.some((key) => !accepted.includes(key)) ||
     !positionals ||
     rest.some((value) => value.trim() === "") ||
     (options.kind !== undefined && options.kind !== "sfx" && options.kind !== "bgm") ||
-    (command === "import" && (!options.kind || !options.id || !options.license))
+    (command === "import" && (!options.kind || !options.id || !options.license)) ||
+    (command === "promote" && (!options.item || !options.id || !options.license))
   ) {
     context.output.stderr(LIBRARY_USAGE);
     return 2;
@@ -198,6 +236,12 @@ export async function libraryCommand(
         return await searchCommand(root, rest, options, kind, output, context.output);
       case "verify":
         return await verifyCommand(root, rest[0] as string, options, kind, output);
+      case "promote":
+        return await promoteCommand(root, rest[0] ?? ".", options, output);
+      case "status":
+        return await statusCommand(root, rest[0] ?? ".", output);
+      case "sync":
+        return await syncCommand(root, rest[0] ?? ".", output);
       default: {
         const issues = await checkLibrary(root);
         printIssues(issues, output);
@@ -210,6 +254,10 @@ export async function libraryCommand(
     if (error instanceof ConfigError) {
       for (const problem of error.problems)
         output.stderr(`vd library ${command}: config.yaml: ${problem}`);
+    } else if (error instanceof ProjectError) {
+      output.stderr(`vd library ${command}: ${error.message}`);
+    } else if (error instanceof ProjectCreditsError) {
+      output.stderr(`vd library ${command}: ${error.message}`);
     } else if (error instanceof LibraryError) {
       output.stderr(`vd library ${command}: ${issueMessage(error.message)}`);
       printIssues(error.issues, output);
@@ -386,4 +434,127 @@ async function confirmInTerminal(prompt: string): Promise<boolean> {
   } finally {
     reader.close();
   }
+}
+
+/** A project that cannot be used by a library command. The message names the folder as typed. */
+class ProjectError extends Error {}
+
+/** Loads a valid scenario and the cache of the project in `dir`. */
+async function loadProject(dir: string) {
+  let result: Awaited<ReturnType<typeof validateProject>>;
+  try {
+    result = await validateProject(dir);
+  } catch {
+    throw new ProjectError(`cannot read ${SCENARIO_FILE} in ${dir}`);
+  }
+  if (!result.ok || !result.scenario) {
+    throw new ProjectError(`${SCENARIO_FILE} in ${dir} is not valid; run vd validate`);
+  }
+  try {
+    return { scenario: result.scenario, cache: await AssetCache.load(dir) };
+  } catch (e) {
+    if (e instanceof CacheFormatError) throw new ProjectError(`cache.json in ${dir} is not valid`);
+    throw new ProjectError(`cannot read cache.json in ${dir}`);
+  }
+}
+
+async function promoteCommand(
+  root: string,
+  dir: string,
+  options: LibraryOptions,
+  output: CliOutput,
+): Promise<number> {
+  const itemId = options.item as string;
+  const { scenario, cache } = await loadProject(dir);
+  const item = scenarioItems(scenario).find((i) => i.id === itemId);
+  if (!item || item.kind === "line") {
+    output.stderr(`vd library promote: the scenario has no SFX or BGM with the ID "${itemId}"`);
+    return 1;
+  }
+  const request = libraryRef(item) ? undefined : generationRequest(scenario, item);
+  if (!request) {
+    output.stderr(`vd library promote: "${itemId}" is already a library sound`);
+    return 1;
+  }
+  const found = await cache.playbackAsset(request.kind, request.request);
+  if (!found) {
+    output.stderr(
+      `vd library promote: "${itemId}" has no generated sound yet; run vd generate first`,
+    );
+    return 1;
+  }
+  const { entry } = found;
+  const tags = typeof options.tags === "string" ? options.tags : undefined;
+  const result = await promoteEntry(root, cache.assetPath(entry.file), {
+    id: options.id as string,
+    license: options.license as string,
+    title: typeof options.title === "string" ? options.title : undefined,
+    attribution: typeof options.attribution === "string" ? options.attribution : undefined,
+    tags: tags
+      ?.split(",")
+      .map((tag) => tag.trim())
+      .filter((tag) => tag !== ""),
+    // The cache calls generated BGM "music"; the library calls it "bgm".
+    record: { ...entry, kind: entry.kind === "music" ? "bgm" : entry.kind },
+    project: basename(resolve(dir)),
+    item: itemId,
+  });
+  printIssues(result.issues, output);
+  const done = `Promoted ${itemId} to ${result.entry.dir} (unverified)`;
+  if (hasErrors(result.issues)) {
+    output.stdout(`${done}, with errors to fix before verifying`);
+    return 1;
+  }
+  output.stdout(`${done}. A human verifies it with vd library verify`);
+  return 0;
+}
+
+const STATE_LABELS: Record<LibraryCopyState, string> = {
+  current: "current",
+  "sound-changed": "sound changed",
+  "record-changed": "record changed",
+  missing: "missing from the library",
+};
+
+/** Throws a ProjectError unless `dir` has a scenario.yaml, so a typo is not an empty project. */
+async function requireProject(dir: string): Promise<void> {
+  try {
+    if ((await stat(join(dir, SCENARIO_FILE))).isFile()) return;
+  } catch {
+    // Reported below.
+  }
+  throw new ProjectError(`cannot read ${SCENARIO_FILE} in ${dir}`);
+}
+
+async function statusCommand(root: string, dir: string, output: CliOutput): Promise<number> {
+  await requireProject(dir);
+  const statuses = await libraryStatus(dir, await readLibrary(root));
+  for (const status of statuses) {
+    const why = status.message ? `: ${status.message}` : "";
+    output.stdout(`${status.kind}/${status.id}: ${STATE_LABELS[status.state]}${why}`);
+  }
+  if (statuses.length === 0) output.stdout("The project has no library sounds");
+  const changed = statuses.filter((s) => s.state.endsWith("-changed")).length;
+  if (changed > 0) output.stdout(`${changed} changed; run vd library sync to update them`);
+  return 0;
+}
+
+async function syncCommand(root: string, dir: string, output: CliOutput): Promise<number> {
+  await requireProject(dir);
+  const results = await syncLibrary(dir, await readLibrary(root));
+  let failed = 0;
+  for (const result of results) {
+    const label = `${result.kind}/${result.id}`;
+    if (result.updated) {
+      output.stdout(`Updated ${label} (${STATE_LABELS[result.state]})`);
+    } else if (result.state === "missing") {
+      output.stderr(`vd library sync: kept ${label}: ${result.message ?? STATE_LABELS.missing}`);
+    } else if (result.state !== "current") {
+      failed++;
+      output.stderr(`vd library sync: cannot update ${label}: ${result.message ?? "error"}`);
+    }
+  }
+  const updated = results.filter((r) => r.updated).length;
+  output.stdout(`Updated ${updated} of ${results.length} library sounds`);
+  return failed > 0 ? 1 : 0;
 }

@@ -3,5 +3,6 @@ export * from "./cache.js";
 export * from "./canonical.js";
 export * from "./generate.js";
 export * from "./items.js";
+export * from "./library/index.js";
 export * from "./resolver.js";
 export * from "./timeline.js";

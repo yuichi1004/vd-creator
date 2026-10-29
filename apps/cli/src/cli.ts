@@ -5,10 +5,13 @@ import {
   AssetCache,
   CACHE_FILE,
   CacheFormatError,
+  checkLibraryLicenses,
   defaultResolvers,
   GenerationError,
   type ItemResult,
   itemLabel,
+  libraryResolver,
+  type ProjectLicenseIssue,
   planGeneration,
   runGeneration,
   scenarioItems,
@@ -75,15 +78,17 @@ Commands:
   init <dir>        Create a project folder with a minimal scenario.yaml. The folder
                     must not exist, or contain only .git, .gitignore, .gitattributes,
                     or .DS_Store
-  validate [dir]    Check <dir>/scenario.yaml (default: the current folder)
-  generate [dir]    Generate the audio of every line, SFX, and BGM that is not cached.
+  validate [dir]    Check <dir>/scenario.yaml (default: the current folder), and the
+                    licenses of its library sounds and providers against publish.use
+  generate [dir]    Generate the audio of every line, SFX, and BGM that is not cached, and
+                    copy library sounds into assets/library/, recorded in credits.json.
                     Prints the plan and its estimated cost first
     --provider <id>   mock (default) or elevenlabs. Speakers' providers are ignored
     --only <id,...>   Only these items. A BGM uses its scene's ID
     --dry-run         Print the plan and stop
     --yes             Run a paid provider. Without it, a paid provider stops after the plan
   clean [dir]       Remove files in assets/voice, assets/sfx, and assets/bgm, and cache.json
-                    entries, that the scenario no longer uses
+                    entries, that the scenario no longer uses. assets/library/ is kept
     --dry-run         List what would be removed and stop
   config path       Print the user directory and the rule that selected it: VD_USER_DIR,
                     local/ at the repository root, or vd-creator/ in XDG_CONFIG_HOME
@@ -106,8 +111,8 @@ Commands:
     --allow-host <name>
                       Also accept this Host header name, such as a reverse proxy's
                       (repeatable). Not needed with --host, where the token is checked
-    --library <path>  Show the library panel for this library. Library items in the
-                      scenario are not resolved by vd serve yet
+    --library <path>  Show the library panel for this library, and copy library sounds
+                      the project has not copied yet when they are generated
 
 Options:
   -h, --help        Show this help
@@ -198,7 +203,7 @@ export async function run(
 }
 
 async function dispatch(args: string[], context: Context): Promise<number> {
-  const { output, debug } = context;
+  const { output } = context;
   let parsed: ReturnType<typeof parse>;
   try {
     parsed = parse(args);
@@ -230,11 +235,11 @@ async function dispatch(args: string[], context: Context): Promise<number> {
     case "init":
       return init(rest, context);
     case "validate":
-      return validate(rest, output, debug);
+      return validate(rest, context);
     case "generate":
-      return generate(rest, parsed.values, output, debug);
+      return generate(rest, parsed.values, context);
     case "clean":
-      return clean(rest, parsed.values, output, debug);
+      return clean(rest, parsed.values, context);
     case "config":
       return config(rest, parsed.values, context);
     case "library":
@@ -264,6 +269,7 @@ function parse(args: string[]) {
       dir: { type: "string" },
       json: { type: "boolean" },
       library: { type: "string" },
+      item: { type: "string" },
       kind: { type: "string" },
       id: { type: "string" },
       license: { type: "string" },
@@ -322,11 +328,8 @@ async function init(args: string[], context: Context): Promise<number> {
   return EXIT_OK;
 }
 
-async function validate(
-  args: string[],
-  output: CliOutput,
-  debug: (e: unknown) => void,
-): Promise<number> {
+async function validate(args: string[], context: Context): Promise<number> {
+  const { output, debug } = context;
   const [dir = ".", ...extra] = args;
   if (extra.length > 0) {
     output.stderr("Usage: vd validate [dir]");
@@ -343,20 +346,44 @@ async function validate(
     return EXIT_FAILURE;
   }
   for (const issue of result.issues) output.stderr(formatIssue(issue));
-  if (!result.ok) return EXIT_FAILURE;
+  if (!result.ok || !result.scenario) return EXIT_FAILURE;
+
+  const config = await loadUserConfig("validate", context);
+  if (typeof config === "number") return config;
+  const library = libraryRoot(config);
+  let licenses: ProjectLicenseIssue[];
+  try {
+    licenses = await checkLibraryLicenses(dir, result.scenario, { library });
+  } catch (e) {
+    const code = fsErrorCode(e);
+    if (code === undefined) throw e;
+    output.stderr(`vd validate: cannot check the licenses in ${dir}: ${code}`);
+    debug(e);
+    return EXIT_FAILURE;
+  }
+  for (const issue of licenses) output.stderr(formatLicenseIssue(issue));
+  if (licenses.some((issue) => issue.severity === "error")) return EXIT_FAILURE;
   output.stdout(`${SCENARIO_FILE} is valid`);
   return EXIT_OK;
+}
+
+/** Formats a license issue like a scenario issue, with `licenses` as its path. */
+function formatLicenseIssue(issue: ProjectLicenseIssue): string {
+  const suffix = issue.severity === "warning" ? " (warning)" : "";
+  return `licenses: ${safeLibraryText(issue.message)}${suffix}`;
+}
+
+/** The library root of a config, absolute, or `undefined` if none is set. */
+function libraryRoot(config: EffectiveConfig): string | undefined {
+  const library = config.settings.library.value;
+  return library === undefined ? undefined : resolve(library);
 }
 
 const GENERATE_USAGE =
   "Usage: vd generate [dir] [--provider mock|elevenlabs] [--only <id,...>] [--dry-run] [--yes]";
 
-async function generate(
-  args: string[],
-  options: Options,
-  output: CliOutput,
-  debug: (e: unknown) => void,
-): Promise<number> {
+async function generate(args: string[], options: Options, context: Context): Promise<number> {
+  const { output, debug } = context;
   const [dir = ".", ...extra] = args;
   const providerId = options.provider ?? DEFAULT_PROVIDER;
   const only = options.only?.flatMap((list) => list.split(",")).map((id) => id.trim());
@@ -374,6 +401,8 @@ async function generate(
   const project = await loadProject("generate", dir, output, debug);
   if (typeof project === "number") return project;
   const { scenario, cache } = project;
+  const config = await loadUserConfig("generate", context);
+  if (typeof config === "number") return config;
   if (only) {
     const ids = new Set(scenarioItems(scenario).map((item) => item.id));
     const missing = only.filter((id) => !ids.has(id));
@@ -388,7 +417,7 @@ async function generate(
   // Only --yes, outside a dry run, lets a paid provider reach the network.
   const authorized = options.yes === true && options["dry-run"] !== true;
   const providers = providersFor(providerId, authorized);
-  const resolvers = defaultResolvers(providers);
+  const resolvers = [libraryResolver(libraryRoot(config)), ...defaultResolvers(providers)];
   let plan: Awaited<ReturnType<typeof planGeneration>>;
   try {
     plan = await planGeneration(scenario, cache, resolvers, { only });
@@ -399,6 +428,13 @@ async function generate(
     return EXIT_FAILURE;
   }
   for (const line of formatPlan(plan, providerId)) output.stdout(line);
+  // Only library items can be unresolved, and library messages name no absolute path.
+  const unresolved = plan.items.filter((item) => item.status === "unresolved");
+  for (const item of unresolved) {
+    if (item.status === "unresolved") {
+      output.stderr(`vd generate: unresolved ${itemLabel(item)}: ${safeLibraryText(item.reason)}`);
+    }
+  }
 
   // The gate: whatever the plan holds, a dry run, or a paid provider without --yes, stops here.
   if (options["dry-run"]) {
@@ -424,7 +460,8 @@ async function generate(
       only: planned,
       onItem: (item) => {
         if (item.status === "generated") {
-          output.stdout(`Generated ${itemLabel(item)}: assets/${item.file}`);
+          const verb = item.resolver === "library" ? "Copied" : "Generated";
+          output.stdout(`${verb} ${itemLabel(item)}: assets/${item.file}`);
         }
       },
     });
@@ -437,19 +474,15 @@ async function generate(
     output.stderr(`vd generate: failed ${itemLabel(item)} (invalid request)`);
   for (const item of failed) {
     output.stderr(
-      `vd generate: failed ${itemLabel(item)} (${failureReason(item.error, fsErrorCode)})`,
+      `vd generate: failed ${itemLabel(item)} (${safeLibraryText(failureReason(item.error, fsErrorCode))})`,
     );
     debug(item.error);
   }
-  return invalid.length + failed.length > 0 ? EXIT_FAILURE : EXIT_OK;
+  return invalid.length + failed.length + unresolved.length > 0 ? EXIT_FAILURE : EXIT_OK;
 }
 
-async function clean(
-  args: string[],
-  options: Options,
-  output: CliOutput,
-  debug: (e: unknown) => void,
-): Promise<number> {
+async function clean(args: string[], options: Options, context: Context): Promise<number> {
+  const { output, debug } = context;
   const [dir = ".", ...extra] = args;
   if (extra.length > 0) {
     output.stderr("Usage: vd clean [dir] [--dry-run]");
@@ -457,6 +490,10 @@ async function clean(
   }
   const project = await loadProject("clean", dir, output, debug);
   if (typeof project === "number") return project;
+  // Library copies in assets/library/ are never cleaned, so the library itself is not read;
+  // the config is still loaded so that a broken config.yaml is reported like elsewhere.
+  const config = await loadUserConfig("clean", context);
+  if (typeof config === "number") return config;
   const dryRun = options["dry-run"] === true;
   let result: Awaited<ReturnType<typeof cleanProject>>;
   try {
@@ -557,8 +594,10 @@ async function serve(args: string[], options: Options, context: Context): Promis
   const host = options.host === undefined ? undefined : listenHost(options.host);
   if (host !== undefined) serverOptions.host = host;
   if (allowedHosts !== undefined) serverOptions.allowedHosts = allowedHosts;
-  const library = config.settings.library.value;
-  if (library !== undefined) serverOptions.library = resolve(library);
+  const library = libraryRoot(config);
+  if (library !== undefined) serverOptions.library = library;
+  // The server puts these before its generated-item resolver.
+  serverOptions.resolvers = [libraryResolver(library)];
   if (webBuilt(context.webDir)) {
     serverOptions.webDir = context.webDir;
   } else {
