@@ -95,10 +95,15 @@ A timeout means "nothing yet", not failure. After three empty waits in a row, in
 
 When a worker reports `--outcome succeeded`, start a reviewer on the same worktree. Every change gets a reviewer, including small documentation changes. The coordinator still reads the diff (`git diff main...<task branch>`), but that does not replace the review.
 
-Codex usage is limited, so choose the reviewer by the size of the change:
+Codex usage is limited, so choose the reviewer by what the change touches:
 
-- **Large changes** get a Codex reviewer: the first review of a new task's code, and any other change of roughly 150 or more non-test lines. Code that handles secrets, such as API keys, always gets a Codex reviewer.
-- **Small changes** get a Claude reviewer (`--agent claude`): fix rounds on a task that Codex has already reviewed, documentation and plan changes, and other changes under roughly 150 non-test lines.
+- **Security-sensitive code** gets a Codex reviewer (`gpt-6.1-sol`) for its first review: the server and its token, API keys, and paid generation.
+- **A hard-to-undo change to a public interface or a file format**, such as the scenario schema, gets a `gpt-6-astra` reviewer.
+- **Everything else** gets a Claude reviewer (`--agent claude`), and so does every fix round, whoever did the first review. A small diff, such as a few lines of documentation, may be reviewed by the coordinator directly.
+
+If Codex is at its usage limit, either wait for the reset or ask the human whether a Claude review is enough for now.
+
+Review fixes are capped at two rounds. After the second round, only a P1 finding or a real secret or token leak blocks the merge. Record the remaining P2 and P3 findings as follow-ups in the task's review notes in the plan.
 
 A Codex reviewer is started like this:
 
@@ -136,7 +141,9 @@ git -C <worktree_path> rebase main
 git merge --ff-only task/NNNN-<short-name>
 ```
 
-In the same commit, or the one right after it, tick the task's checkbox in the plan. Pushing to GitHub is outward-facing, so the human must approve it.
+After the merge, run `npm run build` in the main checkout too. `bin/vd.js` runs the compiled output, so without a rebuild a `--help` check there shows the old commands.
+
+In the same commit, or the one right after it, tick the task's checkbox in the plan, with review notes: the review rounds, the decisions made, and the follow-ups left open. Pushing to GitHub is outward-facing, so the human must approve it.
 
 ## 7. Clean up
 

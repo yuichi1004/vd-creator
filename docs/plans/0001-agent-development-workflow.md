@@ -163,6 +163,16 @@ Problems and fixes (applied to [`docs/development-workflow.md`](../development-w
 9. **`orca worktree rm` deleted the branch checked out in the worktree, but not earlier task branches made in it.** Delete merged branches with `git branch -d` after removing the worktree.
 10. **Workers may make small edits beyond the spec, inside their Ownership.** The docs worker also updated the README status and layout. It was correct here, but the reviewer or coordinator should check such edits explicitly.
 
+From running plans 0003 to 0008 on 2026-10-29, with up to three Claude implementers in parallel:
+
+1. **Reviewer routing by size used up Codex.** Codex hit its usage limit in the middle of the run, and reviews waited. Fix: route by risk instead. Codex reviews security-sensitive code, Astra reviews hard-to-undo format and interface changes, and Claude reviews the rest and every fix round.
+2. **Fix rounds kept finding new low-severity issues.** Fix: cap fix rounds at two. After that, only a P1 or a secret leak blocks a merge, and the rest becomes follow-ups in the plan's review notes.
+3. **Parallel tasks were safe when Ownership split by workspace.** For example, `vd render` owned `apps/cli` while provider records owned `packages/core`. A worker that needed a change in the other workspace asked instead of editing it.
+4. **A `--help` check in the main checkout read stale compiled output.** It made a merged command look missing. Fix: rebuild after each merge.
+5. **Health checks every few minutes were too frequent for the human.** A watchdog every 10 minutes, with one-line replies to heartbeat-only relays, was enough.
+6. **A worker that wanted to shadow a shared export was redirected.** The integration worker proposed replacing `defaultResolvers` with a re-export. The coordinator kept the shared API and had the CLI and server pass the extra resolver explicitly. Specs should name the integration point when two packages meet.
+7. **To check the UI without a browser extension, drive headless Chrome over the DevTools protocol.** `--screenshot` never finished, because the review UI keeps an event stream open. A small script that sets the viewport, navigates, waits, and calls `Page.captureScreenshot` worked at both desktop and phone widths.
+
 ## Open questions
 
 - Should GitHub Issues become the backlog once the repository is public, or should plans stay the only backlog?
