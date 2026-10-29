@@ -2,15 +2,25 @@
 
 import type { Timeline } from "@vd-creator/core";
 import type { Scenario } from "@vd-creator/scenario";
+import { RenderError } from "./errors.js";
 
 /**
  * The SRT text of a timeline: one cue per line, in timeline order, from its `startSec` to the
  * end of its audio. A line without an asset keeps its place, with its estimated length. If the
  * lines have more than one speaker, every cue starts with the speaker's name. Blank lines in a
  * line's text are removed, because a blank line ends an SRT cue, and a line with only
- * whitespace has no cue.
+ * whitespace has no cue. A timeline or scenario that cannot be read throws a `RenderError`.
  */
 export function buildSrt(timeline: Timeline, scenario: Scenario): string {
+  try {
+    return srtText(timeline, scenario);
+  } catch {
+    // The original error, such as a TypeError, may hold a stack with absolute paths.
+    throw new RenderError("Could not build the subtitles");
+  }
+}
+
+function srtText(timeline: Timeline, scenario: Scenario): string {
   const names = new Map(scenario.speakers.map((s) => [s.id, s.name]));
   const cues: { startSec: number; endSec: number; speaker: string; text: string }[] = [];
   for (const item of timeline.items) {

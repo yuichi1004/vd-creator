@@ -2,7 +2,7 @@
 // See "Approach" in docs/plans/0006-rendering.md.
 
 import { type ChildProcessByStdio, spawn } from "node:child_process";
-import { realpath } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import type { Readable } from "node:stream";
 import { causeOptions, RenderError, type RenderErrorOptions } from "./errors.js";
@@ -76,29 +76,108 @@ export type RunFfmpegOptions = {
   command?: string;
 };
 
+/** The arguments and options of a run, checked and copied. */
+type FfmpegRun = {
+  command: string;
+  program: string;
+  args: string[];
+  cwd?: string;
+  paths: string[];
+};
+
 /**
  * Runs ffmpeg with the arguments, without a shell. Resolves when it exits with code 0.
  * Otherwise throws an `FfmpegError`, whatever failed. Its message names only the program,
  * never a path or an argument, and ends with the last lines of ffmpeg's stderr that
  * `reportableStderr` lets through. Pass relative paths, `paths`, and `cwd` to keep the
- * messages useful.
+ * messages useful. Arguments or options of the wrong type throw a plain `RenderError`.
  */
 export async function runFfmpeg(
   args: readonly string[],
   options: RunFfmpegOptions = {},
 ): Promise<void> {
-  const command = options.command ?? "ffmpeg";
-  const program = programName(command);
+  let run: FfmpegRun;
   try {
-    const folders = options.cwd === undefined ? [] : await folderForms(options.cwd);
-    await spawnFfmpeg(command, program, args, options, {
-      folders,
-      paths: options.paths ?? [],
-    });
+    run = checkedRun(args, options);
+  } catch {
+    throw new RenderError("runFfmpeg was given arguments or options of the wrong type");
+  }
+  try {
+    if (run.cwd !== undefined) await checkFolder(run.program, run.cwd);
+    const folders = run.cwd === undefined ? [] : await folderForms(run.cwd);
+    await spawnFfmpeg(run, { folders, paths: run.paths });
   } catch (e) {
-    // For example a deleted working folder, whose Node error names it.
-    if (e instanceof FfmpegError) throw e;
-    throw startError(program, e);
+    // For example a working folder deleted after it was checked, whose Node error names it.
+    if (isFfmpegError(e)) throw e;
+    throw startError(run.program, e);
+  }
+}
+
+/** Checks the types of the arguments and options, and copies them, so no getter runs later. */
+function checkedRun(args: unknown, options: unknown): FfmpegRun {
+  if (options === null || typeof options !== "object") throw new TypeError();
+  const { command = "ffmpeg", cwd, paths = [] } = options as Record<string, unknown>;
+  if (typeof command !== "string" || command === "") throw new TypeError();
+  if (cwd !== undefined && typeof cwd !== "string") throw new TypeError();
+  return {
+    command,
+    program: programName(command),
+    args: strings(args),
+    ...(cwd === undefined ? {} : { cwd }),
+    paths: strings(paths),
+  };
+}
+
+/** A copy of an array of strings, checked after it is copied, so the check sees what is used. */
+function strings(value: unknown): string[] {
+  if (!Array.isArray(value)) throw new TypeError();
+  const copy: unknown[] = Array.from(value);
+  if (!copy.every((s) => typeof s === "string")) throw new TypeError();
+  return copy as string[];
+}
+
+function isFfmpegError(value: unknown): value is FfmpegError {
+  try {
+    return value instanceof FfmpegError;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Throws an `FfmpegError` if the working folder is missing or not a folder, so that it is not
+ * taken for a missing program. The message names no path.
+ */
+async function checkFolder(program: string, cwd: string): Promise<void> {
+  let isFolder: boolean;
+  try {
+    // Resolved first: a relative folder inside a deleted process folder may still be stat'ed,
+    // but resolving it needs the process folder, as Node does when it starts the program.
+    isFolder = (await stat(resolve(cwd))).isDirectory();
+  } catch (e) {
+    throw folderError(program, e);
+  }
+  if (!isFolder) throw folderError(program, { code: "ENOTDIR" });
+}
+
+function folderError(program: string, error: unknown): FfmpegError {
+  const options = causeOptions(error);
+  const code = options.code ? ` (${options.code})` : "";
+  const what =
+    options.code === "ENOENT" || options.code === "ENOTDIR" ? "was not found" : "could not be read";
+  return new FfmpegError(
+    `${program} could not be started: the project folder ${what}${code}`,
+    options,
+  );
+}
+
+/** Whether the working folder is gone, for telling a missing folder from a missing program. */
+async function folderIsMissing(cwd: string | undefined): Promise<boolean> {
+  if (cwd === undefined) return false;
+  try {
+    return !(await stat(resolve(cwd))).isDirectory();
+  } catch {
+    return true;
   }
 }
 
@@ -113,13 +192,8 @@ function startError(program: string, error: unknown, onPathHint = false): Ffmpeg
   return new FfmpegError(`${program} could not be started${code}${hint}`, options);
 }
 
-function spawnFfmpeg(
-  command: string,
-  program: string,
-  args: readonly string[],
-  options: RunFfmpegOptions,
-  context: StderrContext,
-): Promise<void> {
+function spawnFfmpeg(run: FfmpegRun, context: StderrContext): Promise<void> {
+  const { command, program, args } = run;
   return new Promise((resolvePromise, reject) => {
     let stderr = "";
     // After a cut, stderr may start inside a line, and inside a path that has lost its start.
@@ -127,7 +201,7 @@ function spawnFfmpeg(
     let child: ChildProcessByStdio<null, null, Readable>;
     try {
       child = spawn(command, args, {
-        cwd: options.cwd,
+        cwd: run.cwd,
         shell: false,
         stdio: ["ignore", "ignore", "pipe"],
         windowsHide: true,
@@ -147,10 +221,20 @@ function spawnFfmpeg(
         cut = true;
       }
     });
+    // A program that cannot start gets "error" and then "close" with a negative code at once.
+    // "error" settles the promise, but only after a stat, so "close" must not settle it first.
+    let failedToStart = false;
     child.on("error", (e) => {
-      reject(startError(program, e, true));
+      failedToStart = true;
+      // Node reports a missing working folder as ENOENT too, as if the program were missing.
+      const missingFolder =
+        causeOptions(e).code === "ENOENT" ? folderIsMissing(run.cwd) : Promise.resolve(false);
+      void missingFolder.then((missing) =>
+        reject(missing ? folderError(program, e) : startError(program, e, true)),
+      );
     });
     child.on("close", (code, signal) => {
+      if (failedToStart) return;
       if (code === 0) {
         resolvePromise();
         return;

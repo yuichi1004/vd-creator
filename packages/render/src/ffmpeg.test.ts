@@ -159,7 +159,9 @@ describe("runFfmpeg", () => {
         (e: unknown) => e,
       )) as FfmpegError;
       expect(error).toBeInstanceOf(FfmpegError);
-      expect(error.message).toBe("ffmpeg could not be started (ENOENT)");
+      expect(error.message).toBe(
+        "ffmpeg could not be started: the project folder was not found (ENOENT)",
+      );
       expect(error.code).toBe("ENOENT");
       expect(error.cause).toEqual({ message: "system error ENOENT", code: "ENOENT" });
     } finally {

@@ -38,22 +38,43 @@ export class RenderError extends Error {
   declare readonly cause?: RenderErrorCause;
 
   constructor(message: string, options: RenderErrorOptions = {}) {
-    const cause = options.cause === undefined ? undefined : copyCause(options.cause);
+    const given = property(options, "cause");
+    const cause = given === undefined ? undefined : copyCause(given);
     super(message, cause === undefined ? undefined : { cause });
     this.name = "RenderError";
     const code = errorCode(options);
     if (code !== undefined) this.code = code;
+    // The default stack has frames with absolute paths, of this package and of its callers,
+    // so only "<name>: <message>" is kept. It is read when shown, so a subclass's name is used.
+    let stack: unknown;
+    Object.defineProperty(this, "stack", {
+      configurable: true,
+      enumerable: false,
+      get: () => stack ?? `${this.name}: ${this.message}`,
+      set: (value: unknown) => {
+        stack = value;
+      },
+    });
+  }
+}
+
+/** A property of a value, or undefined if it has none or reading it throws, as a getter may. */
+function property(value: unknown, key: string): unknown {
+  try {
+    return (value as Record<string, unknown> | null | undefined)?.[key];
+  } catch {
+    return undefined;
   }
 }
 
 /** A new cause with only the allowed fields, so that no caller can attach an error object. */
-function copyCause(cause: RenderErrorCause): RenderErrorCause {
+function copyCause(cause: unknown): RenderErrorCause {
   const code = errorCode(cause);
-  const exitCode = Number.isInteger(cause.exitCode) ? cause.exitCode : undefined;
+  const given = property(cause, "exitCode");
+  const exitCode = typeof given === "number" && Number.isInteger(given) ? given : undefined;
+  const givenSignal = property(cause, "signal");
   const signal =
-    typeof cause.signal === "string" && /^SIG[A-Z0-9]+$/.test(cause.signal)
-      ? cause.signal
-      : undefined;
+    typeof givenSignal === "string" && /^SIG[A-Z0-9]+$/.test(givenSignal) ? givenSignal : undefined;
   // The message is rebuilt too, as the given one may hold a path.
   const message =
     code !== undefined
@@ -71,9 +92,12 @@ function copyCause(cause: RenderErrorCause): RenderErrorCause {
   });
 }
 
-/** The error code of an error, if it is one of `REPORTED_ERROR_CODES`. */
+/**
+ * The error code of an error, if it is one of `REPORTED_ERROR_CODES`. An error whose code
+ * cannot be read, such as one with a throwing getter, has none.
+ */
 export function errorCode(error: unknown): ReportedErrorCode | undefined {
-  const code = (error as { code?: unknown } | null)?.code;
+  const code = property(error, "code");
   return REPORTED_ERROR_CODES.find((c) => c === code);
 }
 
@@ -93,7 +117,16 @@ export function causeOptions(error: unknown): RenderErrorOptions {
  * A `RenderError` from this package is passed on as it is.
  */
 export function stepError(what: string, error: unknown): RenderError {
-  if (error instanceof RenderError) return error;
+  if (isRenderError(error)) return error;
   const options = causeOptions(error);
   return new RenderError(options.code ? `${what} (${options.code})` : what, options);
+}
+
+/** Whether a value is a `RenderError`. A Proxy whose prototype cannot be read is not one. */
+function isRenderError(value: unknown): value is RenderError {
+  try {
+    return value instanceof RenderError;
+  } catch {
+    return false;
+  }
 }
