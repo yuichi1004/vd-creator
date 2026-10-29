@@ -20,6 +20,8 @@ import {
   type LibraryEntry,
   LibraryError,
   type LibraryIssue,
+  lookupBlockers,
+  lookupProblem,
   parseYaml,
   pathProblem,
   readLibrary,
@@ -179,9 +181,9 @@ export async function promoteEntry(
 }
 
 /**
- * Result of `verifyEntry`. `verified` is false, with `message` set, when the library
- * folders changed on disk during the write, or the write failed; entry.yaml was then left
- * as it was.
+ * Result of `verifyEntry`. `verified` is false, with `message` set, when the lookup is not
+ * trusted (see `lookupBlockers`), the library folders changed on disk during the write, or
+ * the write failed; entry.yaml was then left as it was.
  */
 export type VerifyEntryResult = { verified: boolean; entry: LibraryEntry; message?: string };
 
@@ -212,6 +214,15 @@ export async function verifyEntry(
     );
   };
   refuse(library.issues.filter((i) => i.severity === "error" && blocking(i.file)));
+  // An unread kind folder may hold another entry with this ID, so the lookup is not
+  // trusted. Report it on the entry that was found, if any; findEntry throws otherwise.
+  const blockers = lookupBlockers(library, id, options.kind);
+  const candidate = library.entries.find(
+    (e) => e.entry.id === id && (options.kind === undefined || e.kind === options.kind),
+  );
+  if (blockers.length > 0 && candidate) {
+    return { verified: false, entry: candidate, message: lookupProblem(id, blockers) };
+  }
   const found = findEntry(library, id, options.kind);
   const entryFile = `${found.dir}/${ENTRY_FILE}`;
   refuse((await checkEntry(library, found)).filter((i) => i.severity === "error"));
@@ -272,7 +283,7 @@ export type SearchResult = {
 /**
  * Finds entries whose ID, title, tags, or notes contain every word of the query, ignoring
  * case. Entries with more words matching a whole tag come first. An empty query lists all
- * entries.
+ * entries. See `searchLibrary` for when it throws.
  */
 export async function searchEntries(
   root: string,
@@ -283,12 +294,22 @@ export async function searchEntries(
   return searchLibrary(library, query, options);
 }
 
-/** `searchEntries` over a library that is already read. */
+/**
+ * `searchEntries` over a library that is already read. Throws a `LibraryError` if a kind
+ * folder could not be read, instead of returning results that silently leave it out.
+ */
 export function searchLibrary(
   library: Library,
   query: string | string[],
   options: { kind?: LibraryKind } = {},
 ): SearchResult[] {
+  const blockers = lookupBlockers(library);
+  if (blockers.length > 0) {
+    throw new LibraryError(
+      `Cannot search until these are fixed: ${blockers.map((i) => i.message).join("; ")}`,
+      blockers,
+    );
+  }
   const words = (Array.isArray(query) ? query : [query])
     .flatMap((q) => q.toLowerCase().split(/\s+/))
     .filter((w) => w.length > 0);

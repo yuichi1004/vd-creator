@@ -69,7 +69,7 @@ export async function initLibrary(root: string, options: { name?: string } = {})
   await guardFs("create", ".", () => mkdir(root, { recursive: true }));
   const existing = new Set(await guardFs("list", ".", () => readdir(root)));
   for (const file of [LIBRARY_FILE, LICENSES_FILE]) {
-    if (existing.has(file)) throw new LibraryError(`${root} already has ${file}`);
+    if (existing.has(file)) throw new LibraryError(`The library folder already has ${file}`);
   }
   const licenses = new Document(STANDARD_LICENSES);
   licenses.commentBefore =
@@ -94,10 +94,10 @@ export async function initLibrary(root: string, options: { name?: string } = {})
 
 /**
  * Reads the library at `root`. Throws a `LibraryError` if library.yaml is missing, invalid,
- * unreadable, or not a regular file inside the library; except when it is missing, the
- * error's `issues` say why. Every managed file is read like sound and evidence files are
- * checked: no symbolic links, and inside the root. Filesystem failures on other managed
- * files are returned as issues.
+ * unreadable, or not a regular file inside the library; the error's `issues` say why. Every
+ * managed file is read like sound and evidence files are checked: no symbolic links, and
+ * inside the root. Filesystem failures on other managed files are returned as issues.
+ * Messages name paths relative to the root, never the root itself.
  */
 export async function readLibrary(root: string): Promise<Library> {
   const metaIssues: LibraryIssue[] = [];
@@ -105,11 +105,12 @@ export async function readLibrary(root: string): Promise<Library> {
   const [metaIssue] = metaIssues;
   if (metaIssue) throw new LibraryError(metaIssue.message, metaIssues);
   if (metaText === undefined) {
-    throw new LibraryError(`Not a sound library: ${LIBRARY_FILE} not found in ${root}`);
+    const message = `Not a sound library: library file ${LIBRARY_FILE} not found (ENOENT)`;
+    throw new LibraryError(message, [error(LIBRARY_FILE, message)]);
   }
   const metaResult = parseYaml(metaText, LIBRARY_FILE, LibraryMetaSchema);
   if (!metaResult.data) {
-    throw new LibraryError(`Invalid ${LIBRARY_FILE} in ${root}`, metaResult.issues);
+    throw new LibraryError(`Invalid ${LIBRARY_FILE}`, metaResult.issues);
   }
   const issues: LibraryIssue[] = [...metaResult.issues];
 
@@ -176,10 +177,36 @@ export async function readLibrary(root: string): Promise<Library> {
 }
 
 /**
+ * Errors that make the entry list incomplete, so that a lookup cannot be trusted: a kind
+ * folder that could not be read, which `readLibrary` leaves out instead of failing. This
+ * applies even when the lookup names another kind: a lookup is trusted only when every kind
+ * folder was read. With `id`, also an entry folder named `id` (of `kind`, or of any kind)
+ * that could not be read or is invalid, since it may hold another entry with that ID.
+ */
+export function lookupBlockers(library: Library, id?: string, kind?: LibraryKind): LibraryIssue[] {
+  const kinds = LIBRARY_KINDS.filter((k) => kind === undefined || k === kind);
+  return library.issues.filter(
+    (i) =>
+      i.severity === "error" &&
+      ((LIBRARY_KINDS as readonly string[]).includes(i.file) ||
+        (id !== undefined &&
+          kinds.some((k) => i.file === `${k}/${id}` || i.file === `${k}/${id}/${ENTRY_FILE}`))),
+  );
+}
+
+/** Message for a lookup refused because of `lookupBlockers`. */
+export function lookupProblem(id: string, blockers: LibraryIssue[]): string {
+  return `Cannot look up "${id}" until these are fixed: ${blockers.map((i) => i.message).join("; ")}`;
+}
+
+/**
  * Finds an entry by ID. With no kind, the ID must be unique across kinds. Throws a
- * `LibraryError` if there is no single match.
+ * `LibraryError` if there is no single match, or if a folder that might hold a match was
+ * not read (see `lookupBlockers`): the lookup is trusted only when every kind folder was.
  */
 export function findEntry(library: Library, id: string, kind?: LibraryKind): LibraryEntry {
+  const blockers = lookupBlockers(library, id, kind);
+  if (blockers.length > 0) throw new LibraryError(lookupProblem(id, blockers), blockers);
   const matches = library.entries.filter(
     (e) => e.entry.id === id && (kind === undefined || e.kind === kind),
   );
@@ -191,7 +218,10 @@ export function findEntry(library: Library, id: string, kind?: LibraryKind): Lib
   return match;
 }
 
-/** SHA-256 of a file, as lowercase hex. */
+/**
+ * SHA-256 of a file, as lowercase hex. Internal: its errors are raw. Use `hashManaged`, or
+ * wrap it in `guardFs`.
+ */
 export async function hashFile(path: string): Promise<string> {
   const hash = createHash("sha256");
   await pipeline(createReadStream(path), hash);

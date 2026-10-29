@@ -9,22 +9,22 @@ import {
   pathProblem,
   readLibrary,
 } from "./library.js";
-import { ENTRY_FILE, EVIDENCE_PATH, hasText, lookupLicense } from "./schema.js";
+import { ENTRY_FILE, EVIDENCE_PATH, hasText, LIBRARY_FILE, lookupLicense } from "./schema.js";
 
 /**
  * Checks the library at `root`: every file matches its hash, every license ID is in the
  * registry, attribution text is present when the license requires it, downloaded entries
  * have evidence that matches its content hash, no managed path is a symbolic link, and no
- * ID is duplicated. Also returns the issues of reading the library, including an invalid or
- * unreadable library.yaml. Rejects only when `root` has no library.yaml at all.
+ * ID is duplicated. Also returns the issues of reading the library, including a missing,
+ * invalid, or unreadable library.yaml. Never rejects for a problem with a managed file.
  */
 export async function checkLibrary(root: string): Promise<LibraryIssue[]> {
   let library: Library;
   try {
     library = await readLibrary(root);
   } catch (e) {
-    if (e instanceof LibraryError && e.issues.length > 0) return e.issues;
-    throw e;
+    if (!(e instanceof LibraryError)) throw e;
+    return e.issues.length > 0 ? e.issues : [error(LIBRARY_FILE, e.message)];
   }
   const issues = [...library.issues];
   for (const entry of library.entries) issues.push(...(await checkEntry(library, entry)));

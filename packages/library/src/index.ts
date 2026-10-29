@@ -36,7 +36,6 @@ export {
 } from "./entries.js";
 export {
   findEntry,
-  hashFile,
   initLibrary,
   type Library,
   type LibraryEntry,

@@ -14,9 +14,11 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { parse, stringify } from "yaml";
 import { testHooks } from "./entries.js";
+import * as libraryIndex from "./index.js";
 import {
   checkLibrary,
   ENTRY_FILE,
+  findEntry,
   importEntry,
   initLibrary,
   LIBRARY_FILE,
@@ -27,6 +29,7 @@ import {
   readLibrary,
   STANDARD_LICENSES,
   searchEntries,
+  searchLibrary,
   verifyEntry,
 } from "./index.js";
 
@@ -97,12 +100,34 @@ describe("initLibrary", () => {
     expect(await checkLibrary(root)).toEqual([]);
   });
 
-  test("refuses to overwrite a library", async () => {
-    await expect(initLibrary(root)).rejects.toThrow(LibraryError);
+  test("refuses to overwrite a library, without naming its absolute path", async () => {
+    const failure = initLibrary(root);
+    await expect(failure).rejects.toThrow(LibraryError);
+    await expect(failure).rejects.toThrow("The library folder already has library.yaml");
+    await expect(failure).rejects.not.toThrow(dir);
   });
 
-  test("readLibrary rejects a folder without library.yaml", async () => {
-    await expect(readLibrary(dir)).rejects.toThrow(/library\.yaml not found/);
+  test("readLibrary rejects a folder without library.yaml, without naming it", async () => {
+    const failure = readLibrary(dir);
+    await expect(failure).rejects.toThrow(/library\.yaml not found \(ENOENT\)/);
+    await expect(failure).rejects.not.toThrow(dir);
+  });
+
+  test("checkLibrary returns an issue, and does not reject, when library.yaml is gone", async () => {
+    await rm(join(root, LIBRARY_FILE));
+    const issues = await checkLibrary(root);
+    expect(issues).toEqual([
+      {
+        file: LIBRARY_FILE,
+        message: "Not a sound library: library file library.yaml not found (ENOENT)",
+        severity: "error",
+      },
+    ]);
+    expect(JSON.stringify(issues)).not.toContain(dir);
+  });
+
+  test("the package does not export the unguarded hashFile", () => {
+    expect(libraryIndex).not.toHaveProperty("hashFile");
   });
 });
 
@@ -666,6 +691,55 @@ describe("unreadable managed files (P2-B)", () => {
       await chmod(join(root, "sfx"), 0o755);
     }
   });
+
+  test.skipIf(isRoot)("an unlistable kind folder blocks ID lookups", async () => {
+    await importEntry(root, sound, { ...download, evidence });
+    await importEntry(root, sound, { ...download, kind: "bgm", evidence });
+    // Execute only: the folder can be entered but not listed.
+    await chmod(join(root, "bgm"), 0o111);
+    try {
+      const message =
+        'Cannot look up "door-creak-01" until these are fixed: Could not list bgm (EACCES)';
+      for (const kind of [undefined, "sfx"] as const) {
+        const result = await verifyEntry(root, "door-creak-01", { kind });
+        expect(result).toMatchObject({ verified: false, message });
+        expect(result.message).not.toContain(dir);
+      }
+      const written = parse(await readFile(join(root, "sfx/door-creak-01", ENTRY_FILE), "utf8"));
+      expect(written.license.verified).toBe(false);
+      const library = await readLibrary(root);
+      expect(library.issues).toEqual([
+        { file: "bgm", message: "Could not list bgm (EACCES)", severity: "error" },
+      ]);
+      expect(library.entries.map((e) => e.dir)).toEqual(["sfx/door-creak-01"]);
+      expect(() => findEntry(library, "door-creak-01")).toThrow(message);
+      expect(() => findEntry(library, "door-creak-01", "sfx")).toThrow(message);
+      const searchProblem = "Cannot search until these are fixed: Could not list bgm (EACCES)";
+      await expect(searchEntries(root, "door")).rejects.toThrow(searchProblem);
+      expect(() => searchLibrary(library, "door")).toThrow(searchProblem);
+    } finally {
+      await chmod(join(root, "bgm"), 0o755);
+    }
+  });
+
+  test.skipIf(isRoot)(
+    "verifyEntry refuses an ID that is only in an unlistable folder",
+    async () => {
+      await importEntry(root, sound, { ...download, kind: "bgm", evidence });
+      await chmod(join(root, "bgm"), 0o111);
+      try {
+        const failure = verifyEntry(root, "door-creak-01");
+        await expect(failure).rejects.toThrow(LibraryError);
+        await expect(failure).rejects.toThrow(
+          'Cannot look up "door-creak-01" until these are fixed: Could not list bgm (EACCES)',
+        );
+      } finally {
+        await chmod(join(root, "bgm"), 0o755);
+      }
+      const written = parse(await readFile(join(root, "bgm/door-creak-01", ENTRY_FILE), "utf8"));
+      expect(written.license.verified).toBe(false);
+    },
+  );
 
   test.skipIf(isRoot)("unreadable sound and evidence files are check issues", async () => {
     const { entry } = await importEntry(root, sound, { ...download, evidence });
