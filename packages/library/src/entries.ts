@@ -4,11 +4,13 @@ import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/
 import { extname, join } from "node:path";
 import { IdSchema } from "@vd-creator/scenario";
 import { Document, parseDocument } from "yaml";
-import { checkEntry } from "./check.js";
+import { checkEntry, pathProblem } from "./check.js";
 import {
+  assertManagedDir,
   exists,
   findEntry,
   hashFile,
+  inspectManagedPath,
   isErrno,
   type Library,
   type LibraryEntry,
@@ -24,8 +26,10 @@ import {
   type EntryInput,
   EntrySchema,
   EVIDENCE_DIR,
+  EVIDENCE_PATH,
   LIBRARY_KINDS,
   type LibraryKind,
+  lookupLicense,
   type Source,
 } from "./schema.js";
 
@@ -258,7 +262,7 @@ async function addEntry(
   if (!idResult.success) {
     throw new LibraryError(`Invalid entry id "${id}": ${idResult.error.issues[0]?.message}`);
   }
-  if (!library.licenses[options.license]) {
+  if (!lookupLicense(library.licenses, options.license)) {
     throw new LibraryError(
       `Unknown license "${options.license}". Add it to licenses.yaml before importing.`,
     );
@@ -309,16 +313,25 @@ async function addEntry(
   const { data: entry, issues } = parseYaml(text, entryFile, EntrySchema);
   if (!entry) throw new LibraryError(`Invalid entry "${id}"`, issues);
 
+  // Nothing is written through a symbolic link, so every write stays inside the library.
+  await assertManagedDir(root, kind);
+  if (evidence !== undefined) {
+    await assertManagedDir(root, EVIDENCE_DIR);
+    await checkExistingEvidence(root, evidence);
+  }
+
   // Stage the entry in a dot folder, which readLibrary skips, then move it into place.
   const staging = join(root, kind, `.${id}.${randomUUID()}.tmp`);
   try {
-    await mkdir(staging, { recursive: true });
+    await mkdir(join(root, kind), { recursive: true });
+    await assertManagedDir(root, kind);
+    await mkdir(staging);
     await copyFile(file, join(staging, soundName));
     if ((await hashFile(join(staging, soundName))) !== entry.sha256) {
       throw new LibraryError(`Sound file ${file} changed while it was being imported`);
     }
     if (extra.evidence !== undefined && evidence !== undefined) {
-      await copyEvidence(extra.evidence, join(root, evidence));
+      await copyEvidence(root, extra.evidence, evidence);
     }
     await writeFile(join(staging, ENTRY_FILE), text, "utf8");
     await rename(staging, join(root, kind, id));
@@ -335,13 +348,36 @@ async function addEntry(
   return { entry: added, issues: await checkEntry(library, added) };
 }
 
-// Evidence is stored by content hash, so an existing file with the same name is the same.
-async function copyEvidence(from: string, to: string): Promise<void> {
-  await mkdir(join(to, ".."), { recursive: true });
+// Evidence is stored by content hash. An existing file with that name is reused only if
+// it is a regular file inside the library whose bytes match the hash.
+async function checkExistingEvidence(root: string, evidence: string): Promise<void> {
+  const state = await inspectManagedPath(root, evidence);
+  if (state.status === "missing") return;
+  if (state.status !== "file")
+    throw new LibraryError(pathProblem("Evidence file", evidence, state));
+  const expected = EVIDENCE_PATH.exec(evidence)?.[1];
+  if ((await hashFile(join(root, evidence))) !== expected) {
+    throw new LibraryError(
+      `Evidence file ${evidence} already exists with different content; check the library`,
+    );
+  }
+}
+
+async function copyEvidence(root: string, from: string, evidence: string): Promise<void> {
+  await mkdir(join(root, EVIDENCE_DIR), { recursive: true });
+  await assertManagedDir(root, EVIDENCE_DIR);
   try {
-    await copyFile(from, to, constants.COPYFILE_EXCL);
+    await copyFile(from, join(root, evidence), constants.COPYFILE_EXCL);
   } catch (e) {
     if (!isErrno(e, "EEXIST")) throw e;
+    // Created since the first check: check it again.
+    await checkExistingEvidence(root, evidence);
+    return;
+  }
+  const expected = EVIDENCE_PATH.exec(evidence)?.[1];
+  if ((await hashFile(join(root, evidence))) !== expected) {
+    await rm(join(root, evidence), { force: true });
+    throw new LibraryError(`Evidence file ${from} changed while it was being imported`);
   }
 }
 

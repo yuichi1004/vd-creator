@@ -1,8 +1,8 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { parse } from "yaml";
+import { parse, stringify } from "yaml";
 import {
   checkLibrary,
   ENTRY_FILE,
@@ -298,5 +298,183 @@ describe("searchEntries", () => {
   test("matches notes, and an empty query lists everything", async () => {
     expect((await searchEntries(root, "loops")).map((r) => r.id)).toEqual(["rain-piano-01"]);
     expect(await searchEntries(root, "")).toHaveLength(3);
+  });
+});
+
+// Rewrites the entry.yaml of `entryDir` with `change` applied to its parsed content.
+async function editEntry(
+  entryDir: string,
+  change: (entry: { license: Record<string, unknown> }) => void,
+) {
+  const path = join(root, entryDir, ENTRY_FILE);
+  const entry = parse(await readFile(path, "utf8"));
+  change(entry);
+  await writeFile(path, stringify(entry));
+}
+
+describe("inherited registry keys (P2-2)", () => {
+  test.each(["constructor", "toString", "hasOwnProperty"])(
+    "license %s is not found in the registry",
+    async (id) => {
+      await expect(
+        importEntry(root, sound, { ...download, license: id, evidence }),
+      ).rejects.toThrow(`Unknown license "${id}"`);
+      const { entry } = await importEntry(root, sound, { ...download, evidence });
+      await editEntry(entry.dir, (e) => {
+        e.license.id = id;
+      });
+      expect(messages(await checkLibrary(root))).toEqual([
+        `License "${id}" is not in licenses.yaml`,
+      ]);
+    },
+  );
+
+  test("a __proto__ key in licenses.yaml is rejected without touching prototypes", async () => {
+    await writeFile(
+      join(root, LICENSES_FILE),
+      "__proto__:\n  name: x\n  attribution: none\n  commercialUse: allowed\n" +
+        "  modification: allowed\n  shareAlike: false\n",
+    );
+    const library = await readLibrary(root);
+    expect(messages(library.issues).join("\n")).toMatch(/"__proto__" is not a valid license ID/);
+    expect(Object.getPrototypeOf(library.licenses)).toBe(Object.prototype);
+    expect(({} as Record<string, unknown>).commercialUse).toBeUndefined();
+  });
+});
+
+describe("blank attribution (P2-3)", () => {
+  test("import refuses whitespace-only attribution", async () => {
+    const failure = await importEntry(root, sound, {
+      ...download,
+      evidence,
+      attribution: "   ",
+    }).catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(LibraryError);
+    expect(messages((failure as LibraryError).issues).join("\n")).toMatch(
+      /Attribution must not be blank/,
+    );
+    expect((await readLibrary(root)).entries).toEqual([]);
+  });
+
+  test("checkLibrary reports whitespace-only attribution in entry.yaml", async () => {
+    const { entry } = await importEntry(root, sound, { ...download, evidence });
+    await editEntry(entry.dir, (e) => {
+      e.license.attribution = " \t ";
+    });
+    expect(messages(await checkLibrary(root)).join("\n")).toMatch(/Attribution must not be blank/);
+  });
+});
+
+describe("evidence content (P2-4)", () => {
+  test("reports evidence whose bytes do not match the hash in its name", async () => {
+    const { entry } = await importEntry(root, sound, { ...download, evidence });
+    const rel = entry.entry.license.evidence ?? "";
+    await writeFile(join(root, rel), "tampered");
+    const [message] = messages(await checkLibrary(root));
+    expect(message).toMatch(`Evidence file ${rel} does not match the hash in its name`);
+  });
+
+  test("reports evidence that is a folder", async () => {
+    const { entry } = await importEntry(root, sound, { ...download, evidence });
+    const rel = entry.entry.license.evidence ?? "";
+    await rm(join(root, rel));
+    await mkdir(join(root, rel));
+    expect(messages(await checkLibrary(root))).toEqual([
+      `Evidence file ${rel} is not a regular file`,
+    ]);
+  });
+
+  test("reports evidence with a well-formed but wrong hash", async () => {
+    const { entry } = await importEntry(root, sound, { ...download, evidence });
+    const wrong = `evidence/${"a".repeat(64)}.html`;
+    await writeFile(join(root, wrong), "<html>other</html>");
+    await editEntry(entry.dir, (e) => {
+      e.license.evidence = wrong;
+    });
+    expect(messages(await checkLibrary(root))[0]).toMatch(/does not match the hash in its name/);
+  });
+
+  test("import refuses an existing evidence file with different content", async () => {
+    const { entry } = await importEntry(root, sound, { ...download, evidence });
+    await writeFile(join(root, entry.entry.license.evidence ?? ""), "tampered");
+    await expect(
+      importEntry(root, sound, { ...download, id: "door-creak-02", evidence }),
+    ).rejects.toThrow(/already exists with different content/);
+    expect((await readLibrary(root)).entries.map((e) => e.entry.id)).toEqual(["door-creak-01"]);
+  });
+
+  test("import reuses an existing evidence file with the same content", async () => {
+    await importEntry(root, sound, { ...download, evidence });
+    const { issues } = await importEntry(root, sound, {
+      ...download,
+      id: "door-creak-02",
+      evidence,
+    });
+    expect(issues).toEqual([]);
+  });
+});
+
+describe("symbolic links (P2-5)", () => {
+  test("reports a sound file that links outside the library", async () => {
+    const { entry } = await importEntry(root, sound, { ...download, evidence });
+    const file = join(root, entry.dir, "sound.wav");
+    await rm(file);
+    await symlink(sound, file);
+    const found = messages(await checkLibrary(root));
+    expect(found).toEqual([
+      "Sound file sfx/door-creak-01/sound.wav: sfx/door-creak-01/sound.wav is a symbolic link; the library does not follow links",
+    ]);
+    for (const message of found) expect(message).not.toContain(dir);
+  });
+
+  test("reports an evidence file that is a link", async () => {
+    const { entry } = await importEntry(root, sound, { ...download, evidence });
+    const rel = entry.entry.license.evidence ?? "";
+    const outside = join(dir, "evidence-copy.html");
+    await rename(join(root, rel), outside);
+    await symlink(outside, join(root, rel));
+    expect(messages(await checkLibrary(root))[0]).toMatch(/is a symbolic link/);
+  });
+
+  test("skips an entry folder that links outside the library", async () => {
+    const { entry } = await importEntry(root, sound, { ...download, evidence });
+    const outside = join(dir, "outside-entry");
+    await rename(join(root, entry.dir), outside);
+    await symlink(outside, join(root, entry.dir));
+    const library = await readLibrary(root);
+    expect(library.entries).toEqual([]);
+    expect(messages(library.issues)).toEqual([
+      "Entry folder is a symbolic link; the library does not follow links",
+    ]);
+  });
+
+  test("skips a kind folder that is a link", async () => {
+    await importEntry(root, sound, { ...download, evidence });
+    const outside = join(dir, "outside-sfx");
+    await rename(join(root, "sfx"), outside);
+    await symlink(outside, join(root, "sfx"));
+    const library = await readLibrary(root);
+    expect(library.entries).toEqual([]);
+    expect(messages(library.issues).join("\n")).toMatch(/sfx is a symbolic link/);
+  });
+
+  test("import refuses to write through a linked kind folder", async () => {
+    const outside = join(dir, "outside-sfx");
+    await rename(join(root, "sfx"), outside);
+    await symlink(outside, join(root, "sfx"));
+    await expect(importEntry(root, sound, { ...download, evidence })).rejects.toThrow(
+      /sfx is a symbolic link/,
+    );
+    await expect(readFile(join(outside, "door-creak-01", ENTRY_FILE))).rejects.toThrow();
+  });
+
+  test("import refuses to write through a linked evidence folder", async () => {
+    const outside = join(dir, "outside-evidence");
+    await rename(join(root, "evidence"), outside);
+    await symlink(outside, join(root, "evidence"));
+    await expect(importEntry(root, sound, { ...download, evidence })).rejects.toThrow(
+      /evidence is a symbolic link/,
+    );
+    expect((await readLibrary(root)).entries).toEqual([]);
   });
 });

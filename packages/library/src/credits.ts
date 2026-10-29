@@ -1,12 +1,18 @@
-import { IdSchema, type PublishUse } from "@vd-creator/scenario";
+import { AssetPathSchema, IdSchema, type PublishUse } from "@vd-creator/scenario";
 import { z } from "zod";
 import type { LibraryEntry } from "./library.js";
 import {
+  AttributionTextSchema,
+  hasText,
   LIBRARY_KINDS,
   type LibraryKind,
+  LicenseIdSchema,
   LicenseRecordSchema,
   type LicenseRegistry,
+  type LicenseTerms,
   LicenseTermsSchema,
+  lookupLicense,
+  PROVIDER_LICENSE_PREFIX,
   SourceSchema,
 } from "./schema.js";
 
@@ -22,11 +28,26 @@ export const CreditEntrySchema = z.strictObject({
   id: IdSchema,
   kind: z.enum(LIBRARY_KINDS),
   title: z.string().min(1),
-  file: z.string().min(1).describe("Copy in the project, relative to assets/."),
+  file: AssetPathSchema.describe("Copy in the project, relative to assets/."),
   sha256: z.string().regex(/^[0-9a-f]{64}$/),
   source: SourceSchema,
   license: LicenseRecordSchema,
   terms: LicenseTermsSchema.optional(),
+});
+
+/**
+ * The license of a generation provider: the registry license `generated-<providerId>`.
+ * A provider has no entry.yaml, so the human-made choices that an entry records in its
+ * license record (the credit line and a commercial approval) are written on that registry
+ * record as `attributionText` and `approvedFor`, and copied here. `terms` is missing when
+ * the registry has no such license; every term then counts as unknown, and nothing can be
+ * approved until the user records the terms.
+ */
+export const CreditProviderLicenseSchema = z.strictObject({
+  id: LicenseIdSchema,
+  terms: LicenseTermsSchema.optional(),
+  attribution: AttributionTextSchema.optional(),
+  approvedFor: z.literal("commercial").optional(),
 });
 
 /** A generation provider used by a project. */
@@ -34,6 +55,7 @@ export const CreditProviderSchema = z.strictObject({
   id: z.string().min(1).describe("Provider ID, such as elevenlabs."),
   name: z.string().min(1).optional().describe("Name shown in credits. Defaults to the ID."),
   kinds: z.array(z.enum(["voice", "sfx", "bgm"])).default([]),
+  license: CreditProviderLicenseSchema.optional(),
 });
 
 /** Schema of a project's credits.json. */
@@ -44,8 +66,12 @@ export const CreditsSchema = z.strictObject({
 });
 
 export type CreditEntry = z.infer<typeof CreditEntrySchema>;
+export type CreditProviderLicense = z.infer<typeof CreditProviderLicenseSchema>;
 export type CreditProvider = z.infer<typeof CreditProviderSchema>;
 export type Credits = z.infer<typeof CreditsSchema>;
+
+/** The mock provider makes test tones, so it is exempt from license checks. */
+export const MOCK_PROVIDER_ID = "mock";
 
 /** Builds the credits record of a library entry copied to `file` in a project. */
 export function toCreditEntry(
@@ -54,7 +80,7 @@ export function toCreditEntry(
   file: string,
 ): CreditEntry {
   const { entry } = item;
-  const terms = licenses[entry.license.id];
+  const terms = lookupLicense(licenses, entry.license.id);
   return {
     id: entry.id,
     kind: entry.kind,
@@ -67,16 +93,42 @@ export function toCreditEntry(
   };
 }
 
+/** Builds the credits record of a provider, with its `generated-<providerId>` license. */
+export function toCreditProvider(
+  providerId: string,
+  licenses: LicenseRegistry,
+  options: { name?: string; kinds?: CreditProvider["kinds"] } = {},
+): CreditProvider {
+  const licenseId = `${PROVIDER_LICENSE_PREFIX}${providerId}`;
+  const terms = lookupLicense(licenses, licenseId);
+  const license: CreditProviderLicense = { id: licenseId };
+  if (terms) {
+    license.terms = terms;
+    if (terms.attributionText !== undefined) license.attribution = terms.attributionText;
+    if (terms.approvedFor !== undefined) license.approvedFor = terms.approvedFor;
+  }
+  return {
+    id: providerId,
+    ...(options.name !== undefined ? { name: options.name } : {}),
+    kinds: options.kinds ?? [],
+    license,
+  };
+}
+
 export type LicenseCheckCode =
   | "unverified"
   | "commercial-forbidden"
   | "commercial-conditional"
   | "attribution-missing";
 
-/** A license problem of one entry used by a project. */
+/**
+ * A license problem of a library entry or a generation provider used by a project. `kind`
+ * is set for entries.
+ */
 export type LicenseCheckIssue = {
-  entryId: string;
-  kind: LibraryKind;
+  target: "entry" | "provider";
+  id: string;
+  kind?: LibraryKind;
   code: LicenseCheckCode;
   message: string;
   severity: "error" | "warning";
@@ -88,56 +140,92 @@ type Outcome = "ok" | "warning" | "error";
 const CHECK_TABLE: Record<LicenseCheckCode, Record<PublishUse, Outcome>> = {
   unverified: { private: "warning", "non-commercial": "error", commercial: "error" },
   "commercial-forbidden": { private: "ok", "non-commercial": "ok", commercial: "error" },
-  // A commercial error here is lifted by license.approvedFor: commercial.
+  // A commercial error here is lifted by approvedFor: commercial, set by a human.
   "commercial-conditional": { private: "ok", "non-commercial": "warning", commercial: "error" },
+  // Also applies when the attribution term is unknown, or the terms are missing.
   "attribution-missing": { private: "warning", "non-commercial": "error", commercial: "error" },
 };
 
 /**
- * Checks the library entries of a project against its intended use, following the check
- * table of plan 0007. Warnings do not block a render; errors do, and no flag overrides them.
+ * Checks the library entries and generation providers of a project against its intended
+ * use, following the check table of plan 0007. Missing terms count as unknown on every
+ * term. The not-verified row applies only to entries, since a provider's license is
+ * written by a human, and the mock provider is exempt. Warnings do not block a render;
+ * errors do, and no flag overrides them.
  */
 export function checkProjectLicenses(credits: Credits, use: PublishUse): LicenseCheckIssue[] {
   const issues: LicenseCheckIssue[] = [];
   for (const entry of credits.entries) {
     const { license, terms } = entry;
-    const licenseName = terms ? `license ${license.id}` : `license ${license.id} (terms unknown)`;
-    const report = (code: LicenseCheckCode, message: string, outcome = CHECK_TABLE[code][use]) => {
-      if (outcome === "ok") return;
-      issues.push({ entryId: entry.id, kind: entry.kind, code, message, severity: outcome });
-    };
-
-    if (!license.verified) {
-      report("unverified", `Library entry "${entry.id}" has an unverified license record`);
-    }
-    const commercialUse = terms?.commercialUse ?? "unknown";
-    if (commercialUse === "forbidden") {
-      report(
-        "commercial-forbidden",
-        `Library entry "${entry.id}" uses ${licenseName}, which forbids commercial use`,
-      );
-    } else if (commercialUse === "conditional" || commercialUse === "unknown") {
-      const approved = use === "commercial" && license.approvedFor === "commercial";
-      report(
-        "commercial-conditional",
-        `Library entry "${entry.id}" uses ${licenseName}, whose commercial use is ${commercialUse}` +
-          (use === "commercial" ? "; a human must approve it for commercial use" : ""),
-        approved ? "ok" : undefined,
-      );
-    }
-    if (terms?.attribution === "required" && !license.attribution) {
-      report(
-        "attribution-missing",
-        `Library entry "${entry.id}" uses ${licenseName}, which requires attribution, but has none`,
-      );
-    }
+    const subject = `Library entry "${entry.id}"`;
+    const report = reporter(issues, use, { target: "entry", id: entry.id, kind: entry.kind });
+    if (!license.verified) report("unverified", `${subject} has an unverified license record`);
+    checkTerms(report, use, subject, license.id, terms, {
+      attribution: license.attribution,
+      approved: license.approvedFor === "commercial",
+    });
+  }
+  for (const provider of credits.providers) {
+    if (provider.id === MOCK_PROVIDER_ID) continue;
+    const license = provider.license ?? { id: `${PROVIDER_LICENSE_PREFIX}${provider.id}` };
+    const report = reporter(issues, use, { target: "provider", id: provider.id });
+    checkTerms(report, use, `Provider "${provider.id}"`, license.id, license.terms, {
+      attribution: license.attribution,
+      // With no terms there is nothing to approve.
+      approved: license.terms !== undefined && license.approvedFor === "commercial",
+    });
   }
   return issues;
 }
 
+type Report = (code: LicenseCheckCode, message: string, outcome?: Outcome) => void;
+
+function reporter(
+  issues: LicenseCheckIssue[],
+  use: PublishUse,
+  target: Pick<LicenseCheckIssue, "target" | "id" | "kind">,
+): Report {
+  return (code, message, outcome = CHECK_TABLE[code][use]) => {
+    if (outcome === "ok") return;
+    issues.push({ ...target, code, message, severity: outcome });
+  };
+}
+
+// The commercialUse and attribution rows of the table.
+function checkTerms(
+  report: Report,
+  use: PublishUse,
+  subject: string,
+  licenseId: string,
+  terms: LicenseTerms | undefined,
+  record: { attribution?: string; approved: boolean },
+): void {
+  const licenseName = terms ? `license ${licenseId}` : `license ${licenseId} (not in the registry)`;
+  const commercialUse = terms?.commercialUse ?? "unknown";
+  if (commercialUse === "forbidden") {
+    report("commercial-forbidden", `${subject} uses ${licenseName}, which forbids commercial use`);
+  } else if (commercialUse === "conditional" || commercialUse === "unknown") {
+    report(
+      "commercial-conditional",
+      `${subject} uses ${licenseName}, whose commercial use is ${commercialUse}` +
+        (use === "commercial" ? "; a human must approve it for commercial use" : ""),
+      use === "commercial" && record.approved ? "ok" : undefined,
+    );
+  }
+  const attribution = terms?.attribution ?? "unknown";
+  if ((attribution === "required" || attribution === "unknown") && !hasText(record.attribution)) {
+    report(
+      "attribution-missing",
+      attribution === "required"
+        ? `${subject} uses ${licenseName}, which requires attribution, but has none`
+        : `${subject} uses ${licenseName}, whose attribution term is unknown, and has no attribution`,
+    );
+  }
+}
+
 /**
- * Default credits template. `{{attributions}}` expands to one line per entry with
- * attribution text, and `{{providers}}` to the generation providers, comma-separated.
+ * Default credits template. `{{attributions}}` expands to one line per entry or provider
+ * with attribution text, and `{{providers}}` to the generation providers, comma-separated.
  */
 export const DEFAULT_CREDITS_TEMPLATE =
   "Sounds:\n{{attributions}}\n\nGenerated with: {{providers}}\n";
@@ -145,20 +233,26 @@ export const DEFAULT_CREDITS_TEMPLATE =
 /**
  * Builds the text of out/credits.txt from a template. A line whose placeholders all expand
  * to nothing is dropped, and so is a heading-only section left without lines, so that an
- * empty list leaves no stray labels. Attribution lines come from every entry whose license
- * requires or appreciates attribution (or leaves it unknown) and that has the text.
+ * empty list leaves no stray labels. Attribution lines come from every entry, then every
+ * provider, whose license requires or appreciates attribution (or leaves it unknown) and
+ * that has the text.
  */
 export function buildCreditsText(
   credits: Credits,
   template: string = DEFAULT_CREDITS_TEMPLATE,
 ): string {
-  const attributions = unique(
-    credits.entries.flatMap((e) =>
-      e.license.attribution && e.terms?.attribution !== "none" ? [e.license.attribution] : [],
-    ),
-  );
+  const credit = (text: string | undefined, terms: LicenseTerms | undefined) =>
+    hasText(text) && terms?.attribution !== "none" ? [text.trim()] : [];
+  const attributions = unique([
+    ...credits.entries.flatMap((e) => credit(e.license.attribution, e.terms)),
+    ...credits.providers.flatMap((p) => credit(p.license?.attribution, p.license?.terms)),
+  ]);
   const providers = unique(credits.providers.map((p) => p.name ?? p.id));
-  const values: Record<string, string[]> = { attributions, providers };
+  const values = new Map([
+    ["attributions", attributions],
+    ["providers", providers],
+  ]);
+  const valuesOf = (name: string) => values.get(name) ?? [];
 
   const lines: string[] = [];
   for (const line of template.replace(/\r\n/g, "\n").split("\n")) {
@@ -167,15 +261,15 @@ export function buildCreditsText(
       lines.push(line);
       continue;
     }
-    if (names.every((n) => (values[n] ?? []).length === 0)) {
+    if (names.every((n) => valuesOf(n).length === 0)) {
       // Drop a heading such as "Sounds:" that this empty line was meant to follow.
       if (lines.length > 0 && lines.at(-1)?.trim().endsWith(":")) lines.pop();
       continue;
     }
     // A placeholder alone on its line gives one line per value; inline ones join with ", ".
     const alone = names.length === 1 && line.trim() === `{{${names[0]}}}`;
-    if (alone) lines.push(...(values[names[0] ?? ""] ?? []));
-    else lines.push(line.replace(/\{\{(\w+)\}\}/g, (_, n: string) => (values[n] ?? []).join(", ")));
+    if (alone) lines.push(...valuesOf(names[0] ?? ""));
+    else lines.push(line.replace(/\{\{(\w+)\}\}/g, (_, n: string) => valuesOf(n).join(", ")));
   }
   const text = lines
     .join("\n")

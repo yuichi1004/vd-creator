@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
+import type { Stats } from "node:fs";
 import { createReadStream } from "node:fs";
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { lstat, mkdir, readdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { basename, join, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Document, parseDocument } from "yaml";
 import type { z } from "zod";
@@ -112,7 +113,21 @@ export async function readLibrary(root: string): Promise<Library> {
   const entries: LibraryEntry[] = [];
   for (const kind of LIBRARY_KINDS) {
     const seen = new Map<string, string>();
-    for (const name of await listEntryDirs(root, kind)) {
+    const kindState = await inspectKindDir(root, kind);
+    if (kindState) {
+      issues.push(error(kind, kindState));
+      continue;
+    }
+    const { dirs, links } = await listEntryDirs(root, kind);
+    for (const name of links) {
+      issues.push(
+        error(
+          `${kind}/${name}`,
+          "Entry folder is a symbolic link; the library does not follow links",
+        ),
+      );
+    }
+    for (const name of dirs) {
       const dir = `${kind}/${name}`;
       const file = `${dir}/${ENTRY_FILE}`;
       const text = await readOptional(join(root, kind, name, ENTRY_FILE));
@@ -217,23 +232,104 @@ async function readOptional(path: string): Promise<string | undefined> {
   }
 }
 
-// Entry folders of one kind. Dot folders are skipped: imports stage entries in them.
-async function listEntryDirs(root: string, kind: LibraryKind): Promise<string[]> {
+// A problem with the folder of a kind, such as sfx/, or undefined if it is a plain folder
+// or does not exist.
+async function inspectKindDir(root: string, kind: LibraryKind): Promise<string | undefined> {
   try {
-    const dirents = await readdir(join(root, kind), { withFileTypes: true });
-    return dirents
-      .filter((d) => d.isDirectory() && !d.name.startsWith("."))
-      .map((d) => d.name)
-      .sort();
+    await assertManagedDir(root, kind);
+    return undefined;
   } catch (e) {
-    if (isErrno(e, "ENOENT")) return [];
+    if (e instanceof LibraryError) return e.message;
     throw e;
   }
 }
 
+// Entry folders of one kind, and symbolic links where an entry folder would be. Dot
+// folders are skipped: imports stage entries in them.
+async function listEntryDirs(
+  root: string,
+  kind: LibraryKind,
+): Promise<{ dirs: string[]; links: string[] }> {
+  try {
+    const dirents = (await readdir(join(root, kind), { withFileTypes: true }))
+      .filter((d) => !d.name.startsWith("."))
+      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    return {
+      dirs: dirents.filter((d) => d.isDirectory()).map((d) => d.name),
+      links: dirents.filter((d) => d.isSymbolicLink()).map((d) => d.name),
+    };
+  } catch (e) {
+    if (isErrno(e, "ENOENT")) return { dirs: [], links: [] };
+    throw e;
+  }
+}
+
+/** State of a managed path. See `inspectManagedPath`. */
+export type ManagedPathState =
+  | { status: "file" }
+  | { status: "missing" }
+  | { status: "not-file" }
+  | { status: "symlink"; at: string }
+  | { status: "outside" };
+
+/**
+ * Inspects `rel`, a "/"-separated path inside the library, without following symbolic
+ * links. A link at the path or at any parent folder below the root is reported as
+ * `symlink`, with the library-relative path of the link. As a second line of defense, a
+ * regular file whose resolved path is not inside the resolved root is `outside`.
+ */
+export async function inspectManagedPath(root: string, rel: string): Promise<ManagedPathState> {
+  const segments = rel.split("/");
+  for (let i = 1; i <= segments.length; i++) {
+    let info: Stats;
+    try {
+      info = await lstat(join(root, ...segments.slice(0, i)));
+    } catch (e) {
+      if (isErrno(e, "ENOENT") || isErrno(e, "ENOTDIR")) return { status: "missing" };
+      throw e;
+    }
+    if (info.isSymbolicLink()) return { status: "symlink", at: segments.slice(0, i).join("/") };
+    if (i === segments.length && !info.isFile()) return { status: "not-file" };
+  }
+  return (await isInside(root, join(root, ...segments)))
+    ? { status: "file" }
+    : { status: "outside" };
+}
+
+/**
+ * Throws a `LibraryError` if a folder of `rel` that exists is a symbolic link, or resolves
+ * outside the root. Folders that do not exist yet are fine; the caller creates them.
+ */
+export async function assertManagedDir(root: string, rel: string): Promise<void> {
+  const segments = rel.split("/");
+  for (let i = 1; i <= segments.length; i++) {
+    const at = segments.slice(0, i).join("/");
+    let info: Stats;
+    try {
+      info = await lstat(join(root, ...segments.slice(0, i)));
+    } catch (e) {
+      if (isErrno(e, "ENOENT")) return;
+      throw e;
+    }
+    if (info.isSymbolicLink()) {
+      throw new LibraryError(`${at} is a symbolic link; the library does not follow links`);
+    }
+    if (!info.isDirectory()) throw new LibraryError(`${at} is not a folder`);
+    if (!(await isInside(root, join(root, ...segments.slice(0, i))))) {
+      throw new LibraryError(`${at} resolves outside the library`);
+    }
+  }
+}
+
+async function isInside(root: string, path: string): Promise<boolean> {
+  const [realRoot, realPath] = await Promise.all([realpath(root), realpath(path)]);
+  return realPath.startsWith(realRoot.endsWith(sep) ? realRoot : realRoot + sep);
+}
+
+/** True if something, even a dangling symbolic link, exists at `path`. */
 export async function exists(path: string): Promise<boolean> {
   try {
-    await stat(path);
+    await lstat(path);
     return true;
   } catch (e) {
     if (isErrno(e, "ENOENT")) return false;

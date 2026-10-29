@@ -33,6 +33,32 @@ export const LicenseIdSchema = z
 
 const DateSchema = z.iso.date().describe("Date as YYYY-MM-DD.");
 
+/** An absolute http or https URL. */
+export const HttpUrlSchema = z
+  .string()
+  .refine(isHttpUrl, "URL must be an absolute http:// or https:// URL")
+  .describe("Absolute http or https URL.");
+
+/** Credit text: not blank after trimming. */
+export const AttributionTextSchema = z
+  .string()
+  .refine(hasText, "Attribution must not be blank")
+  .describe("Credit line, as shown in credits.txt.");
+
+/** True if `value` is a string that is not blank after trimming. */
+export function hasText(value: string | undefined): value is string {
+  return value !== undefined && value.trim().length > 0;
+}
+
+function isHttpUrl(value: string): boolean {
+  if (!/^https?:\/\//i.test(value)) return false;
+  try {
+    return new URL(value).hostname.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 export const LibraryMetaSchema = z.strictObject({
   version: z.literal(1),
   name: z.string().min(1),
@@ -40,15 +66,50 @@ export const LibraryMetaSchema = z.strictObject({
 
 export const LicenseTermsSchema = z.strictObject({
   name: z.string().min(1),
-  url: z.string().min(1).optional(),
+  url: HttpUrlSchema.optional(),
   attribution: z.enum(ATTRIBUTION_TERMS),
   commercialUse: z.enum(COMMERCIAL_USE_TERMS),
   conditions: z.string().min(1).optional(),
   modification: z.enum(MODIFICATION_TERMS),
   shareAlike: z.union([z.boolean(), z.literal("unknown")]),
+  // Provider licenses only. A generated sound has no entry.yaml, so the human-made
+  // choices that an entry records in its license record live on the registry record.
+  attributionText: AttributionTextSchema.optional().describe(
+    "generated-* licenses only: credit line for the provider's output.",
+  ),
+  approvedFor: z
+    .literal("commercial")
+    .optional()
+    .describe("generated-* licenses only: a human approved the terms for commercial use."),
 });
 
-export const LicenseRegistrySchema = z.record(LicenseIdSchema, LicenseTermsSchema);
+/** Prefix of the registry ID of a provider's license, as in generated-elevenlabs. */
+export const PROVIDER_LICENSE_PREFIX = "generated-";
+
+// Zod drops an own "__proto__" key from a record without an issue, so reject it first.
+const NoProtoKeySchema = z
+  .unknown()
+  .refine(
+    (value) => typeof value !== "object" || value === null || !Object.hasOwn(value, "__proto__"),
+    { message: '"__proto__" is not a valid license ID', path: ["__proto__"] },
+  );
+
+export const LicenseRegistrySchema = NoProtoKeySchema.pipe(
+  z.record(LicenseIdSchema, LicenseTermsSchema),
+).superRefine((registry, ctx) => {
+  for (const [id, terms] of Object.entries(registry)) {
+    if (id.startsWith(PROVIDER_LICENSE_PREFIX)) continue;
+    for (const key of ["attributionText", "approvedFor"] as const) {
+      if (terms[key] !== undefined) {
+        ctx.addIssue({
+          code: "custom",
+          path: [id, key],
+          message: `${key} is allowed only on ${PROVIDER_LICENSE_PREFIX}* licenses`,
+        });
+      }
+    }
+  }
+});
 
 export const GeneratedSourceSchema = z.strictObject({
   type: z.literal("generated"),
@@ -61,7 +122,7 @@ export const GeneratedSourceSchema = z.strictObject({
 
 export const ExternalSourceSchema = z.strictObject({
   type: z.enum(["downloaded", "recorded", "other"]),
-  url: z.string().min(1).optional(),
+  url: HttpUrlSchema.optional(),
   site: z.string().min(1).optional(),
   author: z.string().min(1).optional(),
   retrievedAt: DateSchema.optional(),
@@ -72,20 +133,21 @@ export const SourceSchema = z.discriminatedUnion("type", [
   ExternalSourceSchema,
 ]);
 
+/** Matches an evidence path; group 1 is the SHA-256 of the file's content. */
+export const EVIDENCE_PATH = new RegExp(`^${EVIDENCE_DIR}/([0-9a-f]{64})(?:\\.[a-z0-9]{1,10})?$`);
+
 export const EvidencePathSchema = z
   .string()
   .regex(
-    new RegExp(`^${EVIDENCE_DIR}/${PATH_SEGMENT}$`),
-    `Evidence must be a file directly inside ${EVIDENCE_DIR}/`,
+    EVIDENCE_PATH,
+    `Evidence must be ${EVIDENCE_DIR}/<sha256 of the content>, with an optional extension`,
   );
 
 export const LicenseRecordSchema = z.strictObject({
   id: LicenseIdSchema,
-  attribution: z
-    .string()
-    .min(1)
-    .optional()
-    .describe("Credit line. Required when the license requires attribution."),
+  attribution: AttributionTextSchema.optional().describe(
+    "Credit line. Required when the license requires attribution.",
+  ),
   evidence: EvidencePathSchema.optional().describe("Copy of the terms as seen at retrievedAt."),
   verified: z.boolean().default(false).describe("A human confirmed this record."),
   verifiedAt: DateSchema.optional(),
@@ -111,6 +173,14 @@ export const EntrySchema = z.strictObject({
   notes: z.string().optional(),
   modified: z.boolean().default(false).describe("The file differs from the original download."),
 });
+
+/**
+ * Looks up a license by ID. Only the registry's own keys count, so IDs such as
+ * "constructor" or "toString" never resolve to inherited properties.
+ */
+export function lookupLicense(registry: LicenseRegistry, id: string): LicenseTerms | undefined {
+  return Object.hasOwn(registry, id) ? registry[id] : undefined;
+}
 
 export type LibraryKind = (typeof LIBRARY_KINDS)[number];
 export type SourceType = (typeof SOURCE_TYPES)[number];
