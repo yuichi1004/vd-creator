@@ -90,6 +90,11 @@ const CREATE_FLAGS =
  * call. The check after it then finds the swap. The rollback removes a file that call created,
  * which is known by its open handle, but leaves a folder that call created in place, because the
  * lstat after mkdir cannot tell it from a folder that was already there.
+ * One case can still record a folder this run did not make: if a parent is swapped for a link
+ * after mkdir, just before the lstat, and swapped back before the check that follows it, the
+ * lstat records the device and inode of a folder elsewhere. If a later step then fails, the
+ * rollback may rmdir that folder. rmdir removes only an empty folder, and the case needs three
+ * swaps timed to single calls, so the worst outcome is the loss of one empty folder.
  */
 export async function initUserDir(
   dir: string | undefined,
@@ -119,8 +124,9 @@ export async function initUserDir(
   /**
    * Creates the one folder `name` in `parent`, which must still be the folder `parentId`, and
    * returns its identity. Its identity is recorded for the rollback only if `parent` is still the
-   * same folder after the lstat, because otherwise that lstat may have seen another folder, which
-   * the rollback must never remove.
+   * same folder after the lstat, because otherwise that lstat may have seen another folder. This
+   * narrows the window but does not close it: a parent swapped away just before the lstat and
+   * back just before the check is not caught (see the residual risk on `initUserDir`).
    */
   const makeFolder = async (parent: string, parentId: Identity, name: string) => {
     const path = join(parent, name);
