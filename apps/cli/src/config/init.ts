@@ -79,14 +79,17 @@ const CREATE_FLAGS =
  * the entries it created.
  *
  * Race policy, as in vd clean: the real path of the target is resolved and checked once, and
- * every later call uses that real path, never `dir`. After the folder is created, its real path
- * and its device and inode must still be the ones checked, and they are checked again before
- * each file or folder is created in it and once at the end. Files are created with O_EXCL and
- * O_NOFOLLOW. On any mismatch, or any other error, it stops with a `ConfigInitError` or that
- * error, and removes what this run created, each only if it is still the same file or folder.
+ * every later call uses that real path, never `dir`. Missing folders are created one level at a
+ * time: before each mkdir, the parent must still be the folder checked, with the same device,
+ * inode, and real path, and right after it the new folder's device and inode are recorded. The
+ * target is checked the same way before each file or folder is created in it and once at the
+ * end. Files are created with O_EXCL and O_NOFOLLOW. On any mismatch, or any other error, it
+ * stops and rolls back (see `removeCreated`).
  * Residual risk: Node has no openat or mkdirat, so a folder on the real path swapped for a
  * symbolic link in the instant between a check and the next call can still redirect that one
- * call. The check after it then finds the swap, and the run removes what that call created.
+ * call. The check after it then finds the swap. The rollback removes a file that call created,
+ * which is known by its open handle, but leaves a folder that call created in place, because the
+ * lstat after mkdir cannot tell it from a folder that was already there.
  */
 export async function initUserDir(
   dir: string | undefined,
@@ -97,30 +100,66 @@ export async function initUserDir(
   const target =
     dir === undefined ? join(repoRoot, LOCAL_DIR) : resolve(options.cwd ?? process.cwd(), dir);
   const real = await checkOutsideRepo(target, repoRoot, typed);
-  const before = await lstatOrUndefined(real);
 
   const created: Created[] = [];
-  let firstMade: string | undefined;
+  /** The entries of the layout that this run created, as reported. */
+  const names: string[] = [];
   const changed = () =>
     new ConfigInitError(
       `${typed} changed while it was being set up; stopped and removed what this run created`,
     );
-  try {
-    firstMade = await mkdir(real, { recursive: true });
-    const folder = await lstat(real, { bigint: true });
-    if (
-      !folder.isDirectory() ||
-      (before && !sameId(folder, idOf(before))) ||
-      (await realpath(real)) !== real
-    ) {
-      throw changed();
+  /** Throws unless `path` is still the folder `identity`, at its own real path. */
+  const ensureFolder = async (path: string, identity: Identity) => {
+    const now = await lstatOrUndefined(path);
+    const realNow = await realpath(path).catch(() => undefined);
+    if (!now?.isDirectory() || !sameId(now, identity) || realNow !== path) throw changed();
+  };
+  /** True while a folder this run made is not yet recorded, so the rollback cannot remove it. */
+  let unrecorded = false;
+  /**
+   * Creates the one folder `name` in `parent`, which must still be the folder `parentId`, and
+   * returns its identity. Its identity is recorded for the rollback only if `parent` is still the
+   * same folder after the lstat, because otherwise that lstat may have seen another folder, which
+   * the rollback must never remove.
+   */
+  const makeFolder = async (parent: string, parentId: Identity, name: string) => {
+    const path = join(parent, name);
+    await ensureFolder(parent, parentId);
+    try {
+      // Not recursive, so this creates exactly one folder, or fails.
+      await mkdir(path);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "EEXIST") throw changed();
+      throw e;
     }
-    const identity = idOf(folder);
-    const ensureSame = async () => {
-      const now = await lstatOrUndefined(real);
-      const realNow = await realpath(real).catch(() => undefined);
-      if (!now?.isDirectory() || !sameId(now, identity) || realNow !== real) throw changed();
-    };
+    unrecorded = true;
+    const stats = await lstat(path, { bigint: true });
+    await ensureFolder(parent, parentId);
+    if (!stats.isDirectory()) throw changed();
+    const identity = idOf(stats);
+    created.push({ path, identity, folder: true });
+    unrecorded = false;
+    return identity;
+  };
+  try {
+    // The nearest folder on the real path that exists, and the missing ones below it.
+    const missing: string[] = [];
+    let parent = real;
+    let parentStats = await lstatOrUndefined(parent);
+    while (parentStats === undefined && dirname(parent) !== parent) {
+      missing.unshift(parent);
+      parent = dirname(parent);
+      parentStats = await lstatOrUndefined(parent);
+    }
+    if (!parentStats?.isDirectory()) throw changed();
+    let identity = idOf(parentStats);
+    await ensureFolder(parent, identity);
+    for (const folder of missing) {
+      identity = await makeFolder(parent, identity, basename(folder));
+      await ensureFolder(folder, identity);
+      parent = folder;
+    }
+    const ensureSame = () => ensureFolder(real, identity);
 
     for (const [name, text] of [
       [CONFIG_FILE, CONFIG_TEMPLATE],
@@ -138,51 +177,49 @@ export async function initUserDir(
       }
       try {
         created.push({ path, identity: idOf(await handle.stat({ bigint: true })), folder: false });
+        names.push(name);
         await handle.writeFile(text, "utf8");
       } finally {
         await handle.close();
       }
     }
     await ensureSame();
-    const docs = join(real, DOCS_DIR);
-    try {
-      await mkdir(docs);
-      const stats = await lstat(docs, { bigint: true });
-      if (stats.isDirectory()) created.push({ path: docs, identity: idOf(stats), folder: true });
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    // A docs/ that is already there is kept.
+    if ((await lstatOrUndefined(join(real, DOCS_DIR))) === undefined) {
+      await makeFolder(real, identity, DOCS_DIR);
+      names.push(`${DOCS_DIR}/`);
     }
     await ensureSame();
   } catch (e) {
-    await removeCreated(created, firstMade, real);
+    if (!(await removeCreated(created)) || unrecorded) {
+      throw new ConfigInitError(
+        `${typed} changed while it was being set up; stopped, and left in place what this run could not safely remove`,
+      );
+    }
     throw e;
   }
-  const names = created.map((entry) => (entry.folder ? `${DOCS_DIR}/` : basename(entry.path)));
   return { dir: target, created: names };
 }
 
 /**
- * Removes what a stopped run created, newest first: each file or folder only if it is still the
- * same one, then the folders that mkdir made for `real`, from `real` up to `firstMade`, only if
- * they are empty. Errors are ignored, so the first error is the one reported.
+ * Rolls back a stopped run: removes what it created, newest and so deepest first, each only if
+ * lstat still shows the device and inode recorded when it was created. Files are removed with
+ * unlink and folders only with rmdir, never recursively, so a folder that is not empty or not
+ * this run's is never removed. On the first mismatch or error it stops and leaves the rest in
+ * place. Returns whether everything was removed.
  */
-async function removeCreated(
-  created: Created[],
-  firstMade: string | undefined,
-  real: string,
-): Promise<void> {
+async function removeCreated(created: Created[]): Promise<boolean> {
   for (const entry of [...created].reverse()) {
-    const stats = await lstatOrUndefined(entry.path).catch(() => undefined);
-    if (!stats || !sameId(stats, entry.identity)) continue;
-    await (entry.folder ? rmdir(entry.path) : unlink(entry.path)).catch(() => undefined);
+    try {
+      const stats = await lstatOrUndefined(entry.path);
+      if (!stats || !sameId(stats, entry.identity)) return false;
+      if (entry.folder) await rmdir(entry.path);
+      else await unlink(entry.path);
+    } catch {
+      return false;
+    }
   }
-  if (firstMade === undefined || !(real === firstMade || real.startsWith(firstMade + sep))) return;
-  for (let folder = real; ; folder = dirname(folder)) {
-    const stats = await lstatOrUndefined(folder).catch(() => undefined);
-    // rmdir removes only an empty folder, and never follows a link at the name.
-    if (stats?.isDirectory()) await rmdir(folder).catch(() => undefined);
-    if (folder === firstMade || dirname(folder) === folder) break;
-  }
+  return true;
 }
 
 async function lstatOrUndefined(path: string): Promise<BigIntStats | undefined> {
