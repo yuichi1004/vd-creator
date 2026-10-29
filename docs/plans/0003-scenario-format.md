@@ -1,6 +1,6 @@
 # 0003: Scenario format
 
-- Status: Done
+- Status: In progress
 - Date: 2026-10-29
 
 ## Background
@@ -136,6 +136,12 @@ The schema task fixes a file format, so it is reviewed with `gpt-6-astra` (see t
   - Constraints: depends on the schema task being merged. English.
   - Ownership: `docs/scenario-format.md`, `AGENTS.md`.
   - Acceptance: the example in the guide passes `vd validate`.
+- [ ] Plain JSON values in `voice.settings`
+  - Target: `packages/scenario/`, `docs/scenario-format.md`
+  - Change: `voice.settings` keeps taking any keys, but its values, at any depth, must be plain JSON: strings, finite numbers, `true`, `false`, `null`, lists, and mappings with string keys. Anything else, such as `.inf`, `.nan`, a date, binary data, or an alias that refers to itself, is a validation error at the path of that value. Before this, such values passed `vd validate` and the item was only marked `invalid` at generation (see [0004](0004-providers-and-generation.md)), which stays as a safety net. Update the generated JSON Schema and the guide.
+  - Constraints: no new dependencies. Valid scenarios, including the sample, stay valid. Do not change `packages/core`.
+  - Ownership: `packages/scenario/`, `docs/scenario-format.md`.
+  - Acceptance: `npm test -w packages/scenario` passes, with a failing case for each kind of value above, at the top level and nested in a list and a mapping, and the guide's example still passes `vd validate`.
 
 ## Open questions
 
