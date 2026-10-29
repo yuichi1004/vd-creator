@@ -22,7 +22,7 @@ Goals:
 Non-goals:
 
 - Other providers. The interfaces allow them later.
-- Imported, non-generated audio. A follow-up can add it.
+- Library sounds and imported audio. [0007](0007-sound-library.md) adds them through the resolver hook below.
 - Any UI. It belongs to 0005.
 
 ## Design
@@ -67,6 +67,18 @@ It calls the ElevenLabs REST API with the built-in `fetch`, not the SDK. This av
 - `cache.json` maps keys to `{ file, providerId, request, durationSec, createdAt }`, with `version: 1` at the top.
 - Changing a line's text, voice, settings, or take changes the key, so only that item is regenerated. Old assets stay until `vd clean` removes unreferenced ones.
 
+### Asset resolvers
+
+The pipeline asks a list of resolvers for each item's asset. This plan ships one resolver, for generated items. An item that no resolver handles, such as `sfx: { library: ... }` before 0007 is done, is reported as `unresolved` in the plan and the timeline, not as an error and not as a generation request. 0007 adds the library resolver without changing the pipeline.
+
+```ts
+interface AssetResolver {
+  handles(item: ScenarioItem): boolean;
+  plan(item: ScenarioItem, ctx: ResolveContext): Promise<PlannedAsset>;   // cached | to-generate | unresolved, with cost
+  resolve(item: ScenarioItem, ctx: ResolveContext): Promise<ResolvedAsset>;
+}
+```
+
 ### Timeline
 
 `computeTimeline(scenario, cache)` returns, for each item, `{ id, kind, startSec, durationSec, assetFile? }`, plus image spans and BGM spans per scene. Items play in order, separated by `gapBeforeSec`. An SFX with `overlap: true` does not push the next item. Items without an asset yet get an estimated duration and `missing: true`, so that the UI can still show a layout.
@@ -100,7 +112,7 @@ The interfaces task is reviewed with `gpt-6-astra`, because it fixes a public in
   - Acceptance: `npm test -w packages/providers` passes, with tests for the request body, headers (key from the environment), and error handling, all against a stubbed `fetch`.
 - [ ] Cache, generation pipeline, and timeline
   - Target: `packages/core/`
-  - Change: the cache, `planGeneration(scenario, cache)` (items with cached or to-generate status and a cost total), `runGeneration` (concurrency 4, writes assets as they finish), and `computeTimeline`.
+  - Change: the cache, the `AssetResolver` hook with the generated-item resolver, `planGeneration(scenario, cache, resolvers)` (items with cached, to-generate, or unresolved status and a cost total), `runGeneration` (concurrency 4, writes assets as they finish), and `computeTimeline`.
   - Constraints: no new dependencies. Uses only the mock provider in tests. Depends on the interfaces task. Can run in parallel with the ElevenLabs task.
   - Ownership: `packages/core/`.
   - Acceptance: `npm test -w packages/core` passes, including: generating the 0003 sample twice makes no provider calls the second time, changing one line regenerates only that line, and timeline start times follow the gap and overlap rules.

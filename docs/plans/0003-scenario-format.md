@@ -23,6 +23,7 @@ Non-goals:
 - The cache file and asset metadata. They belong to 0004.
 - Timing beyond what a scenario states, such as computed start times. 0004 computes the timeline.
 - Migrations between schema versions. Version 1 is the only version for now.
+- The shared sound library and license checks. They are designed in [0007](0007-sound-library.md). This plan only fixes how a scenario refers to a library entry.
 
 ## Design
 
@@ -37,6 +38,8 @@ New runtime dependencies: `zod` (named in 0002) and `yaml` (named here).
 ```yaml
 version: 1
 title: The Lighthouse Keeper
+publish:
+  use: private                    # private | non-commercial | commercial; used by license checks (0007)
 speakers:
   - id: mira                      # Stable ID, referenced by lines
     name: Mira
@@ -55,10 +58,12 @@ scenes:
       volume: 0.3                 # 0..1, default 0.3
     items:
       - image: shore              # Shows from here until the next image
-      - sfx: "waves on rocks"
+      - sfx: "waves on rocks"     # A string is a prompt: the sound is generated
         id: s1-waves
         durationSec: 4
         overlap: true             # Plays under the next items instead of before them
+      - sfx: { library: door-creak-wood-01 }   # An entry in the shared library (0007)
+        id: s1-door
       - line: "Is anyone up there?"
         id: s1-l1
         speaker: mira
@@ -76,6 +81,7 @@ Rules:
 - Every scene, line, and SFX has an `id`, unique in the file. IDs are what the UI, the cache, and agents use to refer to an item, so they must stay stable when text changes. `vd validate` reports missing and duplicate IDs. `vd init` and agents create short slugs.
 - An item is exactly one of `line`, `sfx`, `pause`, or `image`, identified by which key it has.
 - References must resolve: `speaker` to a speaker ID, `image` to an image ID.
+- An SFX is either a prompt string or `{ library: <entry-id> }`. A BGM has exactly one of `prompt` or `library`. The schema checks only the shape. Whether the entry exists, and whether its license fits `publish.use`, is checked against the library by 0007.
 - `take` is a non-negative integer, default 0. It selects which generation of an item is used. Regenerating an item increments it (see 0004).
 - `gapBeforeSec` defaults to 0.3 for lines and 0 for other items. Negative values are allowed down to -1.0, for overlapping dialogue.
 - Unknown keys are errors, so that typos are caught. Provider-specific `settings` is the only free-form object.

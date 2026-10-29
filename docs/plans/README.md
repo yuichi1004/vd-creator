@@ -59,3 +59,5 @@ Each task must be self-contained: an agent working on it sees only the task, not
 | [0004](0004-providers-and-generation.md) | Providers and generation pipeline | Draft |
 | [0005](0005-review-ui.md) | Review UI | Draft |
 | [0006](0006-rendering.md) | Rendering | Draft |
+| [0007](0007-sound-library.md) | Shared sound library and licenses | Draft |
+| [0008](0008-user-config.md) | User config and private docs | Draft |

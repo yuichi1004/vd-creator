@@ -52,7 +52,7 @@ Non-goals:
 vd render [dir] [--video] [--srt] [--format mp3|wav] [--print-command]
 ```
 
-It checks that ffmpeg is on `PATH` and that every item has an asset, then renders. The audio is always rendered, and the video uses it.
+It checks that ffmpeg is on `PATH`, that every item has an asset, and that the project license check from [0007](0007-sound-library.md) has no errors, then renders. The audio is always rendered, and the video uses it. It also writes `out/credits.txt` with `buildCreditsText` from `@vd-creator/library` (0007), so that the attributions ship with every render.
 
 ## Tasks
 
@@ -71,9 +71,9 @@ It checks that ffmpeg is on `PATH` and that every item has an asset, then render
 - [ ] `vd render`
   - Target: `apps/cli/`
   - Change: the command described above.
-  - Constraints: no new dependencies. Depends on the video task. Must not run at the same time as another task that owns `apps/cli/`, such as `vd serve` in 0005.
+  - Constraints: no new dependencies. Depends on the video task and on the 0007 project integration task. Must not run at the same time as another task that owns `apps/cli/`, such as `vd serve` in 0005.
   - Ownership: `apps/cli/`.
-  - Acceptance: `npm test -w apps/cli` passes, with a test that runs `init`, `generate` with the mock, and `render --video --srt`, then checks that the three output files exist. A test checks that a missing asset fails with the item IDs listed.
+  - Acceptance: `npm test -w apps/cli` passes, with a test that runs `init`, `generate` with the mock, and `render --video --srt`, then checks that the output files, including `credits.txt`, exist. A test checks that a missing asset fails with the item IDs listed, and that a license error stops the render.
 
 ## Open questions
 
