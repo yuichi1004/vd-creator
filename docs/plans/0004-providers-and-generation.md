@@ -1,6 +1,6 @@
 # 0004: Providers and generation pipeline
 
-- Status: In progress
+- Status: Done
 - Date: 2026-10-29
 - Depends on: [0003](0003-scenario-format.md)
 
@@ -122,7 +122,7 @@ The interfaces task is reviewed with `gpt-6-astra`, because it fixes a public in
   - Constraints: no new dependencies. Uses only the mock provider in tests. Depends on the interfaces task. Can run in parallel with the ElevenLabs task.
   - Ownership: `packages/core/`.
   - Acceptance: `npm test -w packages/core` passes, including: generating the 0003 sample twice makes no provider calls the second time, changing one line regenerates only that line, and timeline start times follow the gap and overlap rules.
-- [ ] `vd generate` and `vd clean`
+- [x] `vd generate` and `vd clean`
   - Target: `apps/cli/`
   - Change: the commands described above.
   - Constraints: no new dependencies. Depends on the core task.
