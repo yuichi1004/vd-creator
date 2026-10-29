@@ -813,13 +813,16 @@ describe("token", () => {
     const cookie = response.headers.get("Set-Cookie") ?? "";
     expect(cookie).toContain(`${TOKEN_COOKIE}=${token}`);
     expect(cookie).toContain("HttpOnly");
-    expect(cookie).toContain("SameSite=Strict");
+    // Lax, so that the cookie survives the redirect after a link from another site.
+    expect(cookie).toContain("SameSite=Lax");
+    expect(cookie).not.toContain("SameSite=Strict");
     expect(cookie).not.toContain("Path=");
     expect(response.headers.get("Referrer-Policy")).toBe("no-referrer");
 
     response = await app.request(`/ui/page.html?a=1&token=${token}&b=2`);
     expect(response.status).toBe(303);
     expect(response.headers.get("Location")).toBe("./page.html?a=1&b=2");
+    expect(response.headers.get("Location")).not.toContain(token);
     response = await app.request(`/ui/?token=${token}`);
     expect(response.headers.get("Location")).toBe("./");
 

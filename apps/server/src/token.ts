@@ -44,9 +44,15 @@ export function withoutToken(url: URL): string {
 
 /**
  * Checks the token on every request. A valid `?token=` query sets an `HttpOnly`,
- * `SameSite=Strict` cookie with no `Path`, so that it works under a path prefix. A GET then
+ * `SameSite=Lax` cookie with no `Path`, so that it works under a path prefix. A GET then
  * redirects (303) to the same page without the token, so that it leaves the address bar and
  * history; later requests use the cookie. Anything else gets 401.
+ *
+ * Lax, not Strict: when the token URL is opened from a link on another site, such as webmail,
+ * the browser treats the redirect as cross-site and would withhold a Strict cookie, so the user
+ * would land on a 401. Lax sends the cookie on cross-site top-level GET navigations, which is
+ * safe because no GET or HEAD route changes anything, and every other API request must be JSON
+ * and not cross-site (see app.ts).
  */
 export function tokenCheck(token: string): MiddlewareHandler {
   return async (c, next) => {
@@ -54,7 +60,7 @@ export function tokenCheck(token: string): MiddlewareHandler {
     if (tokenMatches(fromQuery, token)) {
       // Written by hand: Hono's setCookie always adds `Path=/`. The token is base64url, so
       // it needs no escaping.
-      c.header("Set-Cookie", `${TOKEN_COOKIE}=${token}; HttpOnly; SameSite=Strict`, {
+      c.header("Set-Cookie", `${TOKEN_COOKIE}=${token}; HttpOnly; SameSite=Lax`, {
         append: true,
       });
       if (c.req.method === "GET" || c.req.method === "HEAD") {
