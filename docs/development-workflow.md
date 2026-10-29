@@ -93,7 +93,14 @@ A timeout means "nothing yet", not failure. After three empty waits in a row, in
 
 ## 5. Review
 
-When a worker reports `--outcome succeeded`, start a Codex reviewer on the same worktree. Every change is reviewed this way, including small documentation changes. The coordinator still reads the diff (`git diff main...<task branch>`), but that does not replace the Codex review:
+When a worker reports `--outcome succeeded`, start a reviewer on the same worktree. Every change gets a reviewer, including small documentation changes. The coordinator still reads the diff (`git diff main...<task branch>`), but that does not replace the review.
+
+Codex usage is limited, so choose the reviewer by the size of the change:
+
+- **Large changes** get a Codex reviewer: the first review of a new task's code, and any other change of roughly 150 or more non-test lines. Code that handles secrets, such as API keys, always gets a Codex reviewer.
+- **Small changes** get a Claude reviewer (`--agent claude`): fix rounds on a task that Codex has already reviewed, documentation and plan changes, and other changes under roughly 150 non-test lines.
+
+A Codex reviewer is started like this:
 
 ```sh
 orca orchestration worker-start --worktree <implementer_worktree_selector> --agent codex \
@@ -110,6 +117,10 @@ Always pass `--model` and `--effort` for a Codex reviewer. Without them, Codex m
 | `gpt-6-astra`, effort `high` | Reviews where a mistake is expensive later: architecture, public interfaces, file formats such as the scenario schema, and security. Its usage limit is low, so use it only for these. |
 
 `gpt-6.1-terra` is meant for writing and images, and `gpt-6-luna` is too light for review. Neither is used for code review.
+
+A Claude reviewer uses the same command with `--agent claude` and without `--model` and `--effort`.
+
+If a Codex reviewer stops at a usage limit, it does not resume by itself and sends no message. Close its terminal after the limit resets, and start the review again on the same Task with `worker-start --task <review_task_id>` and the same model.
 
 If there are findings, send them back as a follow-up on the same Task branch. Reuse the implementer's terminal if it is still live, or start a new implementer with `--retry-of`.
 
