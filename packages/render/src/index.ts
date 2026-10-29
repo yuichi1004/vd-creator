@@ -3,3 +3,4 @@ export * from "./audio.js";
 export * from "./errors.js";
 export * from "./ffmpeg.js";
 export * from "./srt.js";
+export * from "./video.js";
