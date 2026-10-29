@@ -1,7 +1,18 @@
 // Integration tests of vd render: they generate with the mock and render with the real ffmpeg.
 
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -109,7 +120,10 @@ async function outFiles(): Promise<string[]> {
 }
 
 /** Makes the scenario use library sound door-01, imported and verified as `verify` says. */
-async function useDoor(use: "private" | "commercial", options: { verify: boolean }) {
+async function useDoor(
+  use: "private" | "commercial",
+  options: { verify: boolean; license?: string },
+) {
   expect((await vd("library", "init", lib)).code).toBe(EXIT_OK);
   const sound = join(tmp, "door.wav");
   const evidence = join(tmp, "terms.html");
@@ -118,7 +132,7 @@ async function useDoor(use: "private" | "commercial", options: { verify: boolean
   await importEntry(lib, sound, {
     kind: "sfx",
     id: "door-01",
-    license: "CC-BY-4.0",
+    license: options.license ?? "CC-BY-4.0",
     title: "Old door",
     url: "https://example.com/sounds/1",
     author: "Jane Doe",
@@ -210,6 +224,39 @@ describe("vd render", { timeout: 120_000 }, () => {
     expect(await outFiles()).toEqual([]);
   });
 
+  test("a non-commercial license stops a commercial render", async () => {
+    await useDoor("commercial", { verify: true, license: "CC-BY-NC-4.0" });
+    expect((await vdEnv({ VD_LIBRARY: lib }, "generate", dir)).code).toBe(EXIT_OK);
+    const result = await vd("render", dir);
+    expect(result.code).toBe(EXIT_FAILURE);
+    expect(result.stderr).toContain('Library entry "door-01"');
+    expect(result.stderr).toContain(
+      "vd render: the license check has errors; fix them before rendering",
+    );
+    expect(await outFiles()).toEqual([]);
+  });
+
+  test("replaces a symbolic link at out/credits.txt or out/drama.srt, never writing through it", async () => {
+    expect((await vd("generate", dir)).code).toBe(EXIT_OK);
+    await mkdir(join(dir, "out"), { recursive: true });
+    const outside = { credits: join(tmp, "notes.txt"), srt: join(tmp, "notes.srt") };
+    await writeFile(outside.credits, "keep\n");
+    await writeFile(outside.srt, "keep\n");
+    await symlink(outside.credits, join(dir, "out", "credits.txt"));
+    await symlink(outside.srt, join(dir, "out", "drama.srt"));
+
+    const result = await vd("render", dir, "--srt");
+    expect(result).toMatchObject({ code: EXIT_OK, stderr: "" });
+    expect(await readFile(outside.credits, "utf8")).toBe("keep\n");
+    expect(await readFile(outside.srt, "utf8")).toBe("keep\n");
+    for (const file of ["credits.txt", "drama.srt"]) {
+      expect((await lstat(join(dir, "out", file))).isFile()).toBe(true);
+    }
+    expect(await readFile(join(dir, "out", "drama.srt"), "utf8")).toContain("Who goes there?");
+    // No temporary file is left.
+    expect(await outFiles()).toEqual(["credits.txt", "drama.mp3", "drama.srt"]);
+  });
+
   test("a verified CC-BY entry renders, with its attribution in credits.txt", async () => {
     await useDoor("commercial", { verify: true });
     expect((await vdEnv({ VD_LIBRARY: lib }, "generate", dir)).code).toBe(EXIT_OK);
@@ -250,7 +297,7 @@ describe("vd render", { timeout: 120_000 }, () => {
     expect(result).toMatchObject({ code: EXIT_OK, stderr: "" });
     const lines = result.stdout.split("\n");
     expect(lines.slice(0, 3)).toEqual([
-      "# Run in .:",
+      "cd -- . || exit 1",
       "mkdir -p out",
       "cat > out/drama.mp3.filter <<'VD_EOF'",
     ]);
@@ -275,6 +322,39 @@ describe("vd render", { timeout: 120_000 }, () => {
     expect(streams).toContainEqual(
       expect.objectContaining({ codec_type: "video", width: 1920, height: 1080 }),
     );
+  });
+
+  test("--print-command quotes the project folder and file names for the shell", async () => {
+    expect((await vd("generate", dir)).code).toBe(EXIT_OK);
+    // A project folder with a space, and an image name with a quote and a command substitution.
+    const moved = join(tmp, "my drama");
+    await rename(dir, moved);
+    dir = moved;
+    const name = "it's $(x) a.png";
+    await rename(join(dir, "assets", "images", "shore.png"), join(dir, "assets", "images", name));
+    await editScenario((text) => text.replace("file: images/shore.png", `file: "images/${name}"`));
+    const result = await vd("render", dir, "--video", "--print-command");
+    expect(result).toMatchObject({ code: EXIT_OK, stderr: "" });
+    expect(result.stdout.split("\n")[0]).toBe(`cd -- ${shellQuote(dir)} || exit 1`);
+    await exec("sh", ["-n", "-c", result.stdout]);
+
+    // A fake ffmpeg logs its arguments, and a command named x would leave a mark.
+    const bin = join(tmp, "fake-bin");
+    const log = join(tmp, "ffmpeg.log");
+    const mark = join(tmp, "x-ran");
+    await mkdir(bin);
+    await writeFile(join(bin, "ffmpeg"), `#!/bin/sh\nprintf '%s\\n' "$@" >> ${shellQuote(log)}\n`);
+    await writeFile(join(bin, "x"), `#!/bin/sh\ntouch ${shellQuote(mark)}\n`);
+    await chmod(join(bin, "ffmpeg"), 0o755);
+    await chmod(join(bin, "x"), 0o755);
+    // The script runs from another folder.
+    await exec("sh", ["-e", "-c", result.stdout], {
+      cwd: tmp,
+      env: { PATH: `${bin}:${process.env.PATH ?? ""}` },
+    });
+    const args = (await readFile(log, "utf8")).split("\n");
+    expect(args).toContain(`assets/images/${name}`);
+    await expect(lstat(mark)).rejects.toThrow();
   });
 
   test("uses render.creditsTemplate from config.yaml, after the project's template", async () => {

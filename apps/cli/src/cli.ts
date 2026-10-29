@@ -1,5 +1,4 @@
 import { existsSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import {
@@ -70,6 +69,8 @@ import {
   readCreditsTemplate,
   renderCommands,
   SRT_FILE,
+  shellQuote,
+  writeOutFile,
 } from "./render.js";
 import {
   aborted,
@@ -589,7 +590,8 @@ async function render(args: string[], options: Options, context: Context): Promi
   }
 
   if (printOnly) {
-    output.stdout(`# Run in ${dir}:`);
+    // The script enters the project folder itself; a quoted path holds any character safely.
+    output.stdout(`cd -- ${shellQuote(dir)} || exit 1`);
     for (const line of renderCommands(timeline, { format, video })) output.stdout(line);
     return EXIT_OK;
   }
@@ -643,7 +645,7 @@ async function render(args: string[], options: Options, context: Context): Promi
 
   const write = async (file: string, text: string): Promise<boolean> => {
     try {
-      await writeFile(join(dir, file), text);
+      await writeOutFile(dir, file, text);
       output.stdout(`Wrote ${file}`);
       return true;
     } catch (e) {

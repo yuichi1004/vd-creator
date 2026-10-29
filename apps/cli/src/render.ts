@@ -1,7 +1,8 @@
 // Helpers of vd render. See "vd render" in docs/plans/0006-rendering.md.
 
+import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, readFile, stat } from "node:fs/promises";
+import { access, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import { ASSETS_DIR, itemLabel, type Timeline } from "@vd-creator/core";
 import {
@@ -95,6 +96,25 @@ export async function missingImages(projectDir: string, timeline: Timeline): Pro
     if (!found) labels.push(`image "${span.imageId}" (${span.file})`);
   }
   return labels;
+}
+
+/**
+ * Writes `text` to `file`, relative to `projectDir`, through a temporary file in the same
+ * folder that is then renamed over it. A symbolic link at `file` is replaced, never followed,
+ * so a project cannot make the render write outside it.
+ */
+export async function writeOutFile(projectDir: string, file: string, text: string): Promise<void> {
+  const target = join(projectDir, file);
+  const temp = `${target}.${randomUUID()}.tmp`;
+  try {
+    // "wx" creates the file and fails if anything, a symbolic link too, is at that name.
+    await writeFile(temp, text, { flag: "wx" });
+    await rename(temp, target);
+  } catch (e) {
+    // Cleanup is best effort: its failure must not hide the error that caused it.
+    await rm(temp, { force: true }).catch(() => {});
+    throw e;
+  }
 }
 
 /** An argument quoted for a POSIX shell, unless it needs no quotes. */
