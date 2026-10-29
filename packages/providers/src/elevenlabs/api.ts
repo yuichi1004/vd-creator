@@ -9,8 +9,8 @@ import type { MusicRequest, SfxRequest, TtsRequest } from "../types.js";
 export const ELEVENLABS_BASE_URL = "https://api.elevenlabs.io";
 export const ELEVENLABS_API_KEY_ENV = "ELEVENLABS_API_KEY";
 export const ELEVENLABS_API_KEY_HEADER = "xi-api-key";
-/** The response header with the request ID, kept in the result meta for support requests. */
-export const ELEVENLABS_REQUEST_ID_HEADER = "request-id";
+/** Voice and model IDs are plain tokens. Anything else is rejected before a request is sent. */
+export const ELEVENLABS_ID_TOKEN = /^[A-Za-z0-9_-]{1,64}$/;
 
 /** MP3 at 44.1 kHz and 128 kbps, which every plan supports. */
 export const ELEVENLABS_OUTPUT_FORMAT = "mp3_44100_128";
@@ -89,26 +89,55 @@ export function ttsText(req: TtsRequest): string {
 }
 
 /**
- * The human-readable message of an error response body, or undefined if the body has none of
- * the known shapes: `{ detail: { message } }`, `{ detail: "..." }`, or, for validation errors,
- * `{ detail: [{ msg }] }`. Raw bodies are never returned, because they are untrusted.
+ * The error codes we recognize, with fixed English text. Only these reach an error message:
+ * the response text itself is never shown.
  */
-export function errorDetail(body: string): string | undefined {
+export const ELEVENLABS_API_ERRORS = {
+  quota_exceeded: "quota exceeded",
+  invalid_api_key: "invalid API key",
+  missing_permissions: "the API key lacks a permission",
+  voice_not_found: "voice not found",
+  rate_limited: "rate limited",
+  system_busy: "service busy",
+  text_too_long: "text too long",
+  unusual_activity: "unusual activity detected",
+  validation_error: "request rejected as invalid",
+  unknown: "unknown API error",
+} as const;
+
+export type ElevenLabsApiErrorCode = keyof typeof ELEVENLABS_API_ERRORS;
+
+/** The `detail.status` values that ElevenLabs sends, mapped to our codes. */
+const API_STATUS_CODES: Record<string, ElevenLabsApiErrorCode> = {
+  quota_exceeded: "quota_exceeded",
+  invalid_api_key: "invalid_api_key",
+  missing_permissions: "missing_permissions",
+  voice_not_found: "voice_not_found",
+  too_many_concurrent_requests: "rate_limited",
+  rate_limit_exceeded: "rate_limited",
+  system_busy: "system_busy",
+  max_character_limit_exceeded: "text_too_long",
+  detected_unusual_activity: "unusual_activity",
+};
+
+/**
+ * The code of an error response. ElevenLabs sends `{ detail: { status, message } }`, or, for
+ * validation errors, `{ detail: [...] }`. Only an exact match from the list counts. A 429 with
+ * no known code counts as rate limited. Anything else is "unknown".
+ */
+export function errorCode(body: string, httpStatus: number | undefined): ElevenLabsApiErrorCode {
   let detail: unknown;
   try {
     detail = (JSON.parse(body) as { detail?: unknown } | null)?.detail;
   } catch {
-    return undefined;
+    detail = undefined;
   }
-  if (typeof detail === "string") return detail;
-  if (Array.isArray(detail)) {
-    const messages = detail.flatMap((d) =>
-      typeof d === "object" && d !== null && "msg" in d && typeof d.msg === "string" ? [d.msg] : [],
-    );
-    return messages.length > 0 ? messages.join("; ") : undefined;
+  if (typeof detail === "object" && detail !== null && !Array.isArray(detail)) {
+    const status: unknown = (detail as { status?: unknown }).status;
+    if (typeof status === "string" && Object.hasOwn(API_STATUS_CODES, status)) {
+      return API_STATUS_CODES[status] ?? "unknown";
+    }
   }
-  if (typeof detail === "object" && detail !== null && "message" in detail) {
-    return typeof detail.message === "string" ? detail.message : undefined;
-  }
-  return undefined;
+  if (Array.isArray(detail) && httpStatus === 422) return "validation_error";
+  return httpStatus === 429 ? "rate_limited" : "unknown";
 }

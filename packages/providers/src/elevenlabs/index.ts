@@ -1,5 +1,9 @@
 // ElevenLabs providers over the REST API with the built-in fetch. Each call costs real money,
 // so these run only behind the cost gate of `vd generate`. Tests replace fetch.
+//
+// Errors follow the threat model in ./redact.ts: they hold only the kind, a label built from our
+// own request, the HTTP status, and a code from a fixed list. No text from a response or from a
+// caught exception is ever kept, and the provider never rethrows an object it did not build.
 
 import { registerProviders } from "../registry.js";
 import type {
@@ -15,11 +19,13 @@ import type {
 } from "../types.js";
 import {
   type ApiCall,
+  ELEVENLABS_API_ERRORS,
   ELEVENLABS_API_KEY_ENV,
   ELEVENLABS_API_KEY_HEADER,
   ELEVENLABS_BASE_URL,
-  ELEVENLABS_REQUEST_ID_HEADER,
-  errorDetail,
+  ELEVENLABS_ID_TOKEN,
+  type ElevenLabsApiErrorCode,
+  errorCode,
   musicCall,
   sfxCall,
   ttsCall,
@@ -27,14 +33,7 @@ import {
   ttsText,
 } from "./api.js";
 import { mp3DurationSec } from "./mp3.js";
-import {
-  containsSecret,
-  printable,
-  redactSecrets,
-  safeRequestId,
-  safeStatusText,
-  truncate,
-} from "./redact.js";
+import { containsSecret, redactKey, truncate } from "./redact.js";
 
 export const ELEVENLABS_PROVIDER_ID = "elevenlabs";
 
@@ -43,126 +42,142 @@ export type ElevenLabsOptions = {
   env?: Record<string, string | undefined>;
   /** Defaults to the global fetch, looked up at call time. */
   fetch?: typeof fetch;
+  /** Must be https, with no credentials, query, or fragment. Never shown in errors. */
   baseUrl?: string;
 };
 
-const MAX_DETAIL_LENGTH = 300;
-const MAX_LABEL_TEXT_LENGTH = 40;
+const MAX_LABEL_TEXT_LENGTH = 24;
 
 export type ElevenLabsKind = "tts" | "sfx" | "music";
 
-/**
- * A failed ElevenLabs call. It carries only safe data: the message names the item and the
- * reason, and there is no cause, so the original error, Request, or Response (and their
- * headers) never travel with it. A final guard checks every observable part for the API key.
- */
+/** Failures on our side, with fixed English text. */
+const LOCAL_ERRORS = {
+  missing_api_key: `${ELEVENLABS_API_KEY_ENV} is not set`,
+  invalid_voice_id: "the voice ID is not a plain token",
+  invalid_model_id: "the model ID is not a plain token",
+  invalid_base_url: "the base URL must be https with no credentials, query, or fragment",
+  network_error: "network error",
+  body_read_failed: "response body read failed",
+  bad_audio: "the response is not MP3 audio",
+  internal_error: "internal error",
+} as const;
+
+export type ElevenLabsErrorCode = ElevenLabsApiErrorCode | keyof typeof LOCAL_ERRORS;
+
+const ERROR_TEXT: Record<ElevenLabsErrorCode, string> = {
+  ...ELEVENLABS_API_ERRORS,
+  ...LOCAL_ERRORS,
+};
+
+/** A failed ElevenLabs call. Its message is built only from its fields, with fixed templates. */
 export class ElevenLabsError extends Error {
   override readonly name = "ElevenLabsError";
 
   constructor(
-    message: string,
     readonly kind: ElevenLabsKind,
+    readonly label: string,
+    readonly code: ElevenLabsErrorCode,
     readonly status?: number,
-    readonly requestId?: string,
   ) {
-    super(message);
+    const http = status === undefined ? "" : `HTTP ${status}, `;
+    super(`${label}: ${http}${ERROR_TEXT[code]} (${code})`);
   }
 }
 
-/** The item a request is for, as raw values. The label is built from them after redaction. */
-type Item = { what: string; fields: Array<[name: string, value: string | number]> };
+/** The errors this module built. Anything else that is caught is replaced, never rethrown. */
+const ownErrors = new WeakSet<object>();
+
+/** Raw label parts from our own request. A string field of undefined is shown as invalid. */
+type Item = { what: string; fields: Array<[name: string, value: string | number | undefined]> };
+
+type Prepared = {
+  item: Item;
+  /** Set when our own input is not acceptable. No request is sent then. */
+  invalid?: ElevenLabsErrorCode;
+  call: () => ApiCall;
+  meta: Record<string, unknown>;
+};
 
 class ElevenLabsClient {
   constructor(private readonly options: ElevenLabsOptions) {}
 
-  /** Sends a call and returns the MP3 result. Errors name the item. */
+  /** Sends a call and returns the MP3 result. Every error it throws is an ElevenLabsError. */
   async request(
     kind: ElevenLabsKind,
-    item: Item,
-    call: ApiCall,
-    meta: Record<string, unknown>,
+    what: string,
+    prepare: (apiKey: string | undefined) => Prepared,
   ): Promise<AudioResult> {
-    const env = this.options.env ?? process.env;
-    const apiKey = env[ELEVENLABS_API_KEY_ENV];
-    const label = itemLabel(item, apiKey);
-    /** Untrusted text, redacted first and then reduced to bounded printable text. */
-    const clean = (text: string, max = MAX_DETAIL_LENGTH) =>
-      printable(redactSecrets(text, apiKey, ELEVENLABS_API_KEY_HEADER), max);
-    /** `category` is a fixed phrase, the only part of `reason` kept if the guard trips. */
-    const fail = (category: string, reason: string, status?: number, requestId?: string) =>
-      guardError(
-        new ElevenLabsError(`${label}: ${reason}`, kind, status, requestId),
-        apiKey,
-        item,
-        category,
-      );
-    if (!apiKey) {
-      throw fail("missing key", `${ELEVENLABS_API_KEY_ENV} is not set`);
-    }
-    const url = new URL(call.path, this.options.baseUrl ?? ELEVENLABS_BASE_URL);
-    for (const [key, value] of Object.entries(call.query)) url.searchParams.set(key, value);
-    const fetchFn = this.options.fetch ?? globalThis.fetch;
-
-    let response: Response;
-    try {
-      response = await fetchFn(url, {
-        method: "POST",
-        headers: {
-          [ELEVENLABS_API_KEY_HEADER]: apiKey,
-          "Content-Type": "application/json",
-          Accept: "audio/mpeg",
-        },
-        body: JSON.stringify(call.body),
-      });
-    } catch (error) {
-      throw fail("network error", `network error: ${clean(errorMessage(error))}`);
-    }
-
-    // Everything below comes from the response and is untrusted.
-    const requestId = safeRequestId(response.headers.get(ELEVENLABS_REQUEST_ID_HEADER), apiKey);
-    const requestIdNote = requestId ? ` (request ${requestId})` : "";
-    if (!response.ok) {
-      const body = await response.text().catch(() => "");
-      const raw = errorDetail(body);
-      const detail = raw === undefined ? "" : clean(raw);
-      const statusText = safeStatusText(response.statusText, apiKey);
-      const status = `HTTP ${response.status}${statusText ? ` ${statusText}` : ""}`;
-      throw fail(
-        "HTTP error",
-        `${status}${requestIdNote}: ${detail || "response body not shown"}`,
-        response.status,
-        requestId,
-      );
-    }
-
-    let data: Uint8Array;
-    try {
-      data = new Uint8Array(await response.arrayBuffer());
-    } catch (error) {
-      throw fail(
-        "network error while reading the audio",
-        `network error while reading the audio${requestIdNote}: ${clean(errorMessage(error))}`,
-        response.status,
-        requestId,
-      );
-    }
-    let durationSec: number;
-    try {
-      durationSec = mp3DurationSec(data);
-    } catch (error) {
-      throw fail(
-        "bad audio in the response",
-        `bad audio in the response${requestIdNote} (${data.length} bytes): ${clean(errorMessage(error))}`,
-        response.status,
-        requestId,
-      );
-    }
-    return {
-      data,
-      format: "mp3",
-      durationSec,
-      meta: { ...meta, provider: ELEVENLABS_PROVIDER_ID, ...(requestId ? { requestId } : {}) },
+    let apiKey: string | undefined;
+    let label = `ElevenLabs ${what} failed`;
+    const fail = (code: ElevenLabsErrorCode, status?: number) => {
+      const error = new ElevenLabsError(kind, label, code, status);
+      ownErrors.add(error);
+      return error;
     };
+    try {
+      const env = this.options.env ?? process.env;
+      const rawKey = env[ELEVENLABS_API_KEY_ENV];
+      apiKey = typeof rawKey === "string" && rawKey !== "" ? rawKey : undefined;
+      const prepared = prepare(apiKey);
+      label = itemLabel(prepared.item, apiKey);
+      if (!apiKey) throw fail("missing_api_key");
+      if (prepared.invalid) throw fail(prepared.invalid);
+      const base = safeBaseUrl(this.options.baseUrl ?? ELEVENLABS_BASE_URL);
+      if (!base) throw fail("invalid_base_url");
+      const call = prepared.call();
+      const url = new URL(call.path, base);
+      for (const [key, value] of Object.entries(call.query)) url.searchParams.set(key, value);
+      const fetchFn = this.options.fetch ?? globalThis.fetch;
+
+      let response: Response;
+      try {
+        response = await fetchFn(url, {
+          method: "POST",
+          headers: {
+            [ELEVENLABS_API_KEY_HEADER]: apiKey,
+            "Content-Type": "application/json",
+            Accept: "audio/mpeg",
+          },
+          body: JSON.stringify(call.body),
+        });
+      } catch {
+        // The rejection is untrusted, so none of its properties are read.
+        throw fail("network_error");
+      }
+
+      const status = httpStatus(response.status);
+      if (!response.ok) {
+        let body: string;
+        try {
+          body = await response.text();
+        } catch {
+          throw fail("body_read_failed", status);
+        }
+        throw fail(errorCode(body, status), status);
+      }
+
+      let data: Uint8Array;
+      try {
+        data = new Uint8Array(await response.arrayBuffer());
+      } catch {
+        throw fail("body_read_failed", status);
+      }
+      let durationSec: number;
+      try {
+        durationSec = mp3DurationSec(data);
+      } catch {
+        throw fail("bad_audio", status);
+      }
+      return {
+        data,
+        format: "mp3",
+        durationSec,
+        meta: { ...prepared.meta, provider: ELEVENLABS_PROVIDER_ID },
+      };
+    } catch (error) {
+      const own = ownErrors.has(error as object) ? (error as ElevenLabsError) : undefined;
+      throw finalError(own ?? fail("internal_error"), apiKey, what);
+    }
   }
 }
 
@@ -176,18 +191,23 @@ export class ElevenLabsTtsProvider implements TtsProvider {
   }
 
   synthesize(req: TtsRequest): Promise<AudioResult> {
-    const item: Item = {
-      what: "TTS",
-      fields: [
-        ["voice", req.voiceId],
-        ["take", req.take],
-        ["text", req.text],
-      ],
-    };
-    return this.client.request("tts", item, ttsCall(req), {
-      voiceId: req.voiceId,
-      modelId: ttsModelId(req),
-      take: req.take,
+    return this.client.request("tts", "TTS", (apiKey) => {
+      const modelId = ttsModelId(req);
+      const voiceOk = isSafeToken(req.voiceId, apiKey);
+      const modelOk = isSafeToken(modelId, apiKey);
+      return {
+        item: {
+          what: "TTS",
+          fields: [
+            ["voice", voiceOk ? req.voiceId : undefined],
+            ["take", req.take],
+            ["text", req.text],
+          ],
+        },
+        invalid: !voiceOk ? "invalid_voice_id" : !modelOk ? "invalid_model_id" : undefined,
+        call: () => ttsCall(req),
+        meta: { voiceId: req.voiceId, modelId, take: req.take },
+      };
     });
   }
 
@@ -207,14 +227,17 @@ export class ElevenLabsSfxProvider implements SfxProvider {
   }
 
   generate(req: SfxRequest): Promise<AudioResult> {
-    const item: Item = {
-      what: "SFX",
-      fields: [
-        ["take", req.take],
-        ["prompt", req.prompt],
-      ],
-    };
-    return this.client.request("sfx", item, sfxCall(req), { take: req.take });
+    return this.client.request("sfx", "SFX", () => ({
+      item: {
+        what: "SFX",
+        fields: [
+          ["take", req.take],
+          ["prompt", req.prompt],
+        ],
+      },
+      call: () => sfxCall(req),
+      meta: { take: req.take },
+    }));
   }
 
   /** ElevenLabs bills SFX by duration or generation, not by prompt characters, so only the request counts. */
@@ -233,14 +256,17 @@ export class ElevenLabsMusicProvider implements MusicProvider {
   }
 
   generate(req: MusicRequest): Promise<AudioResult> {
-    const item: Item = {
-      what: "music",
-      fields: [
-        ["take", req.take],
-        ["prompt", req.prompt],
-      ],
-    };
-    return this.client.request("music", item, musicCall(req), { take: req.take });
+    return this.client.request("music", "music", () => ({
+      item: {
+        what: "music",
+        fields: [
+          ["take", req.take],
+          ["prompt", req.prompt],
+        ],
+      },
+      call: () => musicCall(req),
+      meta: { take: req.take },
+    }));
   }
 
   /** ElevenLabs bills music by duration or generation, not by prompt characters, so only the request counts. */
@@ -260,50 +286,90 @@ export function createElevenLabsProviders(options: ElevenLabsOptions = {}): Prov
 registerProviders(ELEVENLABS_PROVIDER_ID, () => createElevenLabsProviders());
 
 /**
- * "ElevenLabs TTS failed for voice "v", take 0, text "..."". Each text is redacted before it is
+ * `ElevenLabs TTS failed for voice "v", take 0, text "..."`. Each text is redacted before it is
  * truncated and quoted, so that neither step can cut or escape the key out of reach.
  */
 function itemLabel(item: Item, apiKey: string | undefined): string {
   const fields = item.fields.map(([name, value]) => {
-    if (typeof value === "number") return `${name} ${value}`;
-    const redacted = redactSecrets(value, apiKey, ELEVENLABS_API_KEY_HEADER);
-    return `${name} ${JSON.stringify(truncate(redacted, MAX_LABEL_TEXT_LENGTH))}`;
+    if (typeof value === "number") return `${name} ${Number.isFinite(value) ? value : "?"}`;
+    if (typeof value !== "string") return `${name} (invalid)`;
+    return `${name} ${JSON.stringify(truncate(redactKey(value, apiKey), MAX_LABEL_TEXT_LENGTH))}`;
   });
   return `ElevenLabs ${item.what} failed for ${fields.join(", ")}`;
 }
 
-/** Everything an error exposes: message, stack, String(), JSON, and every own property. */
-function observable(error: ElevenLabsError): string {
-  const parts = [error.message, String(error.stack), String(error), JSON.stringify(error)];
-  for (const name of Object.getOwnPropertyNames(error)) {
-    parts.push(String((error as unknown as Record<string, unknown>)[name]));
+/** A voice or model ID: a plain token that does not hold the key. */
+function isSafeToken(value: unknown, apiKey: string | undefined): value is string {
+  return (
+    typeof value === "string" && ELEVENLABS_ID_TOKEN.test(value) && !containsSecret(value, apiKey)
+  );
+}
+
+/** The base URL if it is https with no credentials, query, or fragment. */
+function safeBaseUrl(raw: string): URL | undefined {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return undefined;
   }
-  return parts.join("\n");
+  const ok =
+    url.protocol === "https:" &&
+    url.username === "" &&
+    url.password === "" &&
+    url.search === "" &&
+    url.hash === "" &&
+    !raw.includes("?") &&
+    !raw.includes("#");
+  return ok ? url : undefined;
+}
+
+function httpStatus(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599
+    ? value
+    : undefined;
 }
 
 /**
- * The final guard. If any observable part of the error still holds the key in a known form,
- * the error is rebuilt from the kind, the item label (checked again), and the HTTP status only.
+ * The final guard, run on the error that is actually thrown. If anything it exposes holds the
+ * key, it is rebuilt with a fixed label, and its stack is pinned to its message.
  */
-function guardError(
+function finalError(
   error: ElevenLabsError,
   apiKey: string | undefined,
-  item: Item,
-  category: string,
+  what: string,
 ): ElevenLabsError {
-  if (!containsSecret(observable(error), apiKey)) return error;
-  const label = itemLabel(item, apiKey);
-  const status = error.status === undefined ? "" : ` (HTTP ${error.status})`;
-  const safeLabel = containsSecret(label, apiKey) ? `ElevenLabs ${item.what} failed` : label;
-  const hidden = new ElevenLabsError(
-    `${safeLabel}: ${category}${status}: details hidden because they may contain the API key`,
-    error.kind,
-    error.status,
-  );
-  if (!containsSecret(observable(hidden), apiKey)) return hidden;
-  return new ElevenLabsError("ElevenLabs request failed", error.kind, error.status);
+  try {
+    if (!leaks(error, apiKey)) return error;
+    const label = containsSecret(error.label, apiKey) ? `ElevenLabs ${what} failed` : error.label;
+    const rebuilt = pinStack(new ElevenLabsError(error.kind, label, error.code, error.status));
+    if (!leaks(rebuilt, apiKey)) return rebuilt;
+  } catch {
+    // Fall through to the minimal error.
+  }
+  return pinStack(new ElevenLabsError(error.kind, "ElevenLabs request failed", "internal_error"));
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+/** True if anything the error exposes holds the key, or if reading it throws. */
+function leaks(error: ElevenLabsError, apiKey: string | undefined): boolean {
+  if (!apiKey) return false;
+  try {
+    const parts = [error.message, String(error.stack), String(error), JSON.stringify(error)];
+    for (const name of Object.getOwnPropertyNames(error)) {
+      parts.push(String((error as unknown as Record<string, unknown>)[name]));
+    }
+    return containsSecret(parts.join("\n"), apiKey);
+  } catch {
+    return true;
+  }
+}
+
+/** Replaces the stack with the message, so that a stack hook cannot put text into it. */
+function pinStack(error: ElevenLabsError): ElevenLabsError {
+  Object.defineProperty(error, "stack", {
+    value: `${error.name}: ${error.message}`,
+    writable: true,
+    configurable: true,
+  });
+  return error;
 }
