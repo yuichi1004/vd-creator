@@ -14,6 +14,25 @@ describe("encodeWav", () => {
     });
   });
 
+  test("writes every fixed header field", () => {
+    const data = encodeWav(new Float32Array(1000), 22050);
+    const view = new DataView(data.buffer);
+    const ascii = (offset: number) => new TextDecoder().decode(data.subarray(offset, offset + 4));
+    expect(ascii(0)).toBe("RIFF");
+    expect(view.getUint32(4, true)).toBe(36 + 2000); // RIFF size
+    expect(ascii(8)).toBe("WAVE");
+    expect(ascii(12)).toBe("fmt ");
+    expect(view.getUint32(16, true)).toBe(16); // fmt chunk size
+    expect(view.getUint16(20, true)).toBe(1); // PCM
+    expect(view.getUint16(22, true)).toBe(1); // channels
+    expect(view.getUint32(24, true)).toBe(22050); // sample rate
+    expect(view.getUint32(28, true)).toBe(44100); // byte rate
+    expect(view.getUint16(32, true)).toBe(2); // block align
+    expect(view.getUint16(34, true)).toBe(16); // bits per sample
+    expect(ascii(36)).toBe("data");
+    expect(view.getUint32(40, true)).toBe(2000); // data size
+  });
+
   test("clips samples outside [-1, 1]", () => {
     const data = encodeWav([2, -2, 0.5], 8000);
     const view = new DataView(data.buffer);
