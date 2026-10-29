@@ -177,14 +177,12 @@ test("the registered providers read process.env and the global fetch at call tim
   expect(new Headers(stub.calls[0]?.init.headers).get("xi-api-key")).toBe("env-key-not-real-0001");
 });
 
-test("a missing key fails before any request and names the item", async () => {
+test("a missing key fails first, before any request, with the fixed label", async () => {
   const stub = stubFetch(() => audioResponse());
   const tts = new ElevenLabsTtsProvider({ env: {}, fetch: stub.fetch });
   await expect(
     tts.synthesize({ text: "Good morning.", voiceId: "alice", take: 0 }),
-  ).rejects.toThrow(
-    'ElevenLabs TTS failed for voice "alice", take 0, text "Good morning.": ELEVENLABS_API_KEY is not set (missing_api_key)',
-  );
+  ).rejects.toThrow("ElevenLabs TTS failed: ELEVENLABS_API_KEY is not set (missing_api_key)");
   await expect(
     new ElevenLabsSfxProvider({ env: { ELEVENLABS_API_KEY: "" }, fetch: stub.fetch }).generate({
       prompt: "x",
@@ -671,7 +669,7 @@ test("leak: a key with a lone surrogate is redacted without throwing", async () 
     (set) => set.sfx.generate({ prompt: `say ${key} \uDC00`, take: 0 }),
   );
   expect(expectNoKey(error, key).message).toBe(
-    'ElevenLabs SFX failed for take 0, prompt "say [redacted] \\udc00": ELEVENLABS_API_KEY must be at least 20 printable ASCII characters with no whitespace (malformed_api_key)',
+    "ElevenLabs SFX failed: ELEVENLABS_API_KEY must be at least 20 printable ASCII characters with no whitespace (malformed_api_key)",
   );
 });
 
@@ -839,7 +837,7 @@ test("key: an empty, whitespace, or control-character key is rejected before any
     const { error, calls } = await failWith(key, () => audioResponse(), sfx);
     const e = expectNoKey(error, key);
     expect(e.message, JSON.stringify(key)).toBe(
-      'ElevenLabs SFX failed for take 0, prompt "x": ELEVENLABS_API_KEY must be at least 20 printable ASCII characters with no whitespace (malformed_api_key)',
+      "ElevenLabs SFX failed: ELEVENLABS_API_KEY must be at least 20 printable ASCII characters with no whitespace (malformed_api_key)",
     );
     expect(calls).toHaveLength(0);
   }
@@ -1179,4 +1177,119 @@ test("key: a key shorter than 20 characters is rejected before any request", asy
   }).sfx.generate({ prompt: "x", take: 0 });
   expect(result.data).toEqual(fakeMp3(10));
   expect(stub.calls).toHaveLength(1);
+});
+
+/** Runs the call with a stack hook that returns the secret, and reads the error while it is set. */
+async function withStackHook(
+  secret: string,
+  key: string | undefined,
+  response: () => Response | Promise<Response>,
+): Promise<{ error: ElevenLabsError; text: string; calls: Call[] }> {
+  const original = Error.prepareStackTrace;
+  try {
+    Error.prepareStackTrace = () => secret;
+    const stub = stubFetch(response);
+    const env = key === undefined ? {} : { ELEVENLABS_API_KEY: key };
+    const error = await createElevenLabsProviders({ env, fetch: stub.fetch })
+      .sfx.generate({ prompt: "x", take: 0 })
+      .then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+    expect(error).toBeInstanceOf(ElevenLabsError);
+    const e = error as ElevenLabsError;
+    return { error: e, text: serialize(e), calls: stub.calls };
+  } finally {
+    Error.prepareStackTrace = original;
+  }
+}
+
+test("leak: every thrown error has its stack pinned, whatever a stack hook returns", async () => {
+  const cases = [
+    ["malformed", LEAK_KEY.slice(0, 19), () => audioResponse(), "malformed_api_key"],
+    ["missing", undefined, () => audioResponse(), "missing_api_key"],
+    [
+      "network",
+      LEAK_KEY,
+      () => Promise.reject(new Error(`connect failed ${LEAK_KEY}`)),
+      "network_error",
+    ],
+  ] as const;
+  for (const [name, key, response, code] of cases) {
+    const { error, text } = await withStackHook(LEAK_KEY, key, response);
+    expect(error.code, name).toBe(code);
+    expect(error.stack, name).toBe(`ElevenLabsError: ${error.message}`);
+    expect(Object.hasOwn(error, "cause"), name).toBe(false);
+    expectNoLeak(text, LEAK_KEY);
+  }
+});
+
+test("key: a key with whitespace or a newline is malformed, never internal_error", async () => {
+  // Keys that share text with the fixed messages still get the fixed malformed_api_key error.
+  for (const key of [
+    `${LEAK_KEY}\n`,
+    ` ${LEAK_KEY}`,
+    "ELEVENLABS_API_KEY must be at least 20 printable",
+    "ElevenLabs SFX failed\nfor take 0",
+  ]) {
+    const { error, calls } = await failWith(key, () => audioResponse(), sfx);
+    expect((error as ElevenLabsError).code, JSON.stringify(key)).toBe("malformed_api_key");
+    expect((error as ElevenLabsError).message).toBe(
+      "ElevenLabs SFX failed: ELEVENLABS_API_KEY must be at least 20 printable ASCII characters with no whitespace (malformed_api_key)",
+    );
+    expect(calls).toHaveLength(0);
+  }
+});
+
+test("key: the request is not read before the key is validated", async () => {
+  let reads = 0;
+  const req = {
+    get prompt(): string {
+      reads++;
+      throw hostile(LEAK_KEY);
+    },
+    take: 0,
+  };
+  for (const env of [{}, { ELEVENLABS_API_KEY: `${LEAK_KEY} ` }]) {
+    const stub = stubFetch(() => audioResponse());
+    const error = await createElevenLabsProviders({ env, fetch: stub.fetch })
+      .sfx.generate(req as unknown as { prompt: string; take: number })
+      .catch((e: unknown) => e);
+    expect((error as ElevenLabsError).code).toMatch(/^(missing|malformed)_api_key$/);
+    expect(stub.calls).toHaveLength(0);
+  }
+  expect(reads).toBe(0);
+});
+
+test("leak: a request getter that throws after a valid key gives a fixed error with no key", async () => {
+  const original = Error.prepareStackTrace;
+  try {
+    Error.prepareStackTrace = () => LEAK_KEY;
+    const req = {
+      get prompt(): string {
+        throw hostile(LEAK_KEY);
+      },
+      take: 0,
+    };
+    const { error, calls } = await failWith(
+      LEAK_KEY,
+      () => audioResponse(),
+      (set) => set.sfx.generate(req as unknown as { prompt: string; take: number }),
+    );
+    const e = error as ElevenLabsError;
+    expect(e.message).toBe("ElevenLabs SFX failed: internal error (internal_error)");
+    expect(e.stack).toBe(`ElevenLabsError: ${e.message}`);
+    expectNoLeak(serialize(e), LEAK_KEY);
+    expect(calls).toHaveLength(0);
+  } finally {
+    Error.prepareStackTrace = original;
+  }
+});
+
+test("key: a key sharing text with the fixed label gets the normal error, not internal_error", async () => {
+  const key = "sk_ElevenLabs_abcdefghi";
+  const { error } = await failWith(key, () => Promise.reject(new Error("offline")), sfx);
+  expect((error as ElevenLabsError).message).toBe(
+    'ElevenLabs SFX failed for take 0, prompt "x": network error (network_error)',
+  );
 });

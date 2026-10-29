@@ -114,7 +114,6 @@ class ElevenLabsClient {
     what: string,
     prepare: (apiKey: string | undefined) => Prepared,
   ): Promise<AudioResult> {
-    let apiKey: string | undefined;
     let label = `ElevenLabs ${what} failed`;
     const fail = (code: ElevenLabsErrorCode, status?: number) => {
       const error = new ElevenLabsError(kind, label, code, status);
@@ -122,19 +121,19 @@ class ElevenLabsClient {
       return error;
     };
     try {
+      // The key is read and validated first. Nothing else happens before, so a failed check
+      // throws its fixed error with the fixed label.
       const env = this.options.env ?? process.env;
       const rawKey = env[ELEVENLABS_API_KEY_ENV];
-      apiKey = typeof rawKey === "string" && rawKey.trim() !== "" ? rawKey : undefined;
-      if (apiKey !== undefined && apiKey.length < MIN_API_KEY_LENGTH) {
-        // Too short to guard against, since it could match the fixed texts. The error holds none
-        // of the input, so the key is not used as a guard key.
-        apiKey = undefined;
+      if (typeof rawKey !== "string" || rawKey.trim() === "") throw fail("missing_api_key");
+      if (!API_KEY_TOKEN.test(rawKey) || rawKey.length < MIN_API_KEY_LENGTH) {
         throw fail("malformed_api_key");
       }
+      const apiKey = rawKey;
       const prepared = prepare(apiKey);
-      label = itemLabel(prepared.item, apiKey);
-      if (!apiKey) throw fail("missing_api_key");
-      if (!API_KEY_TOKEN.test(apiKey)) throw fail("malformed_api_key");
+      // The label is the only text from outside the code in an error. It is redacted as it is
+      // built, and the check here is defense in depth on that label only.
+      label = itemLabel(prepared.item, apiKey) ?? label;
       if (prepared.invalid) throw fail(prepared.invalid);
       const base = safeBaseUrl(this.options.baseUrl ?? ELEVENLABS_BASE_URL);
       if (!base) throw fail("invalid_base_url");
@@ -205,7 +204,7 @@ class ElevenLabsClient {
       };
     } catch (error) {
       const own = ownErrors.has(error as object) ? (error as ElevenLabsError) : undefined;
-      throw finalError(own ?? fail("internal_error"), apiKey, what);
+      throw sealed(own ?? fail("internal_error"));
     }
   }
 }
@@ -316,15 +315,17 @@ registerProviders(ELEVENLABS_PROVIDER_ID, () => createElevenLabsProviders());
 
 /**
  * `ElevenLabs TTS failed for voice "v", take 0, text "..."`. Each text is redacted before it is
- * truncated and quoted, so that neither step can cut or escape the key out of reach.
+ * truncated and quoted, so that neither step can cut or escape the key out of reach. Returns
+ * undefined if the fields still hold the key. Only the fields are checked: the rest is fixed text.
  */
-function itemLabel(item: Item, apiKey: string | undefined): string {
+function itemLabel(item: Item, apiKey: string): string | undefined {
   const fields = item.fields.map(([name, value]) => {
     if (typeof value === "number") return `${name} ${Number.isFinite(value) ? value : "?"}`;
     if (typeof value !== "string") return `${name} (invalid)`;
     return `${name} ${JSON.stringify(truncate(redactKey(value, apiKey), MAX_LABEL_TEXT_LENGTH))}`;
   });
-  return `ElevenLabs ${item.what} failed for ${fields.join(", ")}`;
+  const text = fields.join(", ");
+  return containsSecret(text, apiKey) ? undefined : `ElevenLabs ${item.what} failed for ${text}`;
 }
 
 /** A voice or model ID: a plain token that does not hold the key. */
@@ -360,41 +361,12 @@ function httpStatus(value: unknown): number | undefined {
 }
 
 /**
- * The final guard, run on the error that is actually thrown. If anything it exposes holds the
- * key, it is rebuilt with a fixed label, and its stack is pinned to its message.
+ * Run on every error the provider throws, where it leaves the provider. The stack is set to
+ * exactly the name and message, so that a stack hook such as Error.prepareStackTrace cannot put
+ * text into it, and any cause is removed.
  */
-function finalError(
-  error: ElevenLabsError,
-  apiKey: string | undefined,
-  what: string,
-): ElevenLabsError {
-  try {
-    if (!leaks(error, apiKey)) return error;
-    const label = containsSecret(error.label, apiKey) ? `ElevenLabs ${what} failed` : error.label;
-    const rebuilt = pinStack(new ElevenLabsError(error.kind, label, error.code, error.status));
-    if (!leaks(rebuilt, apiKey)) return rebuilt;
-  } catch {
-    // Fall through to the minimal error.
-  }
-  return pinStack(new ElevenLabsError(error.kind, "ElevenLabs request failed", "internal_error"));
-}
-
-/** True if anything the error exposes holds the key, or if reading it throws. */
-function leaks(error: ElevenLabsError, apiKey: string | undefined): boolean {
-  if (!apiKey) return false;
-  try {
-    const parts = [error.message, String(error.stack), String(error), JSON.stringify(error)];
-    for (const name of Object.getOwnPropertyNames(error)) {
-      parts.push(String((error as unknown as Record<string, unknown>)[name]));
-    }
-    return containsSecret(parts.join("\n"), apiKey);
-  } catch {
-    return true;
-  }
-}
-
-/** Replaces the stack with the message, so that a stack hook cannot put text into it. */
-function pinStack(error: ElevenLabsError): ElevenLabsError {
+function sealed(error: ElevenLabsError): ElevenLabsError {
+  delete (error as { cause?: unknown }).cause;
   Object.defineProperty(error, "stack", {
     value: `${error.name}: ${error.message}`,
     writable: true,
