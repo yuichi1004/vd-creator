@@ -22,7 +22,7 @@ import {
 } from "@vd-creator/library";
 import { createMockProviders, encodeWav } from "@vd-creator/providers";
 import { type Scenario, ScenarioDocument } from "@vd-creator/scenario";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AssetCache } from "../cache.js";
 import { planGeneration, runGeneration } from "../generate.js";
 import { scenarioItems } from "../items.js";
@@ -219,20 +219,52 @@ describe("library resolver", () => {
     const folder = join(project, "assets", "library");
     const [copy = ""] = (await readdir(folder)).filter((name) => name.endsWith(".wav"));
     const orphan = `${copy}.${randomUUID()}.tmp`;
-    const recent = `${copy}.${randomUUID()}.tmp`;
     const other = "notes.tmp";
-    for (const name of [orphan, recent, other]) await writeFile(join(folder, name), "x");
+    for (const name of [orphan, other]) await writeFile(join(folder, name), "x");
+    // An old mtime, as copyFile may keep the source's, does not make a fresh copy an orphan.
     const old = new Date(Date.now() - 10 * 60_000);
     await utimes(join(folder, orphan), old, old);
     await utimes(join(folder, other), old, old);
 
     const cache = await AssetCache.load(project);
     await planGeneration(s, cache, [libraryResolver()]);
+    expect(await readdir(folder)).toContain(orphan);
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + 10 * 60_000);
+      await planGeneration(s, cache, [libraryResolver()]);
+    } finally {
+      vi.useRealTimers();
+    }
     const names = await readdir(folder);
     expect(names).not.toContain(orphan);
-    expect(names).toContain(recent);
     expect(names).toContain(other);
     expect(names).toContain(copy);
+  });
+
+  test("hashes an unchanged copy once, and a changed copy again", async () => {
+    await addDoor({ sec: 2 });
+    const s = scenario("private");
+    const { result } = await generate(s, root);
+    const file = result.items[0]?.status === "generated" ? result.items[0].file : "";
+    const copy = join(project, "assets", file);
+    const when = new Date(Math.floor(Date.now() / 1000) * 1000 - 60_000);
+    await utimes(copy, when, when);
+    const cache = await AssetCache.load(project);
+    const plan = async () =>
+      (await planGeneration(s, cache, [libraryResolver(root)])).items[0]?.status;
+    expect(await plan()).toBe("cached");
+
+    // Rewritten in place with the same size and mtime, so only a read could notice.
+    await writeFile(copy, wav(2, 0.5));
+    await utimes(copy, when, when);
+    expect(await plan()).toBe("cached");
+
+    // A new mtime makes the plan read the copy again.
+    const later = new Date(when.getTime() + 1000);
+    await utimes(copy, later, later);
+    expect(await plan()).toBe("to-generate");
   });
 
   test("writes credits.json entries sorted by kind, then ID", async () => {

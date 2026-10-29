@@ -150,8 +150,41 @@ export async function projectCopy(
   const durationSec = credit && durations[credit.sha256];
   if (!credit || durationSec === undefined) return undefined;
   const path = join(projectDir, ASSETS_DIR, credit.file);
-  if (!(await isFile(path)) || (await sha256(path)) !== credit.sha256) return undefined;
+  if ((await fileSha256(path)) !== credit.sha256) return undefined;
   return { credit, durationSec };
+}
+
+// Hashes of project copies by path, kept while the file's size, mtime, and inode stay the
+// same, so that a plan does not read every copy again.
+const copyHashes = new Map<string, { key: string; hash: Promise<string> }>();
+
+/**
+ * The sha256 of a regular file, or `undefined` if it is not one. The hash is computed once per
+ * version of the file, so concurrent and later calls share it.
+ */
+async function fileSha256(path: string): Promise<string | undefined> {
+  let key: string;
+  try {
+    const info = await lstat(path);
+    if (!info.isFile()) return undefined;
+    key = `${info.size}:${info.mtimeMs}:${info.ino}`;
+  } catch {
+    return undefined;
+  }
+  let known = copyHashes.get(path);
+  if (known?.key !== key) {
+    known = { key, hash: sha256(path) };
+    copyHashes.set(path, known);
+    const current = known;
+    current.hash.catch(() => {
+      if (copyHashes.get(path) === current) copyHashes.delete(path);
+    });
+  }
+  try {
+    return await known.hash;
+  } catch {
+    return undefined;
+  }
 }
 
 // Temporary copies being written by this process, which a cleanup must leave alone.
@@ -180,7 +213,9 @@ export async function removeOrphanCopies(projectDir: string): Promise<void> {
     if (!TEMP_COPY.test(name) || activeTemps.has(path)) continue;
     try {
       const info = await lstat(path);
-      if (info.isFile() && now - info.mtimeMs >= ORPHAN_AGE_MS) await rm(path, { force: true });
+      // copyFile may keep the source's mtime, so the inode change time counts too.
+      const written = Math.max(info.mtimeMs, info.ctimeMs);
+      if (info.isFile() && now - written >= ORPHAN_AGE_MS) await rm(path, { force: true });
     } catch {
       // Gone already, or not ours to remove.
     }
@@ -203,7 +238,7 @@ export async function copyLibraryEntry(
   const file = libraryAssetFile(entry);
   const target = join(projectDir, ASSETS_DIR, file);
   const source = `${item.dir}/${entry.file}`;
-  if (!(await isFile(target)) || (await sha256(target)) !== entry.sha256) {
+  if ((await fileSha256(target)) !== entry.sha256) {
     await mkdir(dirname(target), { recursive: true });
     const temp = `${target}.${randomUUID()}.tmp`;
     activeTemps.add(temp);
@@ -316,14 +351,6 @@ async function sha256(path: string): Promise<string> {
   const hash = createHash("sha256");
   await pipeline(createReadStream(path), hash);
   return hash.digest("hex");
-}
-
-async function isFile(path: string): Promise<boolean> {
-  try {
-    return (await lstat(path)).isFile();
-  } catch {
-    return false;
-  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
