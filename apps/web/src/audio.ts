@@ -146,7 +146,10 @@ export class Player {
   private sounds: ScheduledSound[] = [];
   private readonly started = new Map<string, Started>();
   private readonly buffers = new Map<string, Promise<AudioBufferLike | undefined>>();
-  /** Files that failed to load. They play as silence until the next `play`. */
+  /**
+   * Files that failed to load. They play as silence until the next `play`, which retries
+   * them. A failed load is never kept in `buffers`.
+   */
   private readonly failed = new Set<string>();
   private timer?: unknown;
   private generation = 0;
@@ -212,8 +215,9 @@ export class Player {
     return true;
   }
 
-  /** Stops playback and keeps the position. */
+  /** Stops playback and keeps the position. Also cancels a play still waiting to start. */
   stop(): void {
+    this.generation++;
     if (!this.playing) return;
     this.halt();
     this.options.onChange?.();
@@ -312,6 +316,7 @@ export class Player {
       .then((bytes) => context.decodeAudioData(bytes))
       .catch(() => {
         this.failed.add(file);
+        if (this.buffers.get(file) === promise) this.buffers.delete(file);
         return undefined;
       });
     this.buffers.set(file, promise);

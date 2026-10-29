@@ -12,21 +12,21 @@ import { confirmLabel, startGeneration } from "./generation.js";
 const PAID: ProviderInfo = { id: "elevenlabs", paid: true };
 const FREE: ProviderInfo = { id: "mock", paid: false };
 
-function plan(provider: ProviderInfo): GeneratePlanResponse {
+function plan(
+  provider: ProviderInfo,
+  status: "to-generate" | "cached" = "to-generate",
+): GeneratePlanResponse {
   return {
     kind: "plan",
     provider,
     plan: {
       items: [
-        {
-          id: "l1",
-          kind: "line",
-          sceneId: "s1",
-          status: "to-generate",
-          cost: { characters: 42, requests: 1 },
-        },
+        status === "to-generate"
+          ? { id: "l1", kind: "line", sceneId: "s1", status, cost: { characters: 42, requests: 1 } }
+          : { id: "l1", kind: "line", sceneId: "s1", status, file: "l1.mp3", durationSec: 1 },
       ],
-      cost: { characters: 42, requests: 1 },
+      cost:
+        status === "to-generate" ? { characters: 42, requests: 1 } : { characters: 0, requests: 0 },
     },
   };
 }
@@ -43,17 +43,17 @@ function run(provider: ProviderInfo): GenerateRunResponse {
 }
 
 /** A fake server that follows the rules of `GenerateRequest` and records each body. */
-function fakeServer(provider: ProviderInfo) {
+function fakeServer(provider: ProviderInfo, status?: "to-generate" | "cached") {
   const bodies: GenerateRequest[] = [];
   const client = new ApiClient("http://host/app/", async (_url, init) => {
     const body = JSON.parse(String(init?.body)) as GenerateRequest;
     bodies.push(body);
-    if (body.dryRun) return Response.json(plan(provider));
+    if (body.dryRun) return Response.json(plan(provider, status));
     if (provider.paid && body.confirm !== true) {
       const refusal: ConfirmRequiredError = {
         error: "confirm-required",
         message: "Paid generation needs confirm.",
-        plan: plan(provider),
+        plan: plan(provider, status),
       };
       return Response.json(refusal, { status: 409 });
     }
@@ -97,6 +97,22 @@ describe("confirm step on a paid provider", () => {
     expect(start.plan.plan.cost.characters).toBe(42);
     await start.confirm();
     expect(bodies.at(-1)).toEqual({ ids: ["l1"], confirm: true });
+  });
+});
+
+describe("nothing to generate", () => {
+  test("a paid plan without to-generate items needs no confirm", async () => {
+    const { bodies, client } = fakeServer(PAID, "cached");
+    const start = await startGeneration(client, PAID, ["l1"]);
+    expect(start.kind).toBe("nothing");
+    expect(bodies).toEqual([{ ids: ["l1"], dryRun: true }]);
+  });
+
+  test("a 409 plan without to-generate items needs no confirm either", async () => {
+    const { bodies, client } = fakeServer(PAID, "cached");
+    const start = await startGeneration(client, FREE, ["l1"]);
+    expect(start.kind).toBe("nothing");
+    expect(bodies.some((b) => b.confirm === true)).toBe(false);
   });
 });
 

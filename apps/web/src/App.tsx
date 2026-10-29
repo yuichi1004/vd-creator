@@ -193,6 +193,11 @@ export function App() {
           setBusy(id, false);
           return;
         }
+        if (start.kind === "nothing") {
+          await reload();
+          setBusy(id, false);
+          return;
+        }
         setConfirm({
           plan: start.plan,
           onConfirm: async () => {

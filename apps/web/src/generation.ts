@@ -16,7 +16,12 @@ export type GenerationStart =
    * The provider is paid and nothing ran yet. Show `plan` and call `confirm` only after the
    * user pressed "Generate (N characters)".
    */
-  | { kind: "confirm"; plan: GeneratePlanResponse; confirm: () => Promise<GenerateRunResponse> };
+  | { kind: "confirm"; plan: GeneratePlanResponse; confirm: () => Promise<GenerateRunResponse> }
+  /**
+   * The plan has no item to generate, so there is nothing to confirm and nothing was sent
+   * with `confirm`. Refresh the project instead.
+   */
+  | { kind: "nothing"; plan: GeneratePlanResponse };
 
 /** Label of the confirm button, from the plan's estimated characters. */
 export function confirmLabel(plan: GeneratePlanResponse): string {
@@ -41,22 +46,30 @@ export async function startGeneration(
     return response;
   };
 
+  const fromPlan = (plan: GeneratePlanResponse): GenerationStart =>
+    hasWork(plan) ? { kind: "confirm", plan, confirm } : { kind: "nothing", plan };
+
   if (provider.paid) {
     const response = await client.generate({ ...base, dryRun: true });
     if (response.kind !== "plan") throw new ApiRequestError("Unexpected response.", 200);
-    return { kind: "confirm", plan: response, confirm };
+    return fromPlan(response);
   }
 
   try {
     const response = await client.generate(base);
     if (response.kind === "run") return { kind: "done", run: response };
-    return { kind: "confirm", plan: response, confirm };
+    return fromPlan(response);
   } catch (error) {
     if (error instanceof ApiRequestError && isConfirmRequired(error.body)) {
-      return { kind: "confirm", plan: error.body.plan, confirm };
+      return fromPlan(error.body.plan);
     }
     throw error;
   }
+}
+
+/** Whether a plan has any item that a confirmed run would generate. */
+function hasWork(plan: GeneratePlanResponse): boolean {
+  return plan.plan.items.some((item) => item.status === "to-generate");
 }
 
 /** A short summary of a generation run, for a status message. */

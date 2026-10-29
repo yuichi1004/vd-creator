@@ -215,3 +215,17 @@ test("clampPosition and formatTime", () => {
   expect(formatTime(0)).toBe("0:00");
   expect(formatTime(75.9)).toBe("1:15");
 });
+
+test("itemAt picks the active item with the greatest start, not the last in scenario order", () => {
+  const overlap: Timeline = {
+    ...timeline,
+    items: [
+      { id: "a", kind: "line", sceneId: "s1", index: 0, startSec: 1, durationSec: 3 },
+      { id: "b", kind: "sfx", sceneId: "s1", index: 1, startSec: 0, durationSec: 5 },
+      { id: "c", kind: "line", sceneId: "s1", index: 2, startSec: 1, durationSec: 0.5 },
+    ],
+  };
+  expect(itemAt(overlap, 2)?.id).toBe("a");
+  // A tie on start goes to the later item in scenario order.
+  expect(itemAt(overlap, 1.2)?.id).toBe("c");
+});

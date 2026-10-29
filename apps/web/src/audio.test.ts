@@ -248,6 +248,64 @@ describe("player", () => {
   });
 });
 
+describe("stop and retry", () => {
+  test("a stop while the first unlock is pending cancels the play", async () => {
+    const context = new FakeContext();
+    let resolveResume: () => void = () => undefined;
+    context.resume = () => {
+      context.resumeCalls++;
+      return new Promise<void>((resolve) => {
+        resolveResume = () => {
+          context.state = "running";
+          resolve();
+        };
+      });
+    };
+    const player = new Player({
+      unlock: new AudioUnlock(() => context),
+      load: async (file) => new TextEncoder().encode(file).buffer as ArrayBuffer,
+      setInterval: () => 1,
+      clearInterval: () => undefined,
+    });
+    player.setTimeline(timeline);
+    const pending = player.play();
+    // The page is hidden before the resume settles.
+    player.stop();
+    resolveResume();
+    expect(await pending).toBe(false);
+    await flush();
+    expect(player.isPlaying).toBe(false);
+    expect(context.started).toEqual([]);
+  });
+
+  test("a failed load is retried on the next play", async () => {
+    const context = new FakeContext();
+    let failing = true;
+    const loaded: string[] = [];
+    const player = new Player({
+      unlock: new AudioUnlock(() => context),
+      load: async (file) => {
+        loaded.push(file);
+        if (failing && file === "l1.mp3") throw new Error("offline");
+        return new TextEncoder().encode(file).buffer as ArrayBuffer;
+      },
+      setInterval: () => 1,
+      clearInterval: () => undefined,
+    });
+    player.setTimeline(timeline);
+    await player.play(0);
+    await flush();
+    expect(context.started.map((s) => s.file)).not.toContain("l1.mp3");
+
+    failing = false;
+    player.stop();
+    await player.play(0);
+    await flush();
+    expect(loaded.filter((f) => f === "l1.mp3")).toHaveLength(2);
+    expect(context.started.map((s) => s.file)).toContain("l1.mp3");
+  });
+});
+
 async function flush(): Promise<void> {
   for (let i = 0; i < 10; i++) await Promise.resolve();
 }

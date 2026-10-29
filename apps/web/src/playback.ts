@@ -90,12 +90,16 @@ export function imageAt(timeline: Timeline, atSec: number): ImageSpan | undefine
   return found;
 }
 
-/** The line or SFX playing at `atSec`, for highlighting. The latest started wins. */
+/**
+ * The line, SFX, or pause playing at `atSec`, for highlighting. The one with the greatest
+ * start wins, and on a tie the later one in scenario order.
+ */
 export function itemAt(timeline: Timeline, atSec: number): TimelineItem | undefined {
   let found: TimelineItem | undefined;
   for (const item of timeline.items) {
     if (item.kind !== "line" && item.kind !== "sfx" && item.kind !== "pause") continue;
-    if (item.startSec <= atSec && atSec < item.startSec + item.durationSec) found = item;
+    if (item.startSec > atSec || atSec >= item.startSec + item.durationSec) continue;
+    if (!found || item.startSec >= found.startSec) found = item;
   }
   return found;
 }
