@@ -57,6 +57,25 @@ describe("canonicalJson and cacheKey", () => {
     expect(new Set(keys).size).toBe(keys.length);
   });
 
+  test("__proto__ and constructor keys are kept, so requests never collide", () => {
+    const settings = (json: string) => ({ ...request, settings: JSON.parse(json) });
+    const keys = [
+      cacheKey("tts", "mock", settings('{"__proto__":{"stability":1}}')),
+      cacheKey("tts", "mock", settings('{"constructor":{"stability":1}}')),
+      cacheKey("tts", "mock", settings("{}")),
+    ];
+    expect(new Set(keys).size).toBe(3);
+    expect(canonicalJson(JSON.parse('{"b":1,"__proto__":{"a":2}}'))).toBe(
+      '{"__proto__":{"a":2},"b":1}',
+    );
+  });
+
+  test("matches JSON.stringify for scalars and arrays", () => {
+    for (const value of [null, true, 1.5, 'a"b', [1, "x", null], [undefined], { a: [{ b: 1 }] }]) {
+      expect(canonicalJson(value)).toBe(JSON.stringify(value));
+    }
+  });
+
   test("asset files go under the kind's folder, named by the first 16 hex characters", () => {
     expect(entry.file).toBe(`voice/${key.slice(0, 16)}.wav`);
     expect(assetFileFor("sfx", key, "mp3")).toBe(`sfx/${key.slice(0, 16)}.mp3`);
@@ -80,13 +99,13 @@ describe("AssetCache", () => {
     expect(loaded.get(key)).toEqual(entry);
   });
 
-  test("hasAsset needs both the entry and the file", async () => {
+  test("cachedAsset needs both the entry and the file", async () => {
     const cache = new AssetCache(dir);
-    expect(await cache.hasAsset(key)).toBe(false);
+    expect(await cache.cachedAsset(key)).toBeUndefined();
     cache.set(key, entry);
-    expect(await cache.hasAsset(key)).toBe(false);
+    expect(await cache.cachedAsset(key)).toBeUndefined();
     await cache.writeAsset(entry.file, new Uint8Array([1, 2, 3]));
-    expect(await cache.hasAsset(key)).toBe(true);
+    expect(await cache.cachedAsset(key)).toEqual(entry);
     expect(await readFile(join(dir, "assets", entry.file))).toEqual(Buffer.from([1, 2, 3]));
   });
 
@@ -101,24 +120,6 @@ describe("AssetCache", () => {
     }
     await Promise.all(saves);
     expect((await AssetCache.load(dir)).keys()).toHaveLength(5);
-  });
-
-  test("findByRequest returns the newest entry, optionally for one provider", () => {
-    const cache = new AssetCache(dir);
-    const elevenKey = cacheKey("tts", "elevenlabs", request);
-    cache.set(key, entry);
-    cache.set(elevenKey, {
-      ...entry,
-      providerId: "elevenlabs",
-      file: assetFileFor("tts", elevenKey, "mp3"),
-      createdAt: "2026-10-30T00:00:00.000Z",
-    });
-    expect(cache.findByRequest("tts", { take: 0, text: "Hello", voiceId: "v1" })?.key).toBe(
-      elevenKey,
-    );
-    expect(cache.findByRequest("tts", request, "mock")?.key).toBe(key);
-    expect(cache.findByRequest("sfx", request)).toBeUndefined();
-    expect(cache.findByRequest("tts", { ...request, take: 1 })).toBeUndefined();
   });
 
   test("rejects invalid JSON, other versions, and bad entries", async () => {

@@ -3,7 +3,8 @@
 
 import type { ItemKind, Scenario } from "@vd-creator/scenario";
 import type { AssetCache } from "./cache.js";
-import { generationRequest, type ScenarioItem } from "./items.js";
+import { type PlannedItem, planGeneration } from "./generate.js";
+import type { AssetResolver } from "./resolver.js";
 
 /** Speaking rate used to estimate the length of a line that has no asset yet. */
 export const ESTIMATED_CHARS_PER_SEC = 15;
@@ -24,7 +25,7 @@ export type TimelineItem = {
   assetFile?: string;
   /** True if the audio has no asset yet; `durationSec` is then an estimate. */
   missing?: true;
-  /** True if no resolver can supply the audio, such as a library sound before 0007. */
+  /** True if no resolver can supply the audio, such as a library sound without a library resolver. */
   unresolved?: true;
 };
 
@@ -57,29 +58,33 @@ export type Timeline = {
   durationSec: number;
 };
 
-export type TimelineOptions = {
-  /** Use only assets from this provider. By default the newest asset from any provider is used. */
-  providerId?: string;
-};
-
 /**
  * Lays the scenario out in time. Items play in order, each after the previous one ends plus
  * its `gapBeforeSec`, which may be negative to overlap. An SFX with `overlap: true` plays
  * from its start time but does not move the next item. The order continues across scenes.
  * Items without an asset get an estimated duration and `missing: true`.
+ *
+ * Assets come from `planGeneration` with the same resolvers, so the timeline shows an asset
+ * exactly when the plan reports it as cached. Throws a `GenerationError` if planning fails.
  */
-export function computeTimeline(
+export async function computeTimeline(
   scenario: Scenario,
   cache: AssetCache,
-  options: TimelineOptions = {},
-): Timeline {
+  resolvers: readonly AssetResolver[],
+): Promise<Timeline> {
+  // A BGM uses its scene's ID, and IDs are unique in a scenario, so one map holds both.
+  const plans = new Map<string, PlannedItem>();
+  for (const planned of (await planGeneration(scenario, cache, resolvers)).items) {
+    plans.set(planned.id, planned);
+  }
   const lookup = (
-    target: ScenarioItem,
+    id: string,
   ): { asset?: { file: string; durationSec: number }; unresolved?: true } => {
-    const gen = generationRequest(scenario, target);
-    if (!gen) return { unresolved: true };
-    const entry = cache.findByRequest(gen.kind, gen.request, options.providerId);
-    return entry ? { asset: { file: entry.file, durationSec: entry.durationSec } } : {};
+    const planned = plans.get(id);
+    if (planned?.status === "cached") {
+      return { asset: { file: planned.file, durationSec: planned.durationSec } };
+    }
+    return planned?.status === "to-generate" ? {} : { unresolved: true };
   };
 
   const items: TimelineItem[] = [];
@@ -98,12 +103,8 @@ export function computeTimeline(
       const base = { sceneId: scene.id, index, startSec };
       let entry: TimelineItem;
       if ("line" in item || "sfx" in item) {
-        const target: ScenarioItem =
-          "line" in item
-            ? { kind: "line", id: item.id, scene, item }
-            : { kind: "sfx", id: item.id, scene, item };
-        const { asset, unresolved } = lookup(target);
-        entry = { ...base, id: item.id, kind: target.kind, durationSec: 0 };
+        const { asset, unresolved } = lookup(item.id);
+        entry = { ...base, id: item.id, kind: "line" in item ? "line" : "sfx", durationSec: 0 };
         if (asset) {
           entry.durationSec = asset.durationSec;
           entry.assetFile = asset.file;
@@ -116,20 +117,32 @@ export function computeTimeline(
       } else if ("pause" in item) {
         entry = { ...base, id: item.id, kind: "pause", durationSec: item.pause };
       } else {
-        const file = scenario.images.find((i) => i.id === item.image)?.file;
-        entry = { ...base, id: item.id, kind: "image", durationSec: 0, assetFile: file };
+        // An image takes no time. A negative gap may place it before the previous image, so
+        // its start is clamped to the previous image's start, which keeps every span from
+        // ending before it starts. A span left with zero length is dropped below. The clamp
+        // changes only the image, not the start of the items after it.
         const previous = images.at(-1);
-        if (previous) previous.endSec = startSec;
-        images.push({ imageId: item.image, file, startSec, endSec: startSec });
+        const imageStart = previous ? Math.max(startSec, previous.startSec) : startSec;
+        if (previous) previous.endSec = imageStart;
+        const file = scenario.images.find((i) => i.id === item.image)?.file;
+        entry = {
+          ...base,
+          startSec: imageStart,
+          id: item.id,
+          kind: "image",
+          durationSec: 0,
+          assetFile: file,
+        };
+        images.push({ imageId: item.image, file, startSec: imageStart, endSec: imageStart });
       }
       if (entry.id === undefined) delete entry.id;
       if (entry.assetFile === undefined) delete entry.assetFile;
       items.push(entry);
 
-      const itemEnd = startSec + entry.durationSec;
-      if (!("sfx" in item && item.overlap)) cursor = itemEnd;
-      sceneFirst = Math.min(sceneFirst, startSec);
-      sceneEnd = Math.max(sceneEnd, itemEnd, cursor);
+      // The cursor follows the unclamped start, so an image clamp never moves later items.
+      if (!("sfx" in item && item.overlap)) cursor = startSec + entry.durationSec;
+      sceneFirst = Math.min(sceneFirst, entry.startSec);
+      sceneEnd = Math.max(sceneEnd, entry.startSec + entry.durationSec, cursor);
     });
     const span = {
       sceneId: scene.id,
@@ -140,7 +153,7 @@ export function computeTimeline(
     end = Math.max(end, sceneEnd);
 
     if (scene.bgm) {
-      const { asset, unresolved } = lookup({ kind: "bgm", id: scene.id, scene, bgm: scene.bgm });
+      const { asset, unresolved } = lookup(scene.id);
       const bgmSpan: BgmSpan = {
         sceneId: scene.id,
         volume: scene.bgm.volume,
@@ -160,7 +173,13 @@ export function computeTimeline(
 
   const lastImage = images.at(-1);
   if (lastImage) lastImage.endSec = Math.max(lastImage.startSec, end);
-  return { items, images, bgm, scenes, durationSec: end };
+  return {
+    items,
+    images: images.filter((span) => span.endSec > span.startSec),
+    bgm,
+    scenes,
+    durationSec: end,
+  };
 }
 
 function estimateLine(text: string): number {

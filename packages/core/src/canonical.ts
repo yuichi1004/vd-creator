@@ -16,20 +16,21 @@ export const ASSET_KEY_PREFIX_LENGTH = 16;
  * equal requests always give the same text.
  */
 export function canonicalJson(value: unknown): string {
-  return JSON.stringify(canonicalize(value));
-}
-
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map((v) => (v === undefined ? null : canonicalize(v)));
-  if (value !== null && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const key of Object.keys(value).sort()) {
-      const v = (value as Record<string, unknown>)[key];
-      if (v !== undefined) out[key] = canonicalize(v);
-    }
-    return out;
+  // The text is written directly from the sorted own keys, never copied onto a new object,
+  // so keys such as "__proto__" are kept like any other key.
+  if (Array.isArray(value)) {
+    return `[${value.map((v) => (v === undefined ? "null" : canonicalJson(v))).join(",")}]`;
   }
-  return value;
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const parts: string[] = [];
+    for (const key of Object.keys(record).sort()) {
+      const v = record[key];
+      if (v !== undefined) parts.push(`${JSON.stringify(key)}:${canonicalJson(v)}`);
+    }
+    return `{${parts.join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
 }
 
 /** The SHA-256, in hex, of the canonical JSON of `{ kind, providerId, request }`. */

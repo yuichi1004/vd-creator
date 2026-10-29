@@ -1,9 +1,15 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createMockProviders } from "@vd-creator/providers";
 import { parseScenario, type Scenario } from "@vd-creator/scenario";
-import { describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { AssetCache, assetFileFor } from "./cache.js";
 import { cacheKey } from "./canonical.js";
-import { generationRequest, scenarioItems } from "./items.js";
-import { computeTimeline, ESTIMATED_SFX_SEC } from "./timeline.js";
+import { planGeneration } from "./generate.js";
+import { generationRequest, type ScenarioItem, scenarioItems } from "./items.js";
+import { type AssetResolver, defaultResolvers } from "./resolver.js";
+import { computeTimeline, ESTIMATED_SFX_SEC, type Timeline } from "./timeline.js";
 
 const YAML = `
 version: 1
@@ -56,17 +62,33 @@ function parse(text: string): Scenario {
   return scenario;
 }
 
-/** A cache with an asset of the given length for each item ID. */
-function cacheWith(scenario: Scenario, durations: Record<string, number>): AssetCache {
-  const cache = new AssetCache("/unused");
+const resolvers = defaultResolvers(createMockProviders());
+let dir: string;
+
+beforeAll(async () => {
+  dir = await mkdtemp(join(tmpdir(), "vd-core-timeline-"));
+});
+
+afterAll(async () => {
+  await rm(dir, { recursive: true, force: true });
+});
+
+/** A cache in a new folder with an asset file of the given length for each item ID. */
+async function cacheWith(
+  scenario: Scenario,
+  durations: Record<string, number>,
+): Promise<AssetCache> {
+  const cache = new AssetCache(await mkdtemp(join(dir, "project-")));
   for (const item of scenarioItems(scenario)) {
     const durationSec = durations[item.id];
     const gen = generationRequest(scenario, item);
     if (durationSec === undefined || !gen) continue;
     const key = cacheKey(gen.kind, "mock", gen.request);
+    const file = assetFileFor(gen.kind, key, "wav");
+    await cache.writeAsset(file, new Uint8Array([0]));
     cache.set(key, {
       kind: gen.kind,
-      file: assetFileFor(gen.kind, key, "wav"),
+      file,
       providerId: "mock",
       request: gen.request,
       durationSec,
@@ -80,9 +102,14 @@ const round = (n: number) => Math.round(n * 1000) / 1000;
 
 describe("computeTimeline", () => {
   const scenario = parse(YAML);
-  const cache = cacheWith(scenario, { s1: 30, l1: 2, fx1: 4, l2: 1, fx2: 0.5, l3: 1.5 });
-  const timeline = computeTimeline(scenario, cache);
+  let cache: AssetCache;
+  let timeline: Timeline;
   const item = (id: string) => timeline.items.find((i) => i.id === id);
+
+  beforeAll(async () => {
+    cache = await cacheWith(scenario, { s1: 30, l1: 2, fx1: 4, l2: 1, fx2: 0.5, l3: 1.5 });
+    timeline = await computeTimeline(scenario, cache, resolvers);
+  });
 
   test("start times follow the gap and overlap rules", () => {
     expect(
@@ -138,8 +165,8 @@ describe("computeTimeline", () => {
     ]);
   });
 
-  test("without any asset, every audio item gets an estimate", () => {
-    const empty = computeTimeline(scenario, new AssetCache("/unused"));
+  test("without any asset, every audio item gets an estimate", async () => {
+    const empty = await computeTimeline(scenario, await cacheWith(scenario, {}), resolvers);
     expect(
       empty.items.filter((i) => i.kind === "line" || i.kind === "sfx").every((i) => i.missing),
     ).toBe(true);
@@ -148,7 +175,7 @@ describe("computeTimeline", () => {
     expect(empty.items.find((i) => i.id === "fx1")?.durationSec).toBe(ESTIMATED_SFX_SEC);
   });
 
-  test("a requested SFX duration is the estimate, and start times never go below 0", () => {
+  test("a requested SFX duration is the estimate, and start times never go below 0", async () => {
     const s = parse(`
 version: 1
 title: Start
@@ -160,7 +187,7 @@ scenes:
         durationSec: 2.5
         gapBeforeSec: -1
 `);
-    expect(computeTimeline(s, new AssetCache("/unused")).items).toEqual([
+    expect((await computeTimeline(s, await cacheWith(s, {}), resolvers)).items).toEqual([
       {
         id: "w",
         kind: "sfx",
@@ -173,15 +200,102 @@ scenes:
     ]);
   });
 
-  test("providerId selects that provider's assets", () => {
-    expect(
-      computeTimeline(scenario, cache, { providerId: "elevenlabs" }).items.find(
-        (i) => i.id === "l1",
-      )?.missing,
-    ).toBe(true);
-    expect(
-      computeTimeline(scenario, cache, { providerId: "mock" }).items.find((i) => i.id === "l1")
-        ?.missing,
-    ).toBeUndefined();
+  test("an entry whose file is missing is not cached, in the plan and the timeline alike", async () => {
+    const local = await cacheWith(scenario, { l1: 2, l2: 1 });
+    const l1 = scenarioItems(scenario).find((i) => i.id === "l1") as ScenarioItem;
+    const gen = generationRequest(scenario, l1);
+    if (!gen) throw new Error("l1 is generated");
+    const entry = local.get(cacheKey(gen.kind, "mock", gen.request));
+    await rm(local.assetPath(entry?.file ?? ""));
+
+    const plan = await planGeneration(scenario, local, resolvers);
+    const after = await computeTimeline(scenario, local, resolvers);
+    for (const planned of plan.items) {
+      const shown = [...after.items, ...after.bgm.map((b) => ({ ...b, id: b.sceneId }))].find(
+        (i) => i.id === planned.id,
+      );
+      expect(shown?.missing === true, planned.id).toBe(planned.status !== "cached");
+    }
+    const timelineL1 = after.items.find((i) => i.id === "l1");
+    expect(timelineL1).toMatchObject({ missing: true, durationSec: 0.5 });
+    expect(timelineL1?.assetFile).toBeUndefined();
+    expect(after.items.find((i) => i.id === "l2")?.missing).toBeUndefined();
+  });
+
+  test("assets come from the resolvers, so a library resolver supplies library sounds", async () => {
+    const library: AssetResolver = {
+      id: "library",
+      handles: (target) =>
+        (target.kind === "sfx" && typeof target.item.sfx !== "string") ||
+        (target.kind === "bgm" && "library" in target.bgm),
+      plan: async (target) => ({
+        status: "cached",
+        file: `library/${target.id}.wav`,
+        durationSec: target.kind === "bgm" ? 20 : 0.7,
+      }),
+      resolve: async () => {
+        throw new Error("not called");
+      },
+    };
+    const withLibrary = await computeTimeline(scenario, cache, [library, ...resolvers]);
+    expect(withLibrary.items.find((i) => i.id === "fx3")).toEqual({
+      id: "fx3",
+      kind: "sfx",
+      sceneId: "s2",
+      index: 3,
+      startSec: expect.closeTo(7.4, 6),
+      durationSec: 0.7,
+      assetFile: "library/fx3.wav",
+    });
+    expect(withLibrary.bgm[1]).toEqual({
+      sceneId: "s2",
+      volume: 0.3,
+      startSec: expect.closeTo(5.1, 6),
+      endSec: expect.closeTo(8.1, 6),
+      assetFile: "library/s2.wav",
+      assetDurationSec: 20,
+    });
+  });
+
+  test("an image never starts before the previous image, and empty spans are dropped", async () => {
+    const s = parse(`
+version: 1
+title: Images
+images:
+  - id: a
+    file: a.png
+  - id: b
+    file: b.png
+  - id: c
+    file: c.png
+scenes:
+  - id: s1
+    items:
+      - pause: 2
+      - image: a
+      - image: b
+        gapBeforeSec: -1
+      - pause: 3
+        id: p
+      - image: c
+      - pause: 1
+        id: q
+`);
+    const t = await computeTimeline(s, await cacheWith(s, {}), resolvers);
+    // b is clamped to a's start, which leaves a with no time, so a's span is dropped. The
+    // clamp moves only the image: the pause after b still follows b's negative gap.
+    expect(t.images).toEqual([
+      { imageId: "b", file: "b.png", startSec: 2, endSec: 4 },
+      { imageId: "c", file: "c.png", startSec: 4, endSec: 5 },
+    ]);
+    expect(t.items.map((i) => [i.id ?? i.kind, i.startSec])).toEqual([
+      ["pause", 0],
+      ["image", 2],
+      ["image", 2],
+      ["p", 1],
+      ["image", 4],
+      ["q", 4],
+    ]);
+    for (const span of t.images) expect(span.endSec).toBeGreaterThan(span.startSec);
   });
 });

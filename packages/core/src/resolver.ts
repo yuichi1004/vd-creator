@@ -58,8 +58,8 @@ export class GeneratedItemResolver implements AssetResolver {
   async plan(item: ScenarioItem, ctx: ResolveContext): Promise<PlannedAsset> {
     const { gen, providerId } = this.#request(item, ctx);
     const key = cacheKey(gen.kind, providerId, gen.request);
-    const entry = ctx.cache.get(key);
-    if (entry && (await ctx.cache.hasAsset(key))) {
+    const entry = await ctx.cache.cachedAsset(key);
+    if (entry) {
       return { status: "cached", key, file: entry.file, durationSec: entry.durationSec };
     }
     return { status: "to-generate", key, cost: this.#estimate(gen) };
@@ -85,8 +85,8 @@ export class GeneratedItemResolver implements AssetResolver {
     providerId: string,
     ctx: ResolveContext,
   ): Promise<ResolvedAsset> {
-    const existing = ctx.cache.get(key);
-    if (existing && (await ctx.cache.hasAsset(key))) {
+    const existing = await ctx.cache.cachedAsset(key);
+    if (existing) {
       return { key, file: existing.file, durationSec: existing.durationSec, generated: false };
     }
     const audio = await this.#call(gen);

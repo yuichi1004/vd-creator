@@ -6,7 +6,7 @@ import { access, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises
 import { dirname, join } from "node:path";
 import type { AudioFormat } from "@vd-creator/providers";
 import { AssetPathSchema } from "@vd-creator/scenario";
-import { ASSET_DIRS, ASSET_KEY_PREFIX_LENGTH, type AssetKind, canonicalJson } from "./canonical.js";
+import { ASSET_DIRS, ASSET_KEY_PREFIX_LENGTH, type AssetKind } from "./canonical.js";
 
 /** File name of the cache inside a project folder. */
 export const CACHE_FILE = "cache.json";
@@ -85,37 +85,23 @@ export class AssetCache {
     return [...this.#entries.keys()];
   }
 
-  /** The newest entry for a request from any provider, or from `providerId` if given. */
-  findByRequest(
-    kind: AssetKind,
-    request: object,
-    providerId?: string,
-  ): (CacheEntry & { key: string }) | undefined {
-    const wanted = canonicalJson(request);
-    let found: (CacheEntry & { key: string }) | undefined;
-    for (const [key, entry] of this.#entries) {
-      if (entry.kind !== kind) continue;
-      if (providerId !== undefined && entry.providerId !== providerId) continue;
-      if (canonicalJson(entry.request) !== wanted) continue;
-      if (!found || entry.createdAt > found.createdAt) found = { ...entry, key };
-    }
-    return found;
-  }
-
   /** The absolute path of an asset file given relative to assets/. */
   assetPath(file: string): string {
     return join(this.projectDir, ASSETS_DIR, file);
   }
 
-  /** True if the key has an entry and its asset file exists. */
-  async hasAsset(key: string): Promise<boolean> {
+  /**
+   * The entry of a key if its asset file exists. This is the one rule for "cached": an entry
+   * whose file is missing counts as not cached, in planning, generation, and the timeline.
+   */
+  async cachedAsset(key: string): Promise<CacheEntry | undefined> {
     const entry = this.#entries.get(key);
-    if (!entry) return false;
+    if (!entry) return undefined;
     try {
       await access(this.assetPath(entry.file));
-      return true;
+      return entry;
     } catch {
-      return false;
+      return undefined;
     }
   }
 
