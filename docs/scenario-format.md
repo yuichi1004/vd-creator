@@ -144,7 +144,7 @@ scenes:
 | `name` | non-empty string | yes | Display name. |
 | `voice.provider` | non-empty string | yes | Provider ID, such as `elevenlabs`. `mock` is always available. |
 | `voice.voiceId` | non-empty string | yes | Voice ID at the provider. Not an ID in the sense of this guide, so any non-empty string is fine. |
-| `voice.settings` | mapping of plain JSON values | no | Provider-specific settings, passed through as is. Any keys. Every value, at any depth, must be a string, a finite number, `true`, `false`, `null`, a list, or a mapping with string keys. `.inf`, `-.inf`, `.nan`, dates and timestamps, `!!binary`, `!!set`, `!!omap`, and an alias that refers to a value containing it are errors at the path of that value. |
+| `voice.settings` | mapping of plain JSON values | no | Provider-specific settings, passed through as is. Any keys. Every value, at any depth, must be a string, a finite number, `true`, `false`, `null`, a list, or a mapping with string keys. `.inf`, `-.inf`, `.nan`, dates and timestamps, `!!binary`, `!!set`, `!!omap`, and an alias that refers to a value containing it are errors at the path of that value. A plain date such as `2024-01-02` is a string under YAML 1.2, the default, so it is fine. A date tagged `!!timestamp`, or any unquoted date in a document that starts with `%YAML 1.1`, is a timestamp and is an error. |
 
 ### Image
 
@@ -252,7 +252,7 @@ A BGM takes `library` in place of `prompt`, and can still set `volume`. An SFX t
 
 An unverified entry is fine for a draft. Under `publish.use` of `non-commercial` or `commercial`, the project license check reports it as an error until a human verifies it.
 
-`vd validate` runs this license check. For an entry that the project has already copied, it checks the record in the project's `credits.json`; for one it has not copied yet, it reads the library. `vd generate` copies each library entry the scenario uses into `assets/library/` and records it in `credits.json`. `vd render` is not built yet. Tell the user which unverified entries the scenario uses. Never verify them yourself. The rules for importing downloaded sounds are in [AGENTS.md](../AGENTS.md#sound-library).
+`vd validate` runs this license check. For an entry that the project has already copied, it checks the record in the project's `credits.json`; for one it has not copied yet, it reads the library. `vd generate` copies each library entry the scenario uses into `assets/library/` and records it in `credits.json`. Tell the user which unverified entries the scenario uses. Never verify them yourself. The rules for importing downloaded sounds are in [AGENTS.md](../AGENTS.md#sound-library).
 
 The copies in a project do not follow later changes in the library, such as a replaced sound or a corrected license record. If an entry changed after the project copied it, the project's credits are stale. `npx vd library status [dir]` lists the copies whose sound or records changed in the library, or that the library no longer has, and `npx vd library sync [dir]` updates the copies that changed. Old copies stay in `assets/library/`.
 
