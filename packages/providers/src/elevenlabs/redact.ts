@@ -8,8 +8,10 @@
 //
 // The key is sent only to the configured https host: redirects are never followed, since fetch
 // would send the key header to the new location. Audio from that host is trusted as audio, but
-// only the MPEG frame range is kept. A leading ID3v2 tag, a trailing ID3v1 tag, and any bytes
-// after the last frame are dropped, so they cannot carry other data into the asset file.
+// only the MPEG frame range is kept. A leading ID3v2 tag, trailing ID3v1 and APEv2 tags, an
+// incomplete last frame, and any bytes after the last whole frame are dropped, so they cannot
+// carry other data into the asset file. Trailing tags are removed before frames are walked, so
+// a truncated frame cannot reach into them.
 
 const REDACTED = "[redacted]";
 /** A key substring at least this long counts as a leak. Shorter keys are matched whole. */

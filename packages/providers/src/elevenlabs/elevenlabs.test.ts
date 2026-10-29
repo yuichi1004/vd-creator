@@ -1,3 +1,7 @@
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { createProviders } from "../index.js";
 import type { AudioResult, TtsRequest } from "../types.js";
@@ -836,5 +840,133 @@ test("key: an empty, whitespace, or control-character key is rejected before any
       'ElevenLabs SFX failed for take 0, prompt "x": ELEVENLABS_API_KEY must be printable ASCII with no whitespace (malformed_api_key)',
     );
     expect(calls).toHaveLength(0);
+  }
+});
+
+/** One MPEG 1 Layer III frame of 417 bytes (128 kbps, 44.1 kHz), with a channel mode byte. */
+function frame(channelByte = 0x00): Uint8Array {
+  const data = new Uint8Array(417);
+  data.set([0xff, 0xfb, 0x90, channelByte]);
+  return data;
+}
+
+function concat(...parts: Uint8Array[]): Uint8Array {
+  return new Uint8Array(parts.flatMap((p) => [...p]));
+}
+
+function ascii(text: string): Uint8Array {
+  return new Uint8Array([...text].map((c) => c.charCodeAt(0)));
+}
+
+async function generateAudio(body: Uint8Array): Promise<AudioResult> {
+  const stub = stubFetch(() => new Response(body, { status: 200 }));
+  return createElevenLabsProviders({
+    env: { ELEVENLABS_API_KEY: LEAK_KEY },
+    fetch: stub.fetch,
+  }).sfx.generate({ prompt: "x", take: 0 });
+}
+
+test("audio: a truncated frame cannot pull a trailing tag into the audio", async () => {
+  // A whole frame, then the first 300 bytes of a frame that claims 417, then a tag with the key.
+  // Against the whole response, the truncated frame would look complete and cover the tag.
+  const id3v1 = new Uint8Array(128);
+  id3v1.set(ascii("TAG"));
+  id3v1.set(ascii(LEAK_KEY), 3);
+  const items = concat(ascii(`title\u0000${LEAK_KEY}`), new Uint8Array(100));
+  const apeFooter = (flags: number) => {
+    const footer = new Uint8Array(32);
+    footer.set(ascii("APETAGEX"));
+    new DataView(footer.buffer).setUint32(8, 2000, true);
+    new DataView(footer.buffer).setUint32(12, items.length + 32, true);
+    new DataView(footer.buffer).setUint32(16, 1, true);
+    new DataView(footer.buffer).setUint32(20, flags, true);
+    return footer;
+  };
+  const ape = concat(apeFooter(0xa0000000), items, apeFooter(0x80000000));
+  const whole = frame();
+  const truncated = frame().subarray(0, 300);
+  for (const [name, body] of [
+    ["ID3v1", concat(whole, truncated, id3v1)],
+    ["APEv2", concat(whole, truncated, ape)],
+    ["APEv2 and ID3v1", concat(whole, truncated, ape, id3v1)],
+  ] as const) {
+    const result = await generateAudio(body);
+    expect(result.data, name).toEqual(whole);
+    expect(result.durationSec).toBeCloseTo(1152 / 44100, 9);
+    expectNoLeak(Buffer.from(result.data).toString("latin1"), LEAK_KEY);
+  }
+});
+
+/** A header frame: an Info or Xing tag with all four optional fields, then a LAME tag. */
+function headerFrame(
+  tag: "Info" | "Xing",
+  audioFrames: number,
+  lame?: { delay: number; padding: number; encoder?: string },
+  channelByte = 0x00,
+): Uint8Array {
+  const data = frame(channelByte);
+  const view = new DataView(data.buffer);
+  const at = channelByte >> 6 === 0b11 ? 4 + 17 : 4 + 32;
+  data.set(ascii(tag), at);
+  view.setUint32(at + 4, 0x0f);
+  view.setUint32(at + 8, audioFrames);
+  view.setUint32(at + 12, audioFrames * 417);
+  const lameAt = at + 8 + 4 + 4 + 100 + 4;
+  if (lame) {
+    data.set(ascii(lame.encoder ?? "LAME3.100"), lameAt);
+    data[lameAt + 21] = lame.delay >> 4;
+    data[lameAt + 22] = ((lame.delay & 0x0f) << 4) | (lame.padding >> 8);
+    data[lameAt + 23] = lame.padding & 0xff;
+  }
+  return data;
+}
+
+test("audio: a header frame is not audio, and the LAME delay and padding are subtracted", async () => {
+  // 40 audio frames are 46080 samples. With 576 samples of delay and 1404 of padding, the audio
+  // is exactly 44100 samples: one second, as ffmpeg decodes it.
+  const audio = Array.from({ length: 40 }, () => frame());
+  for (const [name, header] of [
+    ["Info, LAME", headerFrame("Info", 40, { delay: 576, padding: 1404 })],
+    ["Xing, Lavc", headerFrame("Xing", 40, { delay: 576, padding: 1404, encoder: "Lavc59.37" })],
+    ["Info, LAME, mono", headerFrame("Info", 40, { delay: 576, padding: 1404 }, 0xc0)],
+  ] as const) {
+    const body = concat(header, ...audio);
+    const result = await generateAudio(body);
+    expect(Math.abs(result.durationSec - 1), name).toBeLessThan(0.001);
+    expect(mp3DurationSec(body)).toBeCloseTo(1, 9);
+    // The header frame stays in the returned audio, since decoders need it.
+    expect(result.data).toEqual(body);
+  }
+  // A header with no LAME tag, or a VBRI header, still does not count as audio.
+  const noLame = concat(headerFrame("Info", 40), ...audio);
+  expect(mp3DurationSec(noLame)).toBeCloseTo((40 * 1152) / 44100, 9);
+  const vbri = frame();
+  vbri.set(ascii("VBRI"), 36);
+  expect(mp3DurationSec(concat(vbri, ...audio))).toBeCloseTo((40 * 1152) / 44100, 9);
+});
+
+const hasFfmpeg = spawnSync("ffmpeg", ["-version"]).status === 0;
+
+test.skipIf(!hasFfmpeg)("audio: the duration matches what ffmpeg decodes", () => {
+  const dir = mkdtempSync(join(tmpdir(), "vd-mp3-"));
+  try {
+    const file = join(dir, "tone.mp3");
+    const encoded = spawnSync("ffmpeg", [
+      ...["-v", "error", "-y", "-f", "lavfi", "-i", "sine=d=1.3:sample_rate=44100"],
+      ...["-c:a", "libmp3lame", "-b:a", "128k", file],
+    ]);
+    // Without the LAME encoder, there is nothing to compare.
+    if (encoded.status !== 0) return;
+    const pcm = execFileSync(
+      "ffmpeg",
+      ["-v", "error", "-i", file, "-f", "s16le", "-ac", "1", "-"],
+      {
+        maxBuffer: 16 * 1024 * 1024,
+      },
+    );
+    const decodedSec = pcm.length / 2 / 44100;
+    expect(Math.abs(mp3DurationSec(readFileSync(file)) - decodedSec)).toBeLessThan(0.001);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
