@@ -23,10 +23,10 @@ import { formatPath, type Issue, type IssuePath } from "./validate.js";
 
 // Policy: forms that people actually write must be editable. That covers block and flow
 // mappings, comments anywhere, quoted and block scalars, trailing commas, closing braces
-// on their own line, and empty values. Exotic forms are refused cleanly: items, scenes, or
-// item lists defined by an alias, explicit tags such as `!!str` on a field the edit
-// touches, anchors or tags on the line after a key, and aliases that make a cycle. Every
-// failure throws a `ScenarioEditError` whose issues say what is wrong and where, never a
+// on their own line, and empty values. Exotic forms are refused cleanly: items, scenes,
+// item lists, or the whole scenes list defined by an alias, explicit tags such as `!!str`
+// on a field the edit touches, anchors or tags on the line after a key, and aliases that
+// make a cycle. Every failure throws a `ScenarioEditError` whose issues say what is wrong and where, never a
 // plain `Error`. As a safety net for forms nobody thought of, `updateItem` turns any
 // other error into a `ScenarioEditError` with a generic issue at the item path.
 //
