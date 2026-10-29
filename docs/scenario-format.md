@@ -24,7 +24,7 @@ Check every scenario you write before you report it as done:
 npx vd validate <dir>
 ```
 
-`<dir>` is the project folder, the one that holds `scenario.yaml`. It defaults to the current folder. Each issue is printed to stderr as `path: message`, with ` (warning)` at the end for a warning. A YAML syntax issue takes several lines: the message, a blank line, the source line, and a line of `^` under the problem. For such a warning, ` (warning)` comes on its own line after them. The path names the field, as in `scenes.0.items.2.speaker`, or is `(root)` for the whole file, such as a YAML syntax error. When there are no errors, the command prints `scenario.yaml is valid` to stdout.
+`<dir>` is the project folder, the one that holds `scenario.yaml`. It defaults to the current folder. Each issue is printed to stderr as `path: message`, with ` (warning)` at the end for a warning. A YAML syntax issue takes several lines: the message, a blank line, one or more source lines ending with the one that has the problem, and a line of `^` under the problem. An error then ends with a blank line, and a warning ends with ` (warning)` on its own line. The path names the field, as in `scenes.0.items.2.speaker`, or is `(root)` for the whole file, such as a YAML syntax error. When there are no errors, the command prints `scenario.yaml is valid` to stdout.
 
 The exit code tells you the result:
 
