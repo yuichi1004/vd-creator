@@ -1,6 +1,6 @@
 # 0008: User config and private docs
 
-- Status: In progress
+- Status: Done
 - Date: 2026-10-29
 - Depends on: none for the first task. The second task needs the CLI from [0003](0003-scenario-format.md).
 
@@ -102,7 +102,7 @@ Both tasks use the default reviewer.
   - Constraints: no code. Keep the existing sections. No example paths from a real machine.
   - Ownership: `.gitignore`, `AGENTS.md`, `README.md`.
   - Acceptance: `git check-ignore local/config.yaml` succeeds, and the coordinator checks that the three documents agree on the locations.
-- [ ] `vd config` and config loading
+- [x] `vd config` and config loading
   - Target: `apps/cli/`
   - Change: the location rules, the `config.yaml` schema, precedence, `~` expansion, and the three commands. Wire `library`, `serve.*`, `init.publishUse`, and `render.creditsTemplate` into the commands that exist at the time; later plans read the same loader.
   - Constraints: no new dependencies (`zod` and `yaml` come from 0003). Tests set `VD_USER_DIR` and `XDG_CONFIG_HOME` to temporary folders and never read the real home directory. Must not run at the same time as another task that owns `apps/cli/`.

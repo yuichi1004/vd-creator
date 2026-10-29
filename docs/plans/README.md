@@ -60,4 +60,4 @@ Each task must be self-contained: an agent working on it sees only the task, not
 | [0005](0005-review-ui.md) | Review UI | In progress |
 | [0006](0006-rendering.md) | Rendering | Accepted |
 | [0007](0007-sound-library.md) | Shared sound library and licenses | In progress |
-| [0008](0008-user-config.md) | User config and private docs | In progress |
+| [0008](0008-user-config.md) | User config and private docs | Done |
