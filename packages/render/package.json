@@ -20,5 +20,8 @@
   "dependencies": {
     "@vd-creator/scenario": "*",
     "@vd-creator/core": "*"
+  },
+  "devDependencies": {
+    "@vd-creator/providers": "*"
   }
 }
