@@ -483,3 +483,156 @@ describe("every refusal is a ScenarioEditError", () => {
     expect(doc.text).toBe(HEAD + items);
   });
 });
+
+// Expects the edit to be refused with an issue at `path` that matches `message`, leaving
+// the document unchanged.
+function expectRefused(
+  text: string,
+  id: string,
+  patch: ItemPatch,
+  path: (string | number)[],
+  message: RegExp,
+) {
+  const doc = new ScenarioDocument(text);
+  let error: unknown;
+  try {
+    updateItem(doc, id, patch);
+  } catch (e) {
+    error = e;
+  }
+  expect(error).toBeInstanceOf(ScenarioEditError);
+  expect((error as ScenarioEditError).issues).toContainEqual(
+    expect.objectContaining({ path, message: expect.stringMatching(message) }),
+  );
+  expect(doc.text).toBe(text);
+}
+
+describe("explicit tags", () => {
+  const at = (...rest: (string | number)[]) => ["scenes", 0, "items", 0, ...rest];
+
+  test("refuses to replace a tagged flow mapping", () => {
+    expectRefused(
+      `${HEAD}      - {sfx: !!map {library: door}, id: x}\n`,
+      "x",
+      { sfx: "wind" },
+      at("sfx"),
+      /explicit tag !!map/,
+    );
+  });
+
+  test("refuses to replace a tagged scalar", () => {
+    expectRefused(
+      `${HEAD}      - line: hi\n        id: l\n        speaker: a\n        direction: !!str soft\n`,
+      "l",
+      { direction: "loud" },
+      at("direction"),
+      /explicit tag !!str/,
+    );
+  });
+
+  test("refuses to replace a tagged block scalar", () => {
+    expectRefused(
+      `${HEAD}      - line: !!str |\n          hi\n        id: l\n        speaker: a\n`,
+      "l",
+      { line: "ho" },
+      at("line"),
+      /explicit tag !!str/,
+    );
+  });
+
+  test("refuses to replace a value with a tag inside it", () => {
+    expectRefused(
+      `${HEAD}      - sfx: { library: !!str door }\n        id: x\n`,
+      "x",
+      { sfx: "wind" },
+      at("sfx", "library"),
+      /explicit tag !!str/,
+    );
+  });
+
+  test("refuses to edit a field with a tagged key", () => {
+    expectRefused(
+      `${HEAD}      - line: hi\n        id: l\n        speaker: a\n        !!str direction: soft\n`,
+      "l",
+      { direction: "loud" },
+      at("direction"),
+      /explicit tag !!str/,
+    );
+  });
+
+  test("refuses to edit a tagged item", () => {
+    expectRefused(
+      `${HEAD}      - !!map { pause: 1, id: p }\n`,
+      "p",
+      { pause: 2 },
+      at(),
+      /explicit tag !!map/,
+    );
+  });
+
+  test.each([
+    ["LF", "\n"],
+    ["CRLF", "\r\n"],
+  ])("refuses a tag on the line after the key (%s)", (_, eol) => {
+    expectRefused(
+      `${HEAD}      - line: hi\n        id: l\n        speaker: a\n        direction:\n          !!str soft\n`.replace(
+        /\n/g,
+        eol,
+      ),
+      "l",
+      { direction: "loud" },
+      at("direction"),
+      /explicit tag !!str/,
+    );
+  });
+
+  test("untagged fields next to a tagged one stay editable", () => {
+    const { doc, items } = edit(
+      "      - line: hi\n        id: l\n        speaker: a\n        direction: !!str soft\n",
+      "l",
+      { line: "ho", take: 2 },
+    );
+    expect(doc.text).toContain("        direction: !!str soft\n");
+    expect(items[0]).toMatchObject({ line: "ho", take: 2, direction: "soft" });
+  });
+});
+
+describe("anchors on the line after the key", () => {
+  test.each([
+    ["LF", "\n"],
+    ["CRLF", "\r\n"],
+  ])("are refused (%s)", (_, eol) => {
+    expectRefused(
+      `${HEAD}      - line: hi\n        id: l\n        speaker: a\n        direction:\n          &d soft\n`.replace(
+        /\n/g,
+        eol,
+      ),
+      "l",
+      { direction: "loud" },
+      ["scenes", 0, "items", 0, "direction"],
+      /anchor &d on the line after its key/,
+    );
+  });
+});
+
+describe("cyclic aliases", () => {
+  test("refuses an item whose field aliases the item itself", () => {
+    expectRefused(
+      `${HEAD}      - &it { pause: 1, id: p, x: *it }\n`,
+      "p",
+      { pause: 2 },
+      ["scenes", 0, "items", 0, "x"],
+      /Refers through an alias to a value that contains it/,
+    );
+  });
+
+  test("refuses edits while another item has a cycle", () => {
+    expectRefused(
+      `${HEAD}      - { pause: 1, id: p }\n      - &it { pause: 1, id: q, x: [*it] }\n`,
+      "p",
+      { pause: 2 },
+      ["scenes", 0, "items", 1, "x", 0],
+      /contains it/,
+    );
+  });
+});

@@ -66,3 +66,31 @@ describe("updateItem output guard", () => {
     expect(doc.text).toContain("        take: 1\n");
   });
 });
+
+describe("updateItem error boundary", () => {
+  test("turns an unexpected error into a ScenarioEditError without its text", () => {
+    const cause = new RangeError("internal detail");
+    stringify.mockImplementation(() => {
+      throw cause;
+    });
+    const doc = new ScenarioDocument(TEXT);
+    let error: unknown;
+    try {
+      updateItem(doc, "l", { take: 1 });
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(ScenarioEditError);
+    const edit = error as ScenarioEditError;
+    expect(edit.issues).toEqual([
+      {
+        path: ["scenes", 0, "items", 0],
+        message: 'Item "l" uses YAML features that the editor does not support',
+        severity: "error",
+      },
+    ]);
+    expect(edit.message).not.toContain("internal detail");
+    expect(edit.cause).toBe(cause);
+    expect(doc.text).toBe(TEXT);
+  });
+});

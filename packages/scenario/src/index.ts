@@ -10,6 +10,7 @@ export { updateItem } from "./edit.js";
 export {
   ScenarioEditError,
   type ScenarioErrorBody,
+  type ScenarioErrorIssue,
   ScenarioValidationError,
   scenarioErrorResponse,
 } from "./errors.js";

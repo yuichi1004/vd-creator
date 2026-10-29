@@ -23,9 +23,12 @@ import { formatPath, type Issue, type IssuePath } from "./validate.js";
 
 // Policy: forms that people actually write must be editable. That covers block and flow
 // mappings, comments anywhere, quoted and block scalars, trailing commas, closing braces
-// on their own line, and empty values. Exotic forms, such as items, scenes, or item lists
-// defined by an alias, or collection tags, are refused cleanly: every failure throws a
-// `ScenarioEditError` whose issues say what is wrong and where, never a plain `Error`.
+// on their own line, and empty values. Exotic forms are refused cleanly: items, scenes, or
+// item lists defined by an alias, explicit tags such as `!!str` on a field the edit
+// touches, anchors or tags on the line after a key, and aliases that make a cycle. Every
+// failure throws a `ScenarioEditError` whose issues say what is wrong and where, never a
+// plain `Error`. As a safety net for forms nobody thought of, `updateItem` turns any
+// other error into a `ScenarioEditError` with a generic issue at the item path.
 //
 // Edits work on the CST (concrete syntax tree) of the source, which keeps every space,
 // newline, and comment. Values are changed on the tokens in place and the tree is
@@ -46,6 +49,29 @@ type Item = CST.CollectionItem;
  * as patched or if a valid scenario would become invalid.
  */
 export function updateItem(doc: ScenarioDocument, id: string, patch: ItemPatch): void {
+  const at: { path: IssuePath } = { path: [] };
+  try {
+    applyPatch(doc, id, patch, at);
+  } catch (e) {
+    if (e instanceof ScenarioEditError) throw e;
+    // The text of an unexpected error may describe internals, so it is kept only as
+    // the cause and never shown in the issue.
+    const message = `Item "${id}" uses YAML features that the editor does not support`;
+    throw new ScenarioEditError(
+      `Refusing the edit of item "${id}": ${message}`,
+      [{ path: at.path, message, severity: "error" }],
+      { cause: e },
+    );
+  }
+}
+
+// `at.path` is set to the item path once the item is found, for the generic refusal.
+function applyPatch(
+  doc: ScenarioDocument,
+  id: string,
+  patch: ItemPatch,
+  at: { path: IssuePath },
+): void {
   const tokens = Array.from(new Parser().parse(doc.text));
   const composed = Array.from(new Composer({ keepSourceTokens: true }).compose(tokens));
   const document = composed[0];
@@ -67,6 +93,18 @@ export function updateItem(doc: ScenarioDocument, id: string, patch: ItemPatch):
   const target = findItem(before.data, id);
   if (!target) throw new ScenarioEditError(`No item with id "${id}"`);
   const { path, current, otherIds } = target;
+  at.path = path;
+  const cycle = findCycle(before.data, []);
+  if (cycle) {
+    throw refusal(id, [
+      {
+        path: cycle,
+        message:
+          "Refers through an alias to a value that contains it, which the editor does not support",
+        severity: "error",
+      },
+    ]);
+  }
   for (const [key, value] of Object.entries(patch)) {
     if (value === undefined && (key === "id" || (ITEM_KINDS as readonly string[]).includes(key))) {
       throw refusal(id, [
@@ -78,15 +116,20 @@ export function updateItem(doc: ScenarioDocument, id: string, patch: ItemPatch):
     const message = `Cannot rename "${id}" to "${patch.id}": the id is already used`;
     throw new ScenarioEditError(message, [{ path: [...path, "id"], message, severity: "error" }]);
   }
-  const token = itemToken(document, path, id);
+  const { node, token } = itemNode(document, path, id);
 
   const expected: Record<string, unknown> = { ...current };
+  const touched: string[] = [];
   for (const [key, value] of Object.entries(patch)) {
     if (value === undefined) delete expected[key];
     else expected[key] = value;
-    if (value !== undefined && sameValue(current[key], value)) continue;
-    setField(token, key, value);
+    if (value === undefined ? Object.hasOwn(current, key) : !sameValue(current[key], value)) {
+      touched.push(key);
+    }
   }
+  const tagged = taggedNodes(node, path, touched);
+  if (tagged.length > 0) throw refusal(id, tagged);
+  for (const key of touched) setField(token, key, expected[key], [...path, key]);
 
   let text = tokens.map((t) => CST.stringify(t)).join("");
   if (usesCrlf(doc.text)) text = text.replace(/\r?\n/g, "\r\n");
@@ -99,9 +142,13 @@ function refusal(id: string, issues: Issue[], reason = ""): ScenarioEditError {
   return new ScenarioEditError(`Refusing the edit of item "${id}"${reason}: ${causes}`, issues);
 }
 
-// Returns the CST of the item. Refuses an item that is itself an alias, or that sits in
-// a scene or list that is an alias, since editing it would edit the anchored original.
-function itemToken(document: Document, path: IssuePath, id: string): MapToken {
+// Returns the node and CST of the item. Refuses an item that is itself an alias, or that
+// sits in a scene or list that is an alias, since editing it would edit the original.
+function itemNode(
+  document: Document,
+  path: IssuePath,
+  id: string,
+): { node: YAMLMap; token: MapToken } {
   const [, sceneIndex, , itemIndex] = path as [string, number, string, number];
   const aliased = (what: string, alias: Alias): ScenarioEditError =>
     refusal(id, [
@@ -119,11 +166,55 @@ function itemToken(document: Document, path: IssuePath, id: string): MapToken {
   if (isAlias(items)) throw aliased("its scene's item list", items);
   const item = isSeq(items) ? items.items[itemIndex] : undefined;
   if (isAlias(item)) throw aliased("the item", item);
-  const token = isMap(item) ? (item as YAMLMap).srcToken : undefined;
-  if (!isMapToken(token)) {
+  const token = isMap(item) ? item.srcToken : undefined;
+  if (!isMap(item) || !isMapToken(token)) {
     throw refusal(id, [{ path, message: `Item "${id}" is not a mapping`, severity: "error" }]);
   }
-  return token;
+  return { node: item as YAMLMap, token };
+}
+
+// Issues for explicit tags, such as `!!str` or `!!map`, on the item or anywhere in the
+// touched fields: on their keys, their values, or any node inside the values. Tags name
+// the type of a value, so a new value cannot keep them, and the editor does not drop them.
+function taggedNodes(item: YAMLMap, path: IssuePath, touched: string[]): Issue[] {
+  const issue = (at: IssuePath, tag: string): Issue => ({
+    path: at,
+    message: `Has the explicit tag ${tag.replace(/^tag:yaml\.org,2002:/, "!!")}, which the editor does not support`,
+    severity: "error",
+  });
+  if (item.tag) return [issue(path, item.tag)];
+  const issues: Issue[] = [];
+  for (const pair of item.items) {
+    const key = isScalar(pair.key) ? String(pair.key.value) : undefined;
+    if (key === undefined || !touched.includes(key)) continue;
+    const at = [...path, key];
+    if (isScalar(pair.key) && pair.key.tag) issues.push(issue(at, pair.key.tag));
+    if (!pair.value) continue;
+    visit(pair.value as Node, (_, node, ancestors) => {
+      if ((isScalar(node) || isMap(node) || isSeq(node)) && node.tag) {
+        issues.push(issue([...at, ...dataPath([...ancestors, node])], node.tag));
+      }
+    });
+  }
+  return issues;
+}
+
+// The path of the first collection that contains itself through an alias, if any.
+function findCycle(
+  value: unknown,
+  path: IssuePath,
+  ancestors = new Set<unknown>(),
+): IssuePath | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  if (ancestors.has(value)) return path;
+  ancestors.add(value);
+  const entries = Array.isArray(value) ? [...value.entries()] : Object.entries(value);
+  for (const [key, child] of entries) {
+    const found = findCycle(child, [...path, key], ancestors);
+    if (found) return found;
+  }
+  ancestors.delete(value);
+  return undefined;
 }
 
 // Parses and validates the edited text again. Refuses text that does not parse, an item
@@ -193,10 +284,11 @@ function show(value: unknown): string {
 function toData(document: Document): { ok: true; data: unknown } | { ok: false; issues: Issue[] } {
   try {
     return { ok: true, data: document.toJS() ?? null };
-  } catch (e) {
+  } catch {
     const issues = unresolvedAliases(document);
     if (issues.length > 0) return { ok: false, issues };
-    const message = e instanceof Error ? e.message : String(e);
+    // For example too many alias expansions.
+    const message = "The aliases of the document cannot be resolved";
     return { ok: false, issues: [{ path: [], message, severity: "error" }] };
   }
 }
@@ -270,18 +362,41 @@ function canonical(value: unknown): string {
   );
 }
 
-function setField(map: MapToken, key: string, value: unknown): void {
+function setField(map: MapToken, key: string, value: unknown, path: IssuePath): void {
   const index = map.items.findIndex((item) => keyOf(item) === key);
+  if (index !== -1) checkProps(map.items[index] as Item, path);
   if (value === undefined) {
     if (index !== -1) removeItem(map, index);
   } else if (index === -1) {
     addItem(map, key, value);
   } else {
-    setValue(map, index, value);
+    setValue(map, index, value, path);
   }
 }
 
-function setValue(map: MapToken, index: number, value: unknown): void {
+// Refuses a field whose anchor or tag is on a line after its key, as in `key:` followed
+// by `&anchor value` on the next line. The editor keeps props only on the key line.
+function checkProps(item: Item, path: IssuePath): void {
+  const sep = item.sep ?? [];
+  const newline = sep.findIndex((t) => t.type === "newline");
+  const props = newline === -1 ? [] : sep.slice(newline).filter(isProp);
+  const tags = sep.filter((t) => t.type === "tag");
+  const found = props[0] ?? tags[0];
+  if (!found) return;
+  const message =
+    found.type === "tag"
+      ? `Has the explicit tag ${found.source}, which the editor does not support`
+      : `Has the anchor ${found.source} on the line after its key, which the editor does not support`;
+  throw new ScenarioEditError(`Refusing the edit: ${formatPath(path)}: ${message}`, [
+    { path, message, severity: "error" },
+  ]);
+}
+
+function isProp(token: CST.SourceToken): boolean {
+  return token.type === "anchor" || token.type === "tag";
+}
+
+function setValue(map: MapToken, index: number, value: unknown, path: IssuePath): void {
   const item = map.items[index] as Item;
   const inFlow = map.type === "flow-collection";
   const token = item.value;
@@ -291,9 +406,11 @@ function setValue(map: MapToken, index: number, value: unknown): void {
   }
   if (isRecord(value)) {
     if (isMapToken(token)) {
-      for (const [k, v] of Object.entries(value)) setField(token, k, v);
+      for (const [k, v] of Object.entries(value)) setField(token, k, v, [...path, k]);
       for (const k of token.items.map(keyOf)) {
-        if (k !== undefined && !Object.hasOwn(value, k)) setField(token, k, undefined);
+        if (k !== undefined && !Object.hasOwn(value, k)) {
+          setField(token, k, undefined, [...path, k]);
+        }
       }
       return;
     }
@@ -325,7 +442,7 @@ function fillEmpty(map: MapToken, index: number, value: unknown): void {
   const newline = sep.findIndex((t) => t.type === "newline");
   const head = newline === -1 ? sep : sep.slice(0, newline);
   const [lineBreak, ...rest] = newline === -1 ? [] : sep.slice(newline);
-  const props = head.filter((t) => t.type === "anchor" || t.type === "tag");
+  const props = head.filter(isProp);
   item.sep = [colon(), space(1), ...props.flatMap((t) => [t, space(1)])];
   const end = head.filter((t) => t.type === "comment").flatMap((t) => [space(1), t]);
   if (lineBreak) end.push(lineBreak);

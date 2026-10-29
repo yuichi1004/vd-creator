@@ -20,8 +20,12 @@ export class ScenarioValidationError extends Error {
 export class ScenarioEditError extends Error {
   readonly issues: Issue[];
 
-  constructor(message: string, issues: Issue[] = [{ path: [], message, severity: "error" }]) {
-    super(message);
+  constructor(
+    message: string,
+    issues: Issue[] = [{ path: [], message, severity: "error" }],
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
     this.name = "ScenarioEditError";
     this.issues = issues;
   }
@@ -31,7 +35,15 @@ export class ScenarioEditError extends Error {
 export interface ScenarioErrorBody {
   error: "ScenarioEditError" | "ScenarioValidationError";
   message: string;
-  issues: (Issue & { location: string })[];
+  issues: ScenarioErrorIssue[];
+}
+
+/** One issue of a 422 response. `location` is the path formatted as `scenes.0.items.2.id`. */
+export interface ScenarioErrorIssue {
+  path: Issue["path"];
+  message: string;
+  severity: Issue["severity"];
+  location: string;
 }
 
 /**
@@ -50,7 +62,13 @@ export function scenarioErrorResponse(
     body: {
       error: error instanceof ScenarioEditError ? "ScenarioEditError" : "ScenarioValidationError",
       message: error.message,
-      issues: error.issues.map((i) => ({ ...i, location: formatPath(i.path) })),
+      // Fields are picked one by one, so that nothing else on an issue reaches the client.
+      issues: error.issues.map((i) => ({
+        path: [...i.path],
+        message: i.message,
+        severity: i.severity,
+        location: formatPath(i.path),
+      })),
     },
   };
 }

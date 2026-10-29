@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  type Issue,
   ScenarioDocument,
   ScenarioEditError,
   ScenarioValidationError,
@@ -42,6 +43,14 @@ describe("scenarioErrorResponse", () => {
       error: "ScenarioValidationError",
       issues: [{ path: ["title"], location: "title", message: "Required" }],
     });
+  });
+
+  test("selects only path, message, severity, and location from each issue", () => {
+    const issue = { path: ["title"], message: "Required", severity: "error", secret: "x" };
+    const error = new ScenarioEditError("refused", [issue as Issue]);
+    expect(scenarioErrorResponse(error)?.body.issues).toStrictEqual([
+      { path: ["title"], message: "Required", severity: "error", location: "title" },
+    ]);
   });
 
   test("leaves other errors to the caller", () => {
