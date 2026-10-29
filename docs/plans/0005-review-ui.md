@@ -163,6 +163,12 @@ The server task's first review uses `gpt-6-astra`, because the task handles file
   - Constraints: no code. No addresses, machine names, or tailnet names from a real setup. Check the Tailscale commands against Tailscale's current documentation. Depends on the `vd serve` task.
   - Ownership: `docs/phone-access.md`, `README.md`.
   - Acceptance: the coordinator follows the guide once with a real phone, as part of the phone checklist.
+- [ ] Paid confirm carries the approved cost
+  - Target: `apps/server/`, `apps/web/`
+  - Change: a confirmed paid generation carries the cost the user approved. The UI sends the characters and requests of the plan it showed, as `approved: { characters, requests }` next to `confirm: true`. The server plans again inside the mutation queue, and runs only if the new plan needs no more characters and no more requests than approved. Otherwise it generates nothing and returns 409 `confirm-required` with the new plan, so the UI shows the dialog again with the new numbers. A paid `confirm: true` without `approved` is refused the same way. Free providers and `dryRun` are unchanged. Update the API section of this plan and the doc comments in `apps/server/src/api.ts`.
+  - Constraints: no new dependencies. Never call a paid API in tests; use a paid fake provider. Does not touch `apps/cli/`.
+  - Ownership: `apps/server/`, `apps/web/`, and the API table in this plan.
+  - Acceptance: `npm test -w apps/server && npm test -w apps/web` pass, with tests that: an edit between the plan and the confirm that adds characters makes the confirm return 409 with the new plan and generate nothing; an edit that removes characters still runs; a confirm without `approved` returns 409; and the UI sends the numbers it showed and shows the dialog again on 409.
 
 Phone checklist for the human: open the URL from the guide on a phone over Tailscale, tap play and hear sound, see the image change, edit a line and save, change a take and regenerate with the mock, pick a library SFX, and lock and unlock the phone.
 
@@ -171,5 +177,4 @@ Phone checklist for the human: open the URL from the guide on a phone over Tails
 - Should the UI show a running total of paid characters used in this session?
 - Should `vd serve --host` print a QR code of the URL, so that the long token need not be typed? It needs a small dependency such as `qrcode-terminal`. The default is no QR in this plan.
 - Should paid generation be disabled entirely for requests coming through `--host`, leaving phones with the mock only? The default is to allow it with the confirm step.
-- Should the confirm step of a paid run carry the plan the user approved, such as a plan hash or a character ceiling, so that an edit made between the plan and the confirm (by an agent or another tab) cannot spend more than was shown? This changes the API and the web UI. The default is no check in this plan.
 - Should the Host allowlist accept a single trailing dot, such as `localhost.`? The default is to refuse it with 403, which is safe.
