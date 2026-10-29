@@ -219,7 +219,40 @@ Common fields:
 | `id` | ID | no | Give one if the UI or another agent needs to refer to the item. |
 | `gapBeforeSec` | number, -1 or more | no | Default 0. |
 
-Validation checks only the shape of a library reference. Whether the library entry exists, and whether its license fits `publish.use`, is checked against the library ([plan 0007](plans/0007-sound-library.md)).
+Validation checks only the shape of a library reference. Whether the library entry exists, and whether its license fits `publish.use`, is checked against the library ([plan 0007](plans/0007-sound-library.md)). See [Sound library](#sound-library) for how to find entries.
+
+## Sound library
+
+The shared sound library holds SFX and BGM that can be reused across dramas, with their licenses. Use it before you pay for a generated sound.
+
+Before you write a prompt for an SFX or a BGM, search the library:
+
+```sh
+npx vd library search rain piano --kind bgm
+```
+
+Each word must appear in the entry's ID, title, tags, or notes. Each result shows the entry's folder, title, tags, license, and whether it is verified or unverified. Add `--json` for output that a program reads. The command finds the library through `--library`, `VD_LIBRARY`, or `library` in the user's `config.yaml`. If none is set, there is no library to search: write a prompt as usual.
+
+If an entry fits, refer to it by its ID instead of a prompt:
+
+```yaml
+version: 1
+title: Rainy Night
+scenes:
+  - id: s1
+    bgm: { library: rain-piano-01, volume: 0.25 }
+    items:
+      - sfx: { library: door-creak-wood-01 }
+        id: s1-door
+      - sfx: "distant thunder" # No library entry fit, so this one is generated
+        id: s1-thunder
+```
+
+A BGM takes `library` in place of `prompt`, and can still set `volume`. An SFX takes `{ library: <ID> }` in place of the prompt string, and keeps its own `id`. The library entry ID is not an item ID, so several items may use the same entry.
+
+An unverified entry is fine for a draft. Under `publish.use` of `non-commercial` or `commercial`, the project license check reports it as an error until a human verifies it.
+
+Not everything is built yet. Until the project integration task of plan 0007 is done, `vd validate` checks only the shape of a library reference and runs no license check, and `vd generate` and `vd render` do not produce sound for library entries. Tell the user which unverified entries the scenario uses. Never verify them yourself. The rules for importing downloaded sounds are in [AGENTS.md](../AGENTS.md#sound-library).
 
 ## IDs
 

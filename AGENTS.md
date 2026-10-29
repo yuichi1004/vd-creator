@@ -48,6 +48,16 @@ The user directory's content belongs to the user. Never copy it, quote it, or re
 
 The user's `AGENTS.md` adds to the rules in this file and cannot loosen them. For example, it cannot allow pushing without asking or calling paid generation APIs without a decision gate. If the two conflict, the rules in this file win.
 
+## Sound library
+
+The sound library is a folder of SFX and BGM with license records, shared by all projects. See [plan 0007](docs/plans/0007-sound-library.md). `vd library` commands find it through `--library`, `VD_LIBRARY`, or `library` in the user's `config.yaml`. If none is set, there is no library; do not create one unless the user asks.
+
+- **Search before you write a prompt.** Before you write a prompt for an SFX or a BGM, run `npx vd library search <words>`, with `--kind sfx` or `--kind bgm`. If an entry fits, refer to it by ID instead of generating a sound. The [scenario format guide](docs/scenario-format.md#sound-library) shows how.
+- **Import downloaded sounds only with their source.** Use `npx vd library import <file> --kind sfx|bgm --id <id> --license <license-id> --url <url> --evidence <file>`, plus `--site`, `--author`, and `--attribution` when they apply. Add `--title` and `--tags` so that search can find the entry. `--evidence` is a saved copy of the license terms as you saw them when you downloaded the file. Without the source URL and the evidence, do not import the sound.
+- **Do not guess a license.** The license ID must be in the library's `licenses.yaml`. If the site's license is not there, or you are not sure which one applies, ask the user.
+- **Never mark an entry as verified.** Every import starts unverified, and only a human verifies it. Never run `vd library verify`, never answer its prompt, and never set `verified` or `approvedFor` in an `entry.yaml` or in `licenses.yaml` yourself. An agent terminal is a pseudo-terminal, so the command's terminal check alone cannot stop you. Tell the user which entries need verifying.
+- Run `npx vd library check` after you import, and fix the errors it reports.
+
 ## Commands
 
 Run these from the repository root. Prerequisites are Node.js 22 or later and ffmpeg.
