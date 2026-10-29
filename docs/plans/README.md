@@ -54,4 +54,8 @@ Each task must be self-contained: an agent working on it sees only the task, not
 | Plan | Title | Status |
 |---|---|---|
 | [0001](0001-agent-development-workflow.md) | Agent development workflow | Done |
-| [0002](0002-architecture.md) | Architecture and project skeleton | In progress |
+| [0002](0002-architecture.md) | Architecture and project skeleton | Done |
+| [0003](0003-scenario-format.md) | Scenario format | Draft |
+| [0004](0004-providers-and-generation.md) | Providers and generation pipeline | Draft |
+| [0005](0005-review-ui.md) | Review UI | Draft |
+| [0006](0006-rendering.md) | Rendering | Draft |

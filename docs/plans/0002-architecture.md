@@ -1,6 +1,6 @@
 # 0002: Architecture and project skeleton
 
-- Status: In progress
+- Status: Done
 - Date: 2026-10-29
 
 ## Background
@@ -146,7 +146,7 @@ This plan is carried out by a single implementer, as the 0001 pilot, with one Co
   - Constraints: keep the existing sections.
   - Ownership: `README.md`, `AGENTS.md`.
   - Acceptance: the documented commands match the root `package.json` scripts.
-- [ ] Write follow-up plans: scenario format (0003), providers and generation pipeline (0004), review UI (0005), and rendering (0006). The coordinator writes these after the skeleton is merged.
+- [x] Write follow-up plans: scenario format (0003), providers and generation pipeline (0004), review UI (0005), and rendering (0006). The coordinator writes these after the skeleton is merged.
 
 ## Open questions
 
