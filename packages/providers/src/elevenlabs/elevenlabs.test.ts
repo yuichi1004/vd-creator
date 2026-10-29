@@ -216,7 +216,7 @@ test("an HTTP error names the item, the status, and the API's message, but not t
   expect((error as Error).message).not.toContain(FAKE_KEY);
 });
 
-test("an HTTP error reads validation details and plain-text bodies", async () => {
+test("an HTTP error reads validation details and never shows a plain-text body", async () => {
   const validation = stubFetch(
     () =>
       new Response(
@@ -238,7 +238,7 @@ test("an HTTP error reads validation details and plain-text bodies", async () =>
       take: 1,
     }),
   ).rejects.toThrow(
-    'ElevenLabs music failed for take 1, prompt "jazz": HTTP 503: upstream timeout',
+    'ElevenLabs music failed for take 1, prompt "jazz": HTTP 503: response body not shown',
   );
 });
 
@@ -263,16 +263,67 @@ test("a network error names the item and carries no cause", async () => {
   expect((error as Error).cause).toBeUndefined();
 });
 
-/** Asserts that the fake key appears nowhere in the error: message, cause, stack, or JSON. */
-function expectNoKey(error: unknown): void {
+/**
+ * The ways a key could leak, written independently of the code under test: literal,
+ * percent-encoded, JSON-escaped, \\uXXXX-escaped, base64, and every 8-character piece of it.
+ */
+function leakForms(key: string): string[] {
+  const forms = (text: string) => [
+    text,
+    encodeURIComponent(text),
+    encodeURI(text),
+    JSON.stringify(text).slice(1, -1),
+    text
+      .split("")
+      .map((c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`)
+      .join(""),
+  ];
+  const all = [...forms(key), Buffer.from(key).toString("base64").replace(/=+$/, "")];
+  for (let i = 0; i + 8 <= key.length; i++) all.push(...forms(key.slice(i, i + 8)));
+  return all.map((f) => f.toLowerCase());
+}
+
+/** Everything an error exposes: message, stack, String(), JSON, and every own property. */
+function serialize(error: Error): string {
+  const props = Object.getOwnPropertyNames(error).map((name) =>
+    String((error as unknown as Record<string, unknown>)[name]),
+  );
+  return [
+    error.message,
+    String(error.stack),
+    String(error),
+    JSON.stringify(error),
+    JSON.stringify(Object.getOwnPropertyDescriptors(error)),
+    ...props,
+  ]
+    .join("\n")
+    .toLowerCase();
+}
+
+/** Asserts that the key, in none of its forms, appears in anything the error exposes. */
+function expectNoKey(error: unknown, key = FAKE_KEY): ElevenLabsError {
   expect(error).toBeInstanceOf(ElevenLabsError);
   const e = error as ElevenLabsError;
-  expect(e.message).not.toContain(FAKE_KEY);
-  expect(String(e.stack)).not.toContain(FAKE_KEY);
   expect(e.cause).toBeUndefined();
-  expect(JSON.stringify(e)).not.toContain(FAKE_KEY);
-  expect(JSON.stringify(Object.getOwnPropertyDescriptors(e))).not.toContain(FAKE_KEY);
-  expect(String(e)).not.toContain(FAKE_KEY);
+  const text = serialize(e);
+  for (const form of leakForms(key)) expect(text).not.toContain(form);
+  return e;
+}
+
+/** Runs one call with its own key and returns the error it throws. */
+async function failWith(
+  key: string,
+  response: () => Response | Promise<Response>,
+  call: (set: ReturnType<typeof createElevenLabsProviders>) => Promise<unknown>,
+): Promise<unknown> {
+  const stub = stubFetch(response);
+  const set = createElevenLabsProviders({ env: { ELEVENLABS_API_KEY: key }, fetch: stub.fetch });
+  return call(set).then(
+    () => {
+      throw new Error("expected the call to fail");
+    },
+    (e: unknown) => e,
+  );
 }
 
 test("a fetch rejection that contains the key is redacted", async () => {
@@ -334,6 +385,144 @@ test("a body read failure that contains the key is redacted", async () => {
   expect((error as Error).message).toBe(
     'ElevenLabs SFX failed for take 0, prompt "x": network error while reading the audio (request req-123): stream broke, key [redacted]',
   );
+});
+
+test("a percent-encoded key in the HTTP detail is redacted", async () => {
+  const key = "sk/test+key=abc 123/xyz";
+  for (const encoded of [encodeURIComponent(key), encodeURI(key)]) {
+    const error = await failWith(
+      key,
+      () => new Response(JSON.stringify({ detail: `bad key ${encoded}` }), { status: 401 }),
+      (set) => set.sfx.generate({ prompt: "x", take: 0 }),
+    );
+    const e = expectNoKey(error, key);
+    expect(e.message).toBe(
+      'ElevenLabs SFX failed for take 0, prompt "x": HTTP 401: bad key [redacted]',
+    );
+  }
+});
+
+test("a unicode-escaped key in a body is never shown", async () => {
+  const key = "sk_unicode_key_0123456789";
+  const escaped = key
+    .split("")
+    .map((c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`)
+    .join("");
+  // A fallback body of no known shape is not shown at all.
+  const fallback = await failWith(
+    key,
+    () => new Response(`{"error": "${escaped}"}`, { status: 500 }),
+    (set) => set.sfx.generate({ prompt: "x", take: 0 }),
+  );
+  expect(expectNoKey(fallback, key).message).toBe(
+    'ElevenLabs SFX failed for take 0, prompt "x": HTTP 500: response body not shown',
+  );
+  // A known shape is decoded by JSON.parse, then redacted.
+  const detail = await failWith(
+    key,
+    () => new Response(`{"detail": "key ${escaped}"}`, { status: 500 }),
+    (set) => set.sfx.generate({ prompt: "x", take: 0 }),
+  );
+  expect(expectNoKey(detail, key).message).toBe(
+    'ElevenLabs SFX failed for take 0, prompt "x": HTTP 500: key [redacted]',
+  );
+});
+
+test("a request-id equal to the key is dropped", async () => {
+  const key = "sk_9f3a7c1e5b2d8046aa71";
+  const error = await failWith(
+    key,
+    () => new Response("", { status: 500, headers: { "request-id": key } }),
+    (set) => set.music.generate({ prompt: "x", durationSec: 10, take: 0 }),
+  );
+  const e = expectNoKey(error, key);
+  expect(e.requestId).toBeUndefined();
+  expect(e.message).toBe(
+    'ElevenLabs music failed for take 0, prompt "x": HTTP 500: response body not shown',
+  );
+
+  // A request ID that is not a plain token is dropped too.
+  const odd = await failWith(
+    key,
+    () => new Response("", { status: 500, headers: { "request-id": "a b<c>" } }),
+    (set) => set.music.generate({ prompt: "x", durationSec: 10, take: 0 }),
+  );
+  expect((odd as ElevenLabsError).requestId).toBeUndefined();
+
+  // On success, the meta leaves it out as well.
+  const stub = stubFetch(
+    () => new Response(fakeMp3(2), { status: 200, headers: { "request-id": key } }),
+  );
+  const result = await new ElevenLabsSfxProvider({
+    env: { ELEVENLABS_API_KEY: key },
+    fetch: stub.fetch,
+  }).generate({ prompt: "x", take: 0 });
+  expect(result.meta).not.toHaveProperty("requestId");
+});
+
+test("a key after filler in the prompt is redacted before the label is truncated", async () => {
+  const key = "sk_filler_key_0123456789";
+  const prompt = `${"f".repeat(35)}${key}`;
+  const error = await failWith(
+    key,
+    () => new Response("", { status: 500 }),
+    (set) => set.sfx.generate({ prompt, take: 0 }),
+  );
+  const e = expectNoKey(error, key);
+  expect(e.message).not.toContain(key.slice(0, 5));
+  expect(e.message).toBe(
+    `ElevenLabs SFX failed for take 0, prompt "${"f".repeat(35)}[reda…": HTTP 500: response body not shown`,
+  );
+});
+
+test("a key with a quote and a backslash is redacted in the label and the detail", async () => {
+  const key = 'sk"quote\\back-key-0123';
+  const error = await failWith(
+    key,
+    () => new Response(JSON.stringify({ detail: { message: `echo ${key}` } }), { status: 400 }),
+    (set) => set.tts.synthesize({ text: `say ${key}`, voiceId: key, take: 0 }),
+  );
+  const e = expectNoKey(error, key);
+  expect(e.message).toBe(
+    'ElevenLabs TTS failed for voice "[redacted]", take 0, text "say [redacted]": HTTP 400: echo [redacted]',
+  );
+});
+
+test("a key split across the detail truncation boundary is redacted", async () => {
+  const key = "sk_boundary_key_0123456789";
+  // The detail limit is 300 characters, so a cut at 300 would split the key in half.
+  const message = `${"d".repeat(290)}${key}`;
+  const error = await failWith(
+    key,
+    () => new Response(JSON.stringify({ detail: message }), { status: 422 }),
+    (set) => set.sfx.generate({ prompt: "x", take: 0 }),
+  );
+  const e = expectNoKey(error, key);
+  expect(e.message).not.toContain(key.slice(0, 5));
+  expect(e.message).toContain(`${"d".repeat(290)}[redacted]`);
+});
+
+test("the final guard hides details when a piece of the key slips past redaction", async () => {
+  const key = "sk_fragment_key_0123456789";
+  // A 10-character piece is not the whole key, so redaction leaves it, but the guard catches it.
+  const error = await failWith(
+    key,
+    () =>
+      new Response(JSON.stringify({ detail: `partial ${key.slice(3, 13)}` }), {
+        status: 401,
+        headers: { "request-id": "req-ok" },
+      }),
+    (set) => set.sfx.generate({ prompt: "x", take: 2 }),
+  );
+  const e = expectNoKey(error, key);
+  expect(e.message).toBe(
+    'ElevenLabs SFX failed for take 2, prompt "x": HTTP error (HTTP 401): details hidden because they may contain the API key',
+  );
+  expect({ kind: e.kind, status: e.status, requestId: e.requestId }).toEqual({
+    kind: "sfx",
+    status: 401,
+    requestId: undefined,
+  });
 });
 
 test("bad audio in a successful response names the item", async () => {

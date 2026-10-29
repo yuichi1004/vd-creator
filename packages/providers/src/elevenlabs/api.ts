@@ -89,25 +89,26 @@ export function ttsText(req: TtsRequest): string {
 }
 
 /**
- * The human-readable message of an error response body. ElevenLabs sends
- * `{ detail: { message } }`, `{ detail: "..." }`, or, for validation errors, `{ detail: [{ msg }] }`.
+ * The human-readable message of an error response body, or undefined if the body has none of
+ * the known shapes: `{ detail: { message } }`, `{ detail: "..." }`, or, for validation errors,
+ * `{ detail: [{ msg }] }`. Raw bodies are never returned, because they are untrusted.
  */
-export function errorDetail(body: string): string {
+export function errorDetail(body: string): string | undefined {
+  let detail: unknown;
   try {
-    const detail = (JSON.parse(body) as { detail?: unknown }).detail;
-    if (typeof detail === "string") return detail;
-    if (Array.isArray(detail)) {
-      return detail
-        .map((d) =>
-          typeof d === "object" && d !== null && "msg" in d ? String(d.msg) : JSON.stringify(d),
-        )
-        .join("; ");
-    }
-    if (typeof detail === "object" && detail !== null && "message" in detail) {
-      return String(detail.message);
-    }
+    detail = (JSON.parse(body) as { detail?: unknown } | null)?.detail;
   } catch {
-    // Not JSON. Fall through to the raw body.
+    return undefined;
   }
-  return body;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    const messages = detail.flatMap((d) =>
+      typeof d === "object" && d !== null && "msg" in d && typeof d.msg === "string" ? [d.msg] : [],
+    );
+    return messages.length > 0 ? messages.join("; ") : undefined;
+  }
+  if (typeof detail === "object" && detail !== null && "message" in detail) {
+    return typeof detail.message === "string" ? detail.message : undefined;
+  }
+  return undefined;
 }
