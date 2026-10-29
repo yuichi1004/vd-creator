@@ -57,7 +57,7 @@ Each task must be self-contained: an agent working on it sees only the task, not
 | [0002](0002-architecture.md) | Architecture and project skeleton | Done |
 | [0003](0003-scenario-format.md) | Scenario format | Done |
 | [0004](0004-providers-and-generation.md) | Providers and generation pipeline | Done |
-| [0005](0005-review-ui.md) | Review UI | In progress |
+| [0005](0005-review-ui.md) | Review UI | Done |
 | [0006](0006-rendering.md) | Rendering | Done |
 | [0007](0007-sound-library.md) | Shared sound library and licenses | Done |
 | [0008](0008-user-config.md) | User config and private docs | Done |

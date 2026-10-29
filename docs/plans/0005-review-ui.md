@@ -1,6 +1,6 @@
 # 0005: Review UI
 
-- Status: In progress
+- Status: Done
 - Date: 2026-10-29
 - Depends on: [0003](0003-scenario-format.md), [0004](0004-providers-and-generation.md), [0007](0007-sound-library.md)
 
@@ -164,12 +164,13 @@ The server task's first review uses `gpt-6-astra`, because the task handles file
   - Constraints: no code. No addresses, machine names, or tailnet names from a real setup. Check the Tailscale commands against Tailscale's current documentation. Depends on the `vd serve` task.
   - Ownership: `docs/phone-access.md`, `README.md`.
   - Acceptance: the coordinator follows the guide once with a real phone, as part of the phone checklist.
-- [ ] Paid confirm carries the approved cost
+- [x] Paid confirm carries the approved cost
   - Target: `apps/server/`, `apps/web/`
   - Change: a confirmed paid generation carries the cost the user approved. The UI sends the characters and requests of the plan it showed, as `approved: { characters, requests }` next to `confirm: true`. The server plans again inside the mutation queue, and runs only if the new plan needs no more characters and no more requests than approved. Otherwise it generates nothing and returns 409 `confirm-required` with the new plan, so the UI shows the dialog again with the new numbers. A paid `confirm: true` without `approved` is refused the same way. Free providers and `dryRun` are unchanged. Update the API section of this plan and the doc comments in `apps/server/src/api.ts`.
   - Constraints: no new dependencies. Never call a paid API in tests; use a paid fake provider. Does not touch `apps/cli/`.
   - Ownership: `apps/server/`, `apps/web/`, and the API table in this plan.
   - Acceptance: `npm test -w apps/server && npm test -w apps/web` pass, with tests that: an edit between the plan and the confirm that adds characters makes the confirm return 409 with the new plan and generate nothing; an edit that removes characters still runs; a confirm without `approved` returns 409; and the UI sends the numbers it showed and shows the dialog again on 409.
+  - Review notes: two Codex reviews and one fix round. The first review found that a failed paid request let an identical later item call the provider again, and that a cached asset deleted after approval was generated beyond it. The fix adds an optional budget to `runGeneration` in `packages/core`, outside the original ownership with the coordinator's approval: each paid dispatch reserves its estimate from the approved numbers before it is sent, retries included, and an item over budget fails without a call. The second review found nothing. The phone checklist moved to plan 0009, because only the human has the phone.
 
 Phone checklist for the human: open the URL from the guide on a phone over Tailscale, tap play and hear sound, see the image change, edit a line and save, change a take and regenerate with the mock, pick a library SFX, and lock and unlock the phone.
 
