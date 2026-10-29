@@ -1,6 +1,6 @@
 # 0008: User config and private docs
 
-- Status: Draft
+- Status: In progress
 - Date: 2026-10-29
 - Depends on: none for the first task. The second task needs the CLI from [0003](0003-scenario-format.md).
 

@@ -1,6 +1,6 @@
 # 0003: Scenario format
 
-- Status: Draft
+- Status: In progress
 - Date: 2026-10-29
 
 ## Background

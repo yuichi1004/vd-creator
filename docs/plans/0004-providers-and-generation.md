@@ -1,6 +1,6 @@
 # 0004: Providers and generation pipeline
 
-- Status: Draft
+- Status: In progress
 - Date: 2026-10-29
 - Depends on: [0003](0003-scenario-format.md)
 

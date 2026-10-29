@@ -1,6 +1,6 @@
 # 0005: Review UI
 
-- Status: Draft
+- Status: Accepted
 - Date: 2026-10-29
 - Depends on: [0003](0003-scenario-format.md), [0004](0004-providers-and-generation.md), [0007](0007-sound-library.md)
 

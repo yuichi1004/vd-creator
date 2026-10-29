@@ -1,6 +1,6 @@
 # 0007: Shared sound library and licenses
 
-- Status: Draft
+- Status: Accepted
 - Date: 2026-10-29
 - Depends on: [0003](0003-scenario-format.md). The project integration task also needs [0004](0004-providers-and-generation.md).
 
