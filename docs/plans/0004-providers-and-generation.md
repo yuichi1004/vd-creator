@@ -110,7 +110,7 @@ The interfaces task is reviewed with `gpt-6-astra`, because it fixes a public in
   - Constraints: no new dependencies. No network access.
   - Ownership: `packages/providers/` except `src/elevenlabs/`.
   - Acceptance: `npm test -w packages/providers` passes, including: mock output is a valid WAV whose header duration matches `durationSec`, output is deterministic, and different takes give different bytes.
-- [ ] ElevenLabs provider
+- [x] ElevenLabs provider
   - Target: `packages/providers/src/elevenlabs/`
   - Change: TTS, SFX, and music providers over the REST API with `fetch`, with `paid: true`, `estimate`, and error messages that name the failing item. Register it in `createProviders` through a single exported function that the interfaces task leaves a hook for.
   - Constraints: no new dependencies. Never call the real API. Tests stub `fetch`. Depends on the interfaces task.
