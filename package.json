@@ -10,6 +10,7 @@
   "workspaces": [
     "packages/scenario",
     "packages/providers",
+    "packages/library",
     "packages/core",
     "packages/render",
     "apps/cli",
