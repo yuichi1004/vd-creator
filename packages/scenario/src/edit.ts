@@ -1,8 +1,32 @@
-import { Composer, CST, type Document, isMap, Parser, parse, type Scalar, stringify } from "yaml";
+import {
+  type Alias,
+  Composer,
+  CST,
+  type Document,
+  isAlias,
+  isMap,
+  isPair,
+  isScalar,
+  isSeq,
+  type Node,
+  Parser,
+  parse,
+  type Scalar,
+  stringify,
+  visit,
+  type YAMLMap,
+} from "yaml";
 import { ScenarioDocument } from "./document.js";
+import { ScenarioEditError } from "./errors.js";
 import { ITEM_KINDS, type ItemPatch } from "./schema.js";
-import { formatPath, type Issue } from "./validate.js";
+import { formatPath, type Issue, type IssuePath } from "./validate.js";
 
+// Policy: forms that people actually write must be editable. That covers block and flow
+// mappings, comments anywhere, quoted and block scalars, trailing commas, closing braces
+// on their own line, and empty values. Exotic forms, such as items, scenes, or item lists
+// defined by an alias, or collection tags, are refused cleanly: every failure throws a
+// `ScenarioEditError` whose issues say what is wrong and where, never a plain `Error`.
+//
 // Edits work on the CST (concrete syntax tree) of the source, which keeps every space,
 // newline, and comment. Values are changed on the tokens in place and the tree is
 // stringified again, so only the edited values change in the output.
@@ -10,50 +34,51 @@ import { formatPath, type Issue } from "./validate.js";
 type MapToken = CST.BlockMap | CST.FlowCollection;
 type Item = CST.CollectionItem;
 
-/** Thrown by `updateItem` when it refuses an edit. The document is left unchanged. */
-export class ScenarioEditError extends Error {
-  readonly issues: Issue[];
-
-  constructor(message: string, issues: Issue[] = [{ path: [], message, severity: "error" }]) {
-    super(message);
-    this.name = "ScenarioEditError";
-    this.issues = issues;
-  }
-}
-
 /**
  * Sets or removes fields of the scene item with the given ID, in place. A value of
  * `undefined` removes the key. The patch is applied all or nothing: if any field
- * cannot be applied, the document is left unchanged and an error is thrown.
+ * cannot be applied, the document is left unchanged.
  *
- * Throws if no item has the ID, if the patch removes the item's kind key or `id`, or
- * if it renames the item to an ID that another scene or item already uses. As a last
- * check, the edited text is parsed and validated again. A `ScenarioEditError` is thrown
- * if the item would not read back as patched, or if a valid scenario would become
- * invalid, for example through an unknown speaker or an unresolved alias.
+ * Throws a `ScenarioEditError` if no item has the ID, if the patch removes the item's
+ * kind key or `id`, if it renames the item to an ID that another scene or item already
+ * uses, or if the item cannot be edited in place. As a last check, the edited text is
+ * parsed and validated again, and the edit is refused if the item would not read back
+ * as patched or if a valid scenario would become invalid.
  */
 export function updateItem(doc: ScenarioDocument, id: string, patch: ItemPatch): void {
-  for (const [key, value] of Object.entries(patch)) {
-    if (value === undefined && (key === "id" || (ITEM_KINDS as readonly string[]).includes(key))) {
-      throw new Error(`Cannot remove "${key}" from an item`);
-    }
-  }
-
   const tokens = Array.from(new Parser().parse(doc.text));
   const composed = Array.from(new Composer({ keepSourceTokens: true }).compose(tokens));
   const document = composed[0];
-  const before = document && composed.every((d) => d.errors.length === 0) && toData(document);
-  if (!before) throw new Error("Cannot edit a document with YAML errors");
-  // IDs are compared on the resolved data, so that aliased IDs count like any other.
-  const target = findItem(before, id);
-  if (!target) throw new Error(`No item with id "${id}"`);
-  const { path, current, otherIds } = target;
-  if (typeof patch.id === "string" && patch.id !== id && otherIds.has(patch.id)) {
-    throw new Error(`Cannot rename "${id}" to "${patch.id}": the id is already used`);
+  const yamlErrors = composed.flatMap((d) => d.errors);
+  if (!document || yamlErrors.length > 0) {
+    throw new ScenarioEditError(
+      "Cannot edit a document with YAML errors",
+      yamlErrors.map((e) => ({ path: [], message: e.message, severity: "error" })),
+    );
   }
-  const item = document.getIn(path, true);
-  const token = isMap(item) ? item.srcToken : undefined;
-  if (!isMapToken(token)) throw new Error(`Item "${id}" is not a mapping`);
+  const before = toData(document);
+  if (!before.ok) {
+    throw new ScenarioEditError(
+      "Cannot edit a document whose aliases do not resolve",
+      before.issues,
+    );
+  }
+  // IDs are compared on the resolved data, so that aliased IDs count like any other.
+  const target = findItem(before.data, id);
+  if (!target) throw new ScenarioEditError(`No item with id "${id}"`);
+  const { path, current, otherIds } = target;
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined && (key === "id" || (ITEM_KINDS as readonly string[]).includes(key))) {
+      throw refusal(id, [
+        { path: [...path, key], message: `Cannot remove "${key}" from an item`, severity: "error" },
+      ]);
+    }
+  }
+  if (typeof patch.id === "string" && patch.id !== id && otherIds.has(patch.id)) {
+    const message = `Cannot rename "${id}" to "${patch.id}": the id is already used`;
+    throw new ScenarioEditError(message, [{ path: [...path, "id"], message, severity: "error" }]);
+  }
+  const token = itemToken(document, path, id);
 
   const expected: Record<string, unknown> = { ...current };
   for (const [key, value] of Object.entries(patch)) {
@@ -65,8 +90,40 @@ export function updateItem(doc: ScenarioDocument, id: string, patch: ItemPatch):
 
   let text = tokens.map((t) => CST.stringify(t)).join("");
   if (usesCrlf(doc.text)) text = text.replace(/\r?\n/g, "\r\n");
-  checkEdit(doc, text, path, expected);
+  checkEdit(doc, text, id, path, expected);
   doc.setText(text);
+}
+
+function refusal(id: string, issues: Issue[], reason = ""): ScenarioEditError {
+  const causes = issues.map((i) => `${formatPath(i.path)}: ${i.message}`).join("; ");
+  return new ScenarioEditError(`Refusing the edit of item "${id}"${reason}: ${causes}`, issues);
+}
+
+// Returns the CST of the item. Refuses an item that is itself an alias, or that sits in
+// a scene or list that is an alias, since editing it would edit the anchored original.
+function itemToken(document: Document, path: IssuePath, id: string): MapToken {
+  const [, sceneIndex, , itemIndex] = path as [string, number, string, number];
+  const aliased = (what: string, alias: Alias): ScenarioEditError =>
+    refusal(id, [
+      {
+        path,
+        message: `Item "${id}" is defined by an alias: ${what} is *${alias.source}. Edit the anchored original instead`,
+        severity: "error",
+      },
+    ]);
+  const scenes = isMap(document.contents) ? document.contents.get("scenes", true) : undefined;
+  if (isAlias(scenes)) throw aliased("the scene list", scenes);
+  const scene = isSeq(scenes) ? scenes.items[sceneIndex] : undefined;
+  if (isAlias(scene)) throw aliased("its scene", scene);
+  const items = isMap(scene) ? scene.get("items", true) : undefined;
+  if (isAlias(items)) throw aliased("its scene's item list", items);
+  const item = isSeq(items) ? items.items[itemIndex] : undefined;
+  if (isAlias(item)) throw aliased("the item", item);
+  const token = isMap(item) ? (item as YAMLMap).srcToken : undefined;
+  if (!isMapToken(token)) {
+    throw refusal(id, [{ path, message: `Item "${id}" is not a mapping`, severity: "error" }]);
+  }
+  return token;
 }
 
 // Parses and validates the edited text again. Refuses text that does not parse, an item
@@ -74,50 +131,112 @@ export function updateItem(doc: ScenarioDocument, id: string, patch: ItemPatch):
 function checkEdit(
   doc: ScenarioDocument,
   text: string,
-  path: (string | number)[],
+  id: string,
+  path: IssuePath,
   expected: Record<string, unknown>,
 ): void {
   const next = new ScenarioDocument(text);
   const yamlErrors = next.yamlIssues().filter((i) => i.severity === "error");
   if (yamlErrors.length > 0) {
-    throw new ScenarioEditError(`Refusing an edit that breaks the YAML: ${yamlErrors[0]?.message}`);
+    throw new ScenarioEditError(
+      `Refusing an edit that breaks the YAML: ${yamlErrors[0]?.message}`,
+      yamlErrors,
+    );
   }
   const data = toData(next.document);
-  const actual = data && getPath(data, path);
-  if (!actual || canonical(actual) !== canonical(expected)) {
-    const message =
-      "Refusing an edit that would not read back as requested, for example because an alias depends on the edited value";
-    throw new ScenarioEditError(message, [{ path, message, severity: "error" }]);
+  if (!data.ok) throw refusal(id, data.issues, ", which would break an alias");
+  const actual = getPath(data.data, path);
+  const mismatches = actual ? readBackIssues(next.document, path, actual, expected) : [];
+  if (!actual) {
+    mismatches.push({
+      path,
+      message: `Item "${id}" would no longer be a mapping`,
+      severity: "error",
+    });
+  }
+  if (mismatches.length > 0) {
+    throw refusal(id, mismatches, ", which would not read back as patched");
   }
   const errorsOf = (issues: Issue[]) => issues.filter((i) => i.severity === "error");
   if (errorsOf(doc.validate().issues).length > 0) return;
   const errors = errorsOf(next.validate().issues);
-  if (errors.length > 0) {
-    throw new ScenarioEditError(
-      `Refusing an edit that makes the scenario invalid: ${errors
-        .map((i) => `${formatPath(i.path)}: ${i.message}`)
-        .join("; ")}`,
-      errors,
-    );
+  if (errors.length > 0) throw refusal(id, errors, ", which makes the scenario invalid");
+}
+
+// One issue per field that differs from the patched value, naming the anchor when the
+// field is an alias whose anchored value the edit changed.
+function readBackIssues(
+  document: Document,
+  path: IssuePath,
+  actual: Record<string, unknown>,
+  expected: Record<string, unknown>,
+): Issue[] {
+  const keys = new Set([...Object.keys(expected), ...Object.keys(actual)]);
+  return [...keys]
+    .filter((key) => canonical(actual[key]) !== canonical(expected[key]))
+    .map((key) => {
+      const node = document.getIn([...path, key], true);
+      const readBack = `would read back as ${show(actual[key])} instead of ${show(expected[key])}`;
+      const message = isAlias(node)
+        ? `"${key}" refers to anchor &${node.source}, which this edit changes; it ${readBack}`
+        : `"${key}" ${readBack}`;
+      return { path: [...path, key], message, severity: "error" as const };
+    });
+}
+
+function show(value: unknown): string {
+  return value === undefined ? "missing" : JSON.stringify(value);
+}
+
+// Plain data of the document with aliases resolved. If an alias does not resolve, the
+// issues name the anchor and the field that refers to it.
+function toData(document: Document): { ok: true; data: unknown } | { ok: false; issues: Issue[] } {
+  try {
+    return { ok: true, data: document.toJS() ?? null };
+  } catch (e) {
+    const issues = unresolvedAliases(document);
+    if (issues.length > 0) return { ok: false, issues };
+    const message = e instanceof Error ? e.message : String(e);
+    return { ok: false, issues: [{ path: [], message, severity: "error" }] };
   }
 }
 
-// Plain data of the document with aliases resolved, or undefined if they do not resolve.
-function toData(document: Document): unknown {
-  try {
-    return document.toJS() ?? null;
-  } catch {
-    return undefined;
+function unresolvedAliases(document: Document): Issue[] {
+  const issues: Issue[] = [];
+  visit(document, {
+    Alias(_, node, ancestors) {
+      if (node.resolve(document) !== undefined) return;
+      const path = dataPath([...ancestors, node]);
+      issues.push({
+        path,
+        message: `${formatPath(path)} refers to anchor &${node.source}, which would be removed or renamed`,
+        severity: "error",
+      });
+    },
+  });
+  return issues;
+}
+
+// The data path of the last node in a chain of ancestors from `visit`.
+function dataPath(chain: readonly unknown[]): IssuePath {
+  const path: IssuePath = [];
+  for (let i = 0; i + 1 < chain.length; i++) {
+    const parent = chain[i];
+    const child = chain[i + 1];
+    if (isSeq(parent)) path.push(parent.items.indexOf(child as Node));
+    else if (isPair(parent) && child === parent.value) {
+      const key = parent.key;
+      path.push(isScalar(key) ? String(key.value) : String(key));
+    }
   }
+  return path;
 }
 
 function findItem(
   data: unknown,
   id: string,
-):
-  | { path: (string | number)[]; current: Record<string, unknown>; otherIds: Set<unknown> }
-  | undefined {
-  let found: { path: (string | number)[]; current: Record<string, unknown> } | undefined;
+): { path: IssuePath; current: Record<string, unknown>; otherIds: Set<unknown> } | undefined {
+  let found: { path: IssuePath; current: Record<string, unknown> } | undefined;
   const otherIds = new Set<unknown>();
   const scenes = isRecord(data) ? data.scenes : undefined;
   for (const [i, scene] of (Array.isArray(scenes) ? scenes : []).entries()) {
@@ -133,13 +252,14 @@ function findItem(
   return found && { ...found, otherIds };
 }
 
-function getPath(data: unknown, path: (string | number)[]): Record<string, unknown> | undefined {
+function getPath(data: unknown, path: IssuePath): Record<string, unknown> | undefined {
   let value = data;
-  for (const key of path)
+  for (const key of path) {
     value =
       isRecord(value) || Array.isArray(value)
         ? (value as Record<string | number, unknown>)[key]
         : undefined;
+  }
   return isRecord(value) ? value : undefined;
 }
 
@@ -157,17 +277,16 @@ function setField(map: MapToken, key: string, value: unknown): void {
   } else if (index === -1) {
     addItem(map, key, value);
   } else {
-    setValue(map.items[index] as Item, value, map.type === "flow-collection");
+    setValue(map, index, value);
   }
 }
 
-function setValue(item: Item, value: unknown, inFlow: boolean): void {
+function setValue(map: MapToken, index: number, value: unknown): void {
+  const item = map.items[index] as Item;
+  const inFlow = map.type === "flow-collection";
   const token = item.value;
   if (!token) {
-    // A key without a value, such as `direction:`.
-    const newline = item.sep?.some((t) => t.type === "newline");
-    item.sep = [colon(), space(1)];
-    item.value = valueToken(value, 0, inFlow, newline ? [newlineToken()] : []);
+    fillEmpty(map, index, value);
     return;
   }
   if (isRecord(value)) {
@@ -196,12 +315,40 @@ function setValue(item: Item, value: unknown, inFlow: boolean): void {
   }
 }
 
+// Fills a key without a value, such as `direction: # comment`. The separator holds the
+// anchor, tag, and comment of the key line, then the line break and whatever comes
+// before the next key, including its indentation. The props stay before the new value,
+// the comment and line break go after it, and the rest moves to the next key.
+function fillEmpty(map: MapToken, index: number, value: unknown): void {
+  const item = map.items[index] as Item;
+  const sep = item.sep ?? [];
+  const newline = sep.findIndex((t) => t.type === "newline");
+  const head = newline === -1 ? sep : sep.slice(0, newline);
+  const [lineBreak, ...rest] = newline === -1 ? [] : sep.slice(newline);
+  const props = head.filter((t) => t.type === "anchor" || t.type === "tag");
+  item.sep = [colon(), space(1), ...props.flatMap((t) => [t, space(1)])];
+  const end = head.filter((t) => t.type === "comment").flatMap((t) => [space(1), t]);
+  if (lineBreak) end.push(lineBreak);
+  const next = map.items[index + 1];
+  if (next) next.start = [...rest, ...next.start];
+  else end.push(...rest);
+  item.value = valueToken(value, map.indent, map.type === "flow-collection", end);
+}
+
 // The yaml stringifier folds line breaks in double-quoted strings over several lines.
 // JSON strings are valid YAML double-quoted scalars and keep the value on one line.
 function escapeDoubleQuoted(token: CST.Token, value: unknown): void {
   if (token.type === "double-quoted-scalar" && typeof value === "string") {
     token.source = JSON.stringify(value);
   }
+}
+
+// The entry without key or value at the end of a flow map, if any. It holds a trailing
+// comma, as in `{ a: 1, }`, or the indentation of a closing brace on its own line.
+function flowTail(map: CST.FlowCollection): { tail: Item | undefined; comma: boolean } {
+  const last = map.items.at(-1);
+  const tail = last && !last.key && !last.sep && !last.value ? last : undefined;
+  return { tail, comma: tail?.start.some((t) => t.type === "comma") ?? false };
 }
 
 function addItem(map: MapToken, key: string, value: unknown): void {
@@ -217,14 +364,14 @@ function addItem(map: MapToken, key: string, value: unknown): void {
       value: valueToken(value, map.indent, false, [newlineToken()]),
     });
   } else {
-    // A trailing comma, as in `{ a: 1, }`, is an item without key or value. The new pair
-    // goes before it. Otherwise, move the whitespace and comments before the closing
-    // brace after the new pair.
-    const last = map.items.at(-1);
-    const sentinel = last && !last.key && !last.sep && !last.value;
-    const previous = sentinel ? map.items.at(-2) : last;
-    const trailing = !sentinel && previous?.value ? takeTrailing(previous.value) : [];
-    map.items.splice(sentinel ? -1 : map.items.length, 0, {
+    // The new pair goes before the tail entry. Without a trailing comma, what follows
+    // the last value, such as a comment or the line break before the closing brace,
+    // moves after the new pair.
+    const { tail, comma: trailingComma } = flowTail(map);
+    const pairs = tail ? map.items.length - 1 : map.items.length;
+    const previous = map.items[pairs - 1];
+    const trailing = !trailingComma && previous?.value ? takeTrailing(previous.value) : [];
+    map.items.splice(pairs, 0, {
       start: previous ? [comma(), space(1)] : [space(1)],
       key: keyToken,
       sep: [colon(), space(1)],
@@ -246,12 +393,14 @@ function removeItem(map: MapToken, index: number): void {
     }
     return;
   }
-  if (index === 0 && next) {
+  const { tail, comma: trailingComma } = flowTail(map);
+  if (index === 0 && next && next !== tail) {
     next.start = next.start.filter((t) => t.type !== "comma");
     if (next.start[0]?.type !== "space") next.start.unshift(...removed.start);
   }
-  const last = map.items.at(-1);
-  if (!next && last?.value && removed.value) {
+  // When the last pair goes, what followed its value moves to the new last pair.
+  const last = map.items[tail ? map.items.length - 2 : map.items.length - 1];
+  if ((!next || (next === tail && !trailingComma)) && last?.value && removed.value) {
     putTrailing(last.value, takeTrailing(removed.value));
   }
 }
@@ -278,7 +427,9 @@ function valueToken(value: unknown, indent: number, inFlow: boolean, end: CST.So
     const source = stringify(value, { collectionStyle: "flow", lineWidth: 0 }).trimEnd();
     const parsed = Array.from(new Parser().parse(source)).find((t) => t.type === "document");
     const token = parsed?.value;
-    if (token?.type !== "flow-collection") throw new Error("Cannot format the value");
+    if (token?.type !== "flow-collection") {
+      throw new ScenarioEditError(`Cannot write the value ${JSON.stringify(value)}`);
+    }
     token.end = [...token.end.filter((t) => t.type.startsWith("flow-")), ...end];
     return token;
   }

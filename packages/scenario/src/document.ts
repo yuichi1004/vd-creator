@@ -2,26 +2,11 @@ import { randomUUID } from "node:crypto";
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { type Document, parseDocument } from "yaml";
-import { formatPath, type Issue, type ValidationResult, validateScenarioData } from "./validate.js";
+import { ScenarioEditError, ScenarioValidationError } from "./errors.js";
+import { type Issue, type ValidationResult, validateScenarioData } from "./validate.js";
 
 /** File name of the scenario inside a project folder. */
 export const SCENARIO_FILE = "scenario.yaml";
-
-/** Thrown by `saveScenario` when the document has errors. */
-export class ScenarioValidationError extends Error {
-  readonly issues: Issue[];
-
-  constructor(issues: Issue[]) {
-    const errors = issues.filter((i) => i.severity === "error");
-    super(
-      `Refusing to save an invalid scenario: ${errors
-        .map((i) => `${formatPath(i.path)}: ${i.message}`)
-        .join("; ")}`,
-    );
-    this.name = "ScenarioValidationError";
-    this.issues = issues;
-  }
-}
 
 /**
  * A scenario.yaml file as YAML source. Edit helpers such as `updateItem` change the
@@ -47,11 +32,19 @@ export class ScenarioDocument {
     return this.#doc;
   }
 
-  /** Replaces the source. Throws, keeping the old source, if the new one is not valid YAML. */
+  /**
+   * Replaces the source. Throws a `ScenarioEditError`, keeping the old source, if the new
+   * one is not valid YAML.
+   */
   setText(text: string): void {
     const doc = parseDocument(text);
     if (doc.errors.length > 0) {
-      throw new Error(`Invalid YAML: ${doc.errors[0]?.message}`);
+      const issues = doc.errors.map((e) => ({
+        path: [],
+        message: e.message,
+        severity: "error" as const,
+      }));
+      throw new ScenarioEditError(`Invalid YAML: ${doc.errors[0]?.message}`, issues);
     }
     this.#text = text;
     this.#doc = doc;

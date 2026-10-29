@@ -306,3 +306,180 @@ describe("flow mappings with a trailing comma", () => {
     expect(doc.text).toBe(HEAD + items);
   });
 });
+
+describe("flow mappings with the closing brace on its own line", () => {
+  test("adds and removes a key", () => {
+    const items = "      - { pause: 1, id: p\n        }\n";
+    const { doc, items: parsed } = edit(items, "p", { gapBeforeSec: 0.5 });
+    expect(doc.text).toBe(`${HEAD}      - { pause: 1, id: p, gapBeforeSec: 0.5\n        }\n`);
+    expect(parsed[0]).toMatchObject({ pause: 1, id: "p", gapBeforeSec: 0.5 });
+    updateItem(doc, "p", { gapBeforeSec: undefined });
+    expect(doc.text).toBe(HEAD + items);
+  });
+
+  test("keeps a comment after the last field", () => {
+    const items = "      - { pause: 1, id: p # c\n        }\n";
+    const { doc } = edit(items, "p", { gapBeforeSec: 0.5 });
+    expect(doc.text).toBe(`${HEAD}      - { pause: 1, id: p, gapBeforeSec: 0.5 # c\n        }\n`);
+    updateItem(doc, "p", { gapBeforeSec: undefined });
+    expect(doc.text).toBe(HEAD + items);
+  });
+});
+
+describe("empty values", () => {
+  test("fills an empty last field and keeps its comment", () => {
+    const items =
+      "      - line: hi\n        id: l\n        speaker: a\n        direction: # keep this\n";
+    const { doc, items: parsed } = edit(items, "l", { direction: "soft" });
+    expect(doc.text).toBe(
+      `${HEAD}      - line: hi\n        id: l\n        speaker: a\n        direction: soft # keep this\n`,
+    );
+    expect(parsed[0]).toMatchObject({ direction: "soft" });
+  });
+
+  test("fills an empty field followed by another field and keeps its comment", () => {
+    const items =
+      "      - line: hi\n        id: l\n        direction: # keep this\n        speaker: a\n";
+    const { doc } = edit(items, "l", { direction: "soft" });
+    expect(doc.text).toBe(
+      `${HEAD}      - line: hi\n        id: l\n        direction: soft # keep this\n        speaker: a\n`,
+    );
+  });
+
+  test("fills an empty field without a comment followed by another field", () => {
+    const items = "      - line: hi\n        id: l\n        direction:\n        speaker: a\n";
+    const { doc } = edit(items, "l", { direction: "soft" });
+    expect(doc.text).toBe(
+      `${HEAD}      - line: hi\n        id: l\n        direction: soft\n        speaker: a\n`,
+    );
+  });
+
+  test("fills an empty field followed by a comment line", () => {
+    const items =
+      "      - line: hi\n        id: l\n        direction: # keep this\n        # note\n        speaker: a\n";
+    const { doc } = edit(items, "l", { direction: "soft" });
+    expect(doc.text).toBe(
+      `${HEAD}      - line: hi\n        id: l\n        direction: soft # keep this\n        # note\n        speaker: a\n`,
+    );
+  });
+});
+
+describe("items defined by an alias", () => {
+  const refused = (text: string, path: (string | number)[]) => {
+    const doc = new ScenarioDocument(text);
+    let error: unknown;
+    try {
+      updateItem(doc, "p", { pause: 2 });
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toBeInstanceOf(ScenarioEditError);
+    expect((error as ScenarioEditError).issues).toEqual([
+      expect.objectContaining({
+        path,
+        message: expect.stringMatching(/^Item "p" is defined by an alias/),
+      }),
+    ]);
+    expect(doc.text).toBe(text);
+  };
+  const top = "version: 1\ntitle: T\n";
+
+  test("refuses an item that is an alias", () => {
+    refused(`${top}defs: &item { pause: 1, id: p }\nscenes:\n  - id: s\n    items: [*item]\n`, [
+      "scenes",
+      0,
+      "items",
+      0,
+    ]);
+  });
+
+  test("refuses an item in a scene that is an alias", () => {
+    refused(`${top}defs: &scene { id: s, items: [{ pause: 1, id: p }] }\nscenes:\n  - *scene\n`, [
+      "scenes",
+      0,
+      "items",
+      0,
+    ]);
+  });
+
+  test("refuses an item in an item list that is an alias", () => {
+    refused(`${top}defs: &list [{ pause: 1, id: p }]\nscenes:\n  - id: s\n    items: *list\n`, [
+      "scenes",
+      0,
+      "items",
+      0,
+    ]);
+  });
+
+  test("refuses an item in a scene list that is an alias", () => {
+    refused(`${top}defs: &scenes [{ id: s, items: [{ pause: 1, id: p }] }]\nscenes: *scenes\n`, [
+      "scenes",
+      0,
+      "items",
+      0,
+    ]);
+  });
+});
+
+describe("causes of a refused edit", () => {
+  const issuesOf = (doc: ScenarioDocument, id: string, patch: ItemPatch) => {
+    try {
+      updateItem(doc, id, patch);
+    } catch (e) {
+      expect(e).toBeInstanceOf(ScenarioEditError);
+      return (e as ScenarioEditError).issues;
+    }
+    throw new Error("expected the edit to be refused");
+  };
+
+  test("names the anchor and the field that refers to it when the anchor would go", () => {
+    const items =
+      "      - line: hi\n        id: l\n        speaker: a\n        direction: &d soft\n" +
+      "      - line: ho\n        id: m\n        speaker: a\n        direction: *d\n";
+    const issues = issuesOf(scenario(items), "l", { direction: undefined });
+    expect(issues).toContainEqual(
+      expect.objectContaining({
+        path: ["scenes", 0, "items", 1, "direction"],
+        message: expect.stringContaining("&d"),
+      }),
+    );
+  });
+
+  test("names the field that would read back differently and its anchor", () => {
+    const items = "      - line: &ident x\n        id: *ident\n        speaker: a\n";
+    const issues = issuesOf(scenario(items), "x", { line: "changed" });
+    expect(issues).toEqual([
+      expect.objectContaining({
+        path: ["scenes", 0, "items", 0, "id"],
+        message: expect.stringMatching(/"id" refers to anchor &ident.*"changed" instead of "x"/),
+      }),
+    ]);
+  });
+});
+
+describe("every refusal is a ScenarioEditError", () => {
+  const items =
+    "      - line: hi\n        id: l\n        speaker: a\n      - { pause: 1, id: p }\n";
+
+  test.each<[string, string, ItemPatch]>([
+    ["an unknown id", "nope", { take: 1 }],
+    ["removing the kind key", "l", { line: undefined }],
+    ["removing the id", "l", { id: undefined }],
+    ["renaming to a used id", "l", { id: "p" }],
+  ])("%s", (_, id, patch) => {
+    const doc = scenario(items);
+    expect(() => updateItem(doc, id, patch)).toThrow(ScenarioEditError);
+    expect(doc.text).toBe(HEAD + items);
+  });
+
+  test("a document with YAML errors", () => {
+    const doc = new ScenarioDocument("scenes: [\n");
+    expect(() => updateItem(doc, "p", { take: 1 })).toThrow(ScenarioEditError);
+  });
+
+  test("setText with invalid YAML", () => {
+    const doc = scenario(items);
+    expect(() => doc.setText("scenes: [\n")).toThrow(ScenarioEditError);
+    expect(doc.text).toBe(HEAD + items);
+  });
+});

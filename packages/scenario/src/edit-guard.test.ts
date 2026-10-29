@@ -36,7 +36,9 @@ describe("updateItem output guard", () => {
   test("refuses output where the item does not read back as patched", () => {
     corruptOutput((text) => text.replace("take: 1", "take: 2"));
     const doc = new ScenarioDocument(TEXT);
-    expect(() => updateItem(doc, "l", { take: 1 })).toThrow(/would not read back/);
+    expect(() => updateItem(doc, "l", { take: 1 })).toThrow(
+      /would not read back as patched: .*"take" would read back as 2 instead of 1/,
+    );
     expect(doc.text).toBe(TEXT);
   });
 
@@ -51,7 +53,7 @@ describe("updateItem output guard", () => {
       error = e;
     }
     expect(error).toBeInstanceOf(ScenarioEditError);
-    expect((error as ScenarioEditError).message).toMatch(/makes the scenario invalid/);
+    expect((error as ScenarioEditError).message).toMatch(/makes the scenario invalid: .*speaker/);
     expect((error as ScenarioEditError).issues).toContainEqual(
       expect.objectContaining({ path: ["scenes", 0, "items", 0, "speaker"] }),
     );
