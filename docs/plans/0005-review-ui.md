@@ -129,7 +129,7 @@ New runtime dependencies, named here: `hono`, `@hono/node-server`, `react`, `rea
 
 The server task is reviewed with `gpt-6-astra`, because it handles file access, the access token, and the paid-generation gate. The others use the default reviewer.
 
-- [ ] Dependencies, Vite setup, and API types
+- [x] Dependencies, Vite setup, and API types
   - Target: `apps/server/package.json`, `apps/web/package.json`, `apps/web` build config, root `package-lock.json`, `apps/server/src/api.ts`
   - Change: add every dependency listed in this plan, switch the `apps/web` build to Vite with a placeholder page, and write the request and response types for the API above, exported from `@vd-creator/server`. Doing all dependency changes here means the parallel tasks after it never touch the lockfile.
   - Constraints: types only in `api.ts`, no runtime code. The viewport meta tag goes into `index.html`. Depends on 0003, 0004, and the 0007 library package being done.
