@@ -11,7 +11,7 @@ import { LibraryPanel, type LibraryTarget } from "./components/LibraryPanel.js";
 import { LineEditor } from "./components/LineEditor.js";
 import { PlayerControls } from "./components/PlayerControls.js";
 import { SceneList } from "./components/SceneList.js";
-import { runSummary, startGeneration } from "./generation.js";
+import { nothingSummary, runSummary, startGeneration } from "./generation.js";
 import { placeIssues } from "./issues.js";
 import { LiveUpdates } from "./live.js";
 import { imageAt, itemAt, startOf } from "./playback.js";
@@ -194,6 +194,7 @@ export function App() {
           return;
         }
         if (start.kind === "nothing") {
+          setNotice({ text: nothingSummary(start.plan), kind: "info" });
           await reload();
           setBusy(id, false);
           return;

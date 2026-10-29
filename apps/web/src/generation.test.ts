@@ -7,7 +7,7 @@ import type {
 } from "@vd-creator/server";
 import { describe, expect, test } from "vitest";
 import { ApiClient } from "./client.js";
-import { confirmLabel, startGeneration } from "./generation.js";
+import { confirmLabel, nothingSummary, startGeneration } from "./generation.js";
 
 const PAID: ProviderInfo = { id: "elevenlabs", paid: true };
 const FREE: ProviderInfo = { id: "mock", paid: false };
@@ -136,4 +136,31 @@ test("other errors are passed on", async () => {
     Response.json({ error: "server-error", message: "Generation failed." }, { status: 500 }),
   );
   await expect(startGeneration(client, FREE, ["l1"])).rejects.toThrow("Generation failed.");
+});
+
+test("the nothing-to-generate message names unresolved and invalid items", () => {
+  const response = (items: GeneratePlanResponse["plan"]["items"]): GeneratePlanResponse => ({
+    kind: "plan",
+    provider: PAID,
+    plan: { items, cost: { characters: 0, requests: 0 } },
+  });
+  const cached = {
+    id: "l1",
+    kind: "line",
+    sceneId: "s1",
+    status: "cached",
+    file: "a.mp3",
+    durationSec: 1,
+  } as const;
+  expect(nothingSummary(response([cached]))).toBe("Nothing to generate.");
+  expect(
+    nothingSummary(
+      response([
+        cached,
+        { id: "x1", kind: "sfx", sceneId: "s1", status: "unresolved", reason: "r" },
+        { id: "x2", kind: "sfx", sceneId: "s1", status: "unresolved", reason: "r" },
+        { id: "l2", kind: "line", sceneId: "s1", status: "invalid", reason: "r" },
+      ]),
+    ),
+  ).toBe("Nothing to generate: 2 unresolved, 1 invalid.");
 });

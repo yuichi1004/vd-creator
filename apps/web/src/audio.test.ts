@@ -249,6 +249,35 @@ describe("player", () => {
 });
 
 describe("stop and retry", () => {
+  test("a load pending at stop is not reused, and its late failure does not silence the file", async () => {
+    const context = new FakeContext();
+    let rejectFirst: (error: Error) => void = () => undefined;
+    const loaded: string[] = [];
+    const player = new Player({
+      unlock: new AudioUnlock(() => context),
+      load: (file) => {
+        loaded.push(file);
+        if (file === "l1.mp3" && loaded.filter((f) => f === file).length === 1) {
+          return new Promise<ArrayBuffer>((_resolve, reject) => {
+            rejectFirst = reject;
+          });
+        }
+        return Promise.resolve(new TextEncoder().encode(file).buffer as ArrayBuffer);
+      },
+      setInterval: () => 1,
+      clearInterval: () => undefined,
+    });
+    player.setTimeline(timeline);
+    await player.play(0);
+    await flush();
+    player.stop();
+    await player.play(0);
+    rejectFirst(new Error("offline"));
+    await flush();
+    expect(loaded.filter((f) => f === "l1.mp3")).toHaveLength(2);
+    expect(context.started.map((s) => s.file)).toContain("l1.mp3");
+  });
+
   test("a stop while the first unlock is pending cancels the play", async () => {
     const context = new FakeContext();
     let resolveResume: () => void = () => undefined;

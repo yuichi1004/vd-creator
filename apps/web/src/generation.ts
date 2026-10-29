@@ -72,6 +72,19 @@ function hasWork(plan: GeneratePlanResponse): boolean {
   return plan.plan.items.some((item) => item.status === "to-generate");
 }
 
+/**
+ * The status message when a plan has nothing to generate, naming the items that cannot be
+ * generated, if any.
+ */
+export function nothingSummary(plan: GeneratePlanResponse): string {
+  const unresolved = plan.plan.items.filter((i) => i.status === "unresolved").length;
+  const invalid = plan.plan.items.filter((i) => i.status === "invalid").length;
+  const parts: string[] = [];
+  if (unresolved > 0) parts.push(`${unresolved} unresolved`);
+  if (invalid > 0) parts.push(`${invalid} invalid`);
+  return parts.length > 0 ? `Nothing to generate: ${parts.join(", ")}.` : "Nothing to generate.";
+}
+
 /** A short summary of a generation run, for a status message. */
 export function runSummary(run: GenerateRunResponse): string {
   const generated = run.items.filter((i) => i.status === "generated").length;

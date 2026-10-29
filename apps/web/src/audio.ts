@@ -148,9 +148,12 @@ export class Player {
   private readonly buffers = new Map<string, Promise<AudioBufferLike | undefined>>();
   /**
    * Files that failed to load. They play as silence until the next `play`, which retries
-   * them. A failed load is never kept in `buffers`.
+   * them. A failed load is never kept in `buffers`, and only the play that started a load
+   * records its failure.
    */
   private readonly failed = new Set<string>();
+  /** Loads in `buffers` that have not settled yet. A new `play` does not reuse them. */
+  private readonly pending = new Set<Promise<AudioBufferLike | undefined>>();
   private timer?: unknown;
   private generation = 0;
 
@@ -203,6 +206,9 @@ export class Player {
     if (!context || !this.timeline || run !== this.generation) return false;
     const timeline = this.timeline;
     this.failed.clear();
+    for (const [file, promise] of this.buffers) {
+      if (this.pending.has(promise)) this.buffers.delete(file);
+    }
     this.startSec = start >= timeline.durationSec ? 0 : Math.max(0, start);
     this.sounds = scheduleFrom(timeline, this.startSec);
     this.clockStart = context.currentTime + 0.05;
@@ -311,14 +317,23 @@ export class Player {
 
   private decode(context: AudioContextLike, file: string): void {
     if (this.buffers.has(file) || this.failed.has(file)) return;
-    const promise = this.options
+    const run = this.generation;
+    const promise: Promise<AudioBufferLike | undefined> = this.options
       .load(file)
       .then((bytes) => context.decodeAudioData(bytes))
-      .catch(() => {
-        this.failed.add(file);
-        if (this.buffers.get(file) === promise) this.buffers.delete(file);
-        return undefined;
-      });
+      .then(
+        (buffer) => {
+          this.pending.delete(promise);
+          return buffer;
+        },
+        () => {
+          this.pending.delete(promise);
+          if (this.buffers.get(file) === promise) this.buffers.delete(file);
+          if (run === this.generation) this.failed.add(file);
+          return undefined;
+        },
+      );
+    this.pending.add(promise);
     this.buffers.set(file, promise);
   }
 }
