@@ -26,9 +26,10 @@ import { formatPath, type Issue, type IssuePath } from "./validate.js";
 // on their own line, and empty values. Exotic forms are refused cleanly: items, scenes,
 // item lists, or the whole scenes list defined by an alias, explicit tags such as `!!str`
 // on a field the edit touches, anchors or tags on the line after a key, and aliases that
-// make a cycle. Every failure throws a `ScenarioEditError` whose issues say what is wrong and where, never a
-// plain `Error`. As a safety net for forms nobody thought of, `updateItem` turns any
-// other error into a `ScenarioEditError` with a generic issue at the item path.
+// make a cycle. Every failure throws a `ScenarioEditError` whose issues say what is
+// wrong and where, never a plain `Error`. As a safety net for forms nobody thought of,
+// `updateItem` turns any other error into a `ScenarioEditError` with a generic issue at
+// the item path.
 //
 // Edits work on the CST (concrete syntax tree) of the source, which keeps every space,
 // newline, and comment. Values are changed on the tokens in place and the tree is
