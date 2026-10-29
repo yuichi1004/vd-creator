@@ -24,8 +24,8 @@ Early development. Expect rough edges and breaking changes. These parts work now
 
 - **Scenario format.** A drama is a `scenario.yaml` with speakers, scenes, lines, SFX, BGM, and still images. `vd validate` checks it. See the [scenario format guide](docs/scenario-format.md).
 - **Generation.** `vd generate` makes the voices, SFX, and BGM with the mock provider, which is free and makes placeholder tones, or with ElevenLabs.
-- **Review UI.** `vd serve` opens a web UI to listen to the drama, fix lines, and regenerate takes.
-- **Rendering.** `vd render` mixes the audio into one file, and can also write a video with the still images and subtitles.
+- **Review UI.** `vd serve` serves a web UI to listen to the drama, fix lines, and regenerate takes.
+- **Rendering.** `vd render` mixes the audio into one file, and can also write a video with the still images and an SRT subtitle file.
 - **Sound library.** A shared folder of SFX and BGM with license records, managed with `vd library`. See [plan 0007](docs/plans/0007-sound-library.md).
 - **User directory.** Your own settings and notes, outside the repository. See [Your own settings](#your-own-settings).
 
@@ -56,7 +56,7 @@ Prerequisites:
 - Node.js 22 or later (see [`.nvmrc`](.nvmrc))
 - ffmpeg on your `PATH`
 
-Run the setup script from the repository root. It checks the prerequisites and installs dependencies with `npm ci`:
+Run the setup script from the repository root. It checks the prerequisites and installs dependencies with `npm ci`. Then build the workspaces, which `vd` needs:
 
 ```sh
 scripts/setup.sh
@@ -73,7 +73,7 @@ npm run build
    npx vd init my-drama
    ```
 
-2. Write `my-drama/scenario.yaml`, or have an agent write it. Follow the [scenario format guide](docs/scenario-format.md).
+2. Edit `my-drama/scenario.yaml`, or have an agent write the drama in it. Follow the [scenario format guide](docs/scenario-format.md).
 3. Check it:
 
    ```sh
@@ -99,7 +99,7 @@ npm run build
    npx vd render my-drama --video --srt
    ```
 
-To review from a phone, see [Using a phone](#using-a-phone). Before you generate an SFX or a BGM, search the sound library with `npx vd library search <words>`; [`AGENTS.md`](AGENTS.md#sound-library) and the [scenario format guide](docs/scenario-format.md#sound-library) explain how to use it.
+To review from a phone, see [Using a phone](#using-a-phone). If you use a sound library, set it with `--library`, `VD_LIBRARY`, or `library` in your `config.yaml`, and search it with `npx vd library search <words>` before you write an SFX or BGM prompt. [`AGENTS.md`](AGENTS.md#sound-library) and the [scenario format guide](docs/scenario-format.md#sound-library) explain how to use it.
 
 ## Commands
 

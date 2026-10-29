@@ -23,7 +23,7 @@ Each user can keep a user directory with their own config and private notes, out
    2. `local/` at the root of this repository. It is gitignored, and it may be a symbolic link to another folder.
    3. `$XDG_CONFIG_HOME/vd-creator/`, or `~/.config/vd-creator/` when `XDG_CONFIG_HOME` is not set.
 
-   To find it, run `npx vd config path` from the repository root. It checks the three locations in this order and prints the folder it found and the rule that selected it. If `VD_USER_DIR` is set to a folder that does not exist, it prints a note and skips it.
+   To find it, run `npx vd config path` from the repository root. It needs a built CLI, so in a fresh clone or worktree run `scripts/setup.sh && npm run build` first. It checks the three locations in this order and prints the folder it found and the rule that selected it. If `VD_USER_DIR` is set to a folder that does not exist, it prints a note and skips it.
 
    If it prints `No user directory`, carry on without one.
 2. If the user directory has an `AGENTS.md`, read it and follow it.
