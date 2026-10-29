@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, test } from "vitest";
 import { stringify } from "yaml";
-import { type Issue, parseScenario, type ScenarioInput } from "./index.js";
+import { type Issue, parseScenario, type ScenarioInput, validateScenarioData } from "./index.js";
 
 const samplePath = new URL("../fixtures/sample.yaml", import.meta.url);
 
@@ -364,6 +364,145 @@ describe("rule: gapBeforeSec is at least -1.0", () => {
       ["scenes", 0, "items", 1, "gapBeforeSec"],
       /.+/,
     );
+  });
+});
+
+describe("rule: voice.settings values are plain JSON", () => {
+  const settingsPath = ["speakers", 0, "voice", "settings"];
+
+  // A scenario whose first speaker has the given settings, written as YAML.
+  const withSettings = (settings: string, header = "") => `${header}version: 1
+title: Test
+speakers:
+  - id: mira
+    name: Mira
+    voice:
+      provider: mock
+      voiceId: v1
+      settings: ${settings}
+scenes:
+  - id: s1
+    items:
+      - line: Hello
+        id: l1
+        speaker: mira
+`;
+
+  const errorsOf = (text: string): Issue[] => {
+    const result = parseScenario(text);
+    expect(result.scenario).toBeUndefined();
+    return result.issues.filter((i) => i.severity === "error");
+  };
+
+  // Where the bad value sits: at the top level of settings, in a list, and in a mapping.
+  // `anchor` goes before the settings mapping, so that `*c` refers to settings itself.
+  const PLACES = [
+    { place: "at the top level", settings: (v: string) => `{ v: ${v} }`, path: ["v"] },
+    { place: "in a list", settings: (v: string) => `{ l: [1, ${v}] }`, path: ["l", 1] },
+    { place: "in a mapping", settings: (v: string) => `{ m: { k: ${v} } }`, path: ["m", "k"] },
+  ];
+
+  const YAML_KINDS = [
+    { kind: ".inf", value: ".inf", message: /^A number that is not finite/ },
+    { kind: "-.inf", value: "-.inf", message: /^A number that is not finite/ },
+    { kind: ".nan", value: ".nan", message: /^A number that is not finite/ },
+    { kind: "a number too large", value: "1e400", message: /^A number that is not finite/ },
+    { kind: "a !!timestamp", value: "!!timestamp 2001-12-14", message: /^A date or timestamp/ },
+    { kind: "!!binary", value: "!!binary aGVsbG8=", message: /^Binary data/ },
+    { kind: "!!omap", value: "!!omap [{ x: 1 }]", message: /^A map / },
+    { kind: "!!set", value: "!!set { x, y }", message: /^A set / },
+    { kind: "an alias to settings itself", value: "*c", anchor: "&c ", message: /^An alias/ },
+  ];
+
+  describe.each(PLACES)("$place", ({ settings, path }) => {
+    test.each(YAML_KINDS)("rejects $kind", ({ value, anchor, message }) => {
+      const errors = errorsOf(withSettings(`${anchor ?? ""}${settings(value)}`));
+      expect(errors).toEqual([
+        {
+          path: [...settingsPath, ...path],
+          message: expect.stringMatching(message),
+          severity: "error",
+        },
+      ]);
+      expect(errors[0]?.message).toMatch(/is not plain JSON\. Settings values must be plain JSON/);
+    });
+
+    test("rejects a date in a YAML 1.1 document", () => {
+      const text = withSettings(settings("2001-12-14"), "%YAML 1.1\n---\n");
+      expectError(errorsOf(text), [...settingsPath, ...path], /^A date or timestamp/);
+      // The same document is valid with a plain value.
+      expect(parseScenario(withSettings(settings("1"), "%YAML 1.1\n---\n")).issues).toEqual([]);
+    });
+
+    test("rejects an alias to a list that contains it", () => {
+      expectError(
+        errorsOf(withSettings(settings("&c [*c]"))),
+        [...settingsPath, ...path, 0],
+        /^An alias/,
+      );
+    });
+
+    // YAML does not produce these, but validateScenarioData takes any data.
+    test.each([
+      { kind: "a bigint", value: 1n, message: /^A bigint/ },
+      { kind: "undefined", value: undefined, message: /^An undefined value/ },
+      { kind: "a function", value: () => 1, message: /^This value/ },
+      { kind: "a class instance", value: new URL("https://example.com"), message: /^This value/ },
+    ])("rejects $kind in data", ({ value, message }) => {
+      const data = minimal();
+      const [first] = path;
+      const settingsValue =
+        first === "v" ? { v: value } : first === "l" ? { l: [1, value] } : { m: { k: value } };
+      (data.speakers?.[0]?.voice as Record<string, unknown>).settings = settingsValue;
+      const { scenario, issues } = validateScenarioData(data);
+      expect(scenario).toBeUndefined();
+      expect(issues).toEqual([
+        {
+          path: [...settingsPath, ...path],
+          message: expect.stringMatching(message),
+          severity: "error",
+        },
+      ]);
+    });
+  });
+
+  test("reports every bad value, each at its own path", () => {
+    const errors = errorsOf(
+      withSettings("{ a: .inf, b: [ok, .nan], c: { d: !!binary aGVsbG8= } }"),
+    );
+    expect(errors.map((e) => e.path)).toEqual([
+      [...settingsPath, "a"],
+      [...settingsPath, "b", 1],
+      [...settingsPath, "c", "d"],
+    ]);
+  });
+
+  test("accepts plain JSON at any depth", () => {
+    const text = withSettings(
+      '{ s: "x", n: -1.5, i: 0x1F, t: true, f: false, z: null, l: [1, [2, { k: "v" }]], m: { e: {} } }',
+    );
+    const { scenario, issues } = parseScenario(text);
+    expect(issues).toEqual([]);
+    expect(scenario?.speakers[0]?.voice.settings).toEqual({
+      s: "x",
+      n: -1.5,
+      i: 31,
+      t: true,
+      f: false,
+      z: null,
+      l: [1, [2, { k: "v" }]],
+      m: { e: {} },
+    });
+  });
+
+  test("accepts a value shared through an alias that does not contain itself", () => {
+    const { issues } = parseScenario(withSettings("{ a: &x { k: [1] }, b: *x, c: [*x, *x] }"));
+    expect(issues).toEqual([]);
+  });
+
+  test("settings that are not a mapping are an error at settings", () => {
+    expectError(errorsOf(withSettings("[1, 2]")), settingsPath, /expected record/);
+    expectError(errorsOf(withSettings("!!set { x }")), settingsPath, /expected record/);
   });
 });
 

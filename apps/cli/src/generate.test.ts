@@ -335,7 +335,10 @@ describe("vd generate with a paid provider", () => {
     vi.stubGlobal("fetch", fetchMock);
   });
 
-  /** Adds a line whose speaker settings hold a non-finite number, so its request is invalid. */
+  /**
+   * Adds a line whose speaker settings hold a non-finite number, which makes the scenario
+   * fail validation.
+   */
   async function addInvalidLine() {
     await editScenario((text) =>
       text
@@ -372,18 +375,15 @@ describe("vd generate with a paid provider", () => {
     if (line.startsWith("Estimated cost")) rmSync(path);
   };
 
-  test("never requests without --yes when the plan has only cached and invalid items", async () => {
+  test("refuses non-JSON settings like vd validate and never calls fetch", async () => {
+    await cacheAsElevenLabs(["tts", "sfx", "music"]);
     await addInvalidLine();
-    const paths = await cacheAsElevenLabs(["tts", "sfx", "music"]);
-    const result = await vdWatching(
-      removeAfterPlan(paths.tts as string),
-      "generate",
-      dir,
-      "--provider",
-      "elevenlabs",
+    const result = await vd("generate", dir, "--provider", "elevenlabs");
+    expect(result.code).toBe(EXIT_FAILURE);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toMatch(
+      /^speakers\.\d+\.voice\.settings\.speed: A number that is not finite .* is not plain JSON/,
     );
-    expect(result.stdout).toContain("0 to generate, 3 cached, 0 unresolved, 1 invalid");
-    expect(result.code).toBe(EXIT_OK);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -391,12 +391,11 @@ describe("vd generate with a paid provider", () => {
     [["generate", "DIR", "--provider", "elevenlabs"]],
     [["generate", "--provider", "elevenlabs", "DIR"]],
     [["generate", "--provider=elevenlabs", "DIR"]],
-    [["generate", "DIR", "--provider", "elevenlabs", "--only", "s1-l1,s1-l2"]],
+    [["generate", "DIR", "--provider", "elevenlabs", "--only", "s1-l1,s1-sfx1"]],
     [["generate", "--dry-run", "--provider", "elevenlabs", "DIR"]],
     [["generate", "--yes", "--dry-run", "DIR", "--provider", "elevenlabs"]],
     [["generate", "DIR", "--provider", "elevenlabs", "--dry-run", "--yes"]],
   ])("never calls fetch without --yes or with --dry-run: %j", async (args) => {
-    await addInvalidLine();
     const paths = await cacheAsElevenLabs(["tts", "sfx", "music"]);
     const result = await vdWatching(
       removeAfterPlan(paths.tts as string),

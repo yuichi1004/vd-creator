@@ -13,13 +13,14 @@ export type ValidationResult = { scenario?: Scenario; issues: Issue[] };
 
 /**
  * Validates plain data, such as the result of parsing scenario.yaml, against schema
- * version 1, and checks IDs and references. `scenario` is set only when there are no
+ * version 1, and checks IDs, references, and that voice settings hold only plain JSON
+ * values. `scenario` is set only when there are no
  * errors. Warnings do not block it.
  */
 export function validateScenarioData(data: unknown): ValidationResult {
   const result = ScenarioSchema.safeParse(data);
   const issues = result.success ? [] : result.error.issues.flatMap((i) => toIssues(i, [], data));
-  issues.push(...checkIds(data), ...checkReferences(data));
+  issues.push(...checkIds(data), ...checkReferences(data), ...checkSettings(data));
   const hasError = issues.some((i) => i.severity === "error");
   return { scenario: result.success && !hasError ? result.data : undefined, issues };
 }
@@ -151,6 +152,87 @@ function checkReferences(data: unknown): Issue[] {
     }
   }
   return issues;
+}
+
+const PLAIN_JSON_RULE =
+  "Settings values must be plain JSON: strings, finite numbers, true, false, null, lists, or mappings with string keys";
+
+// Voice settings take any keys, but every value at any depth must be plain JSON, so that
+// providers and the cache can rely on it. The check walks the data as parsed, not the
+// schema output: the record schema copies the mapping, which would hide an alias to it.
+function checkSettings(data: unknown): Issue[] {
+  const issues: Issue[] = [];
+  for (const [i, speaker] of records(field(data, "speakers"))) {
+    const settings = field(field(speaker, "voice"), "settings");
+    // The schema reports settings that are not a mapping.
+    if (isRecord(settings) && nonJsonKind(settings) === undefined) {
+      checkPlainJson(settings, ["speakers", i, "voice", "settings"], issues);
+    }
+  }
+  return issues;
+}
+
+// Reports every value inside `root` that is not plain JSON, at its own path.
+function checkPlainJson(root: object, rootPath: IssuePath, issues: Issue[]): void {
+  const ancestors = new Set<object>();
+  // A value shared through aliases is checked once, so the walk stays linear.
+  const done = new Set<object>();
+  const visit = (value: unknown, path: IssuePath): void => {
+    if (typeof value === "object" && value !== null) {
+      if (ancestors.has(value)) {
+        issues.push(
+          error(path, `An alias to a value that contains it is not plain JSON. ${PLAIN_JSON_RULE}`),
+        );
+        return;
+      }
+      if (done.has(value)) return;
+    }
+    const kind = nonJsonKind(value);
+    if (kind !== undefined) {
+      issues.push(error(path, `${kind} is not plain JSON. ${PLAIN_JSON_RULE}`));
+      return;
+    }
+    if (typeof value !== "object" || value === null) return;
+    ancestors.add(value);
+    if (Array.isArray(value)) {
+      // An index loop, so that a hole in a sparse list counts as an undefined value.
+      for (let i = 0; i < value.length; i++) visit(value[i], [...path, i]);
+    } else {
+      for (const [key, entry] of Object.entries(value)) visit(entry, [...path, key]);
+    }
+    ancestors.delete(value);
+    done.add(value);
+  };
+  visit(root, rootPath);
+}
+
+// A fixed label for a value that is not plain JSON, or undefined for one that is, apart
+// from what it contains. The label never quotes the value.
+function nonJsonKind(value: unknown): string | undefined {
+  switch (typeof value) {
+    case "string":
+    case "boolean":
+      return undefined;
+    case "number":
+      return Number.isFinite(value) ? undefined : "A number that is not finite (.inf, -.inf, .nan)";
+    case "bigint":
+      return "A bigint";
+    case "undefined":
+      return "An undefined value";
+    case "object":
+      break;
+    default:
+      return "This value";
+  }
+  if (value === null || Array.isArray(value)) return undefined;
+  if (value instanceof Date) return "A date or timestamp";
+  if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return "Binary data";
+  if (value instanceof Map) return "A map (such as !!omap)";
+  if (value instanceof Set) return "A set (such as !!set)";
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) return "This value";
+  if (Object.getOwnPropertySymbols(value).length > 0) return "A mapping with non-string keys";
+  return undefined;
 }
 
 function error(path: IssuePath, message: string): Issue {

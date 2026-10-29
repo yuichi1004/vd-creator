@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createMockProviders } from "@vd-creator/providers";
-import { parseScenario, type Scenario } from "@vd-creator/scenario";
+import { parseScenario, type Scenario, ScenarioDocument } from "@vd-creator/scenario";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AssetCache } from "./cache.js";
 import { CANONICAL_JSON_UNSUPPORTED } from "./canonical.js";
@@ -17,8 +17,10 @@ import type { ScenarioItem } from "./items.js";
 import { type AssetResolver, defaultResolvers, type PlannedAsset } from "./resolver.js";
 import { computeTimeline } from "./timeline.js";
 
-// Speaker settings are free-form in the scenario schema, so a valid scenario can hold values
-// that canonicalJson does not support. Only the line that uses them may be affected.
+// Validation rejects speaker settings that are not plain JSON, but a Scenario built in code
+// can still hold values that canonicalJson does not support. Only the line that uses them
+// may be affected. The scenario is parsed with empty settings, and then the settings are
+// set to the YAML value as parsed, outside validation.
 const scenarioWith = (settings: string): Scenario => {
   const { scenario, issues } = parseScenario(`
 version: 1
@@ -32,7 +34,7 @@ speakers:
     voice:
       provider: mock
       voiceId: w
-      settings: ${settings}
+      settings: {}
 scenes:
   - id: s1
     bgm: { prompt: calm }
@@ -46,7 +48,10 @@ scenes:
       - sfx: door
         id: fx
 `);
-  if (!scenario) throw new Error(`invalid scenario: ${JSON.stringify(issues)}`);
+  const voice = scenario?.speakers[1]?.voice;
+  if (!scenario || !voice) throw new Error(`invalid scenario: ${JSON.stringify(issues)}`);
+  const raw = new ScenarioDocument(`settings: ${settings}\n`).document.toJS();
+  voice.settings = raw.settings;
   return scenario;
 };
 

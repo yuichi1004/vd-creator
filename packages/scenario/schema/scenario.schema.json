@@ -54,12 +54,14 @@
                 "description": "Voice ID at the provider."
               },
               "settings": {
-                "description": "Provider-specific settings, passed through as is.",
                 "type": "object",
                 "propertyNames": {
                   "type": "string"
                 },
-                "additionalProperties": {}
+                "additionalProperties": {
+                  "$ref": "#/$defs/JsonValue"
+                },
+                "description": "Provider-specific settings, passed through as is. Any keys; plain JSON values."
               }
             },
             "required": ["provider", "voiceId"],
@@ -306,5 +308,36 @@
   "required": ["version", "title", "scenes"],
   "additionalProperties": false,
   "description": "vd-creator scenario, schema version 1.",
-  "title": "vd-creator scenario"
+  "title": "vd-creator scenario",
+  "$defs": {
+    "JsonValue": {
+      "description": "Plain JSON: a string, finite number, true, false, null, list, or mapping with string keys.",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JsonValue"
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          }
+        }
+      ]
+    }
+  }
 }

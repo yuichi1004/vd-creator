@@ -122,7 +122,7 @@ scenes:
 
 ## Fields
 
-"Required" means validation fails without the field. Every object is strict: a key that is not listed here is an error, so typos are caught. The only exception is `voice.settings`, which takes any keys.
+"Required" means validation fails without the field. Every object is strict: a key that is not listed here is an error, so typos are caught. The only exception is `voice.settings`, which takes any keys. Its values, at any depth, must still be plain JSON (see the speaker table).
 
 ### Top level
 
@@ -144,7 +144,7 @@ scenes:
 | `name` | non-empty string | yes | Display name. |
 | `voice.provider` | non-empty string | yes | Provider ID, such as `elevenlabs`. `mock` is always available. |
 | `voice.voiceId` | non-empty string | yes | Voice ID at the provider. Not an ID in the sense of this guide, so any non-empty string is fine. |
-| `voice.settings` | mapping | no | Provider-specific settings, passed through as is. |
+| `voice.settings` | mapping of plain JSON values | no | Provider-specific settings, passed through as is. Any keys. Every value, at any depth, must be a string, a finite number, `true`, `false`, `null`, a list, or a mapping with string keys. `.inf`, `-.inf`, `.nan`, dates and timestamps, `!!binary`, `!!set`, `!!omap`, and an alias that refers to a value containing it are errors at the path of that value. |
 
 ### Image
 

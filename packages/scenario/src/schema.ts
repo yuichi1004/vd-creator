@@ -2,7 +2,7 @@ import { z } from "zod";
 
 // Schema version 1 of scenario.yaml. See docs/plans/0003-scenario-format.md.
 // Every object is strict, so unknown keys (usually typos) are errors. Provider-specific
-// voice settings are the only free-form object.
+// voice settings are the only free-form object, and their values must be plain JSON.
 
 export const PUBLISH_USES = ["private", "non-commercial", "commercial"] as const;
 export const ITEM_KINDS = ["line", "sfx", "pause", "image"] as const;
@@ -41,16 +41,20 @@ export const PublishSchema = z.strictObject({
     .describe("Intended use of the finished drama, checked against sound licenses."),
 });
 
+// Values must be plain JSON, which validateScenarioData checks on the parsed data: the
+// record schema copies the mapping, so a check here would miss an alias to the mapping
+// itself. json-schema.ts describes the values in the JSON Schema.
+export const VoiceSettingsSchema = z
+  .record(z.string(), z.unknown())
+  .describe("Provider-specific settings, passed through as is. Any keys; plain JSON values.");
+
 export const VoiceSchema = z.strictObject({
   provider: z
     .string()
     .min(1)
     .describe('Provider ID, such as "elevenlabs". "mock" is always available.'),
   voiceId: z.string().min(1).describe("Voice ID at the provider."),
-  settings: z
-    .record(z.string(), z.unknown())
-    .optional()
-    .describe("Provider-specific settings, passed through as is."),
+  settings: VoiceSettingsSchema.optional(),
 });
 
 export const SpeakerSchema = z.strictObject({

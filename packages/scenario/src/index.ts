@@ -53,6 +53,7 @@ export {
   SpeakerSchema,
   type Voice,
   VoiceSchema,
+  VoiceSettingsSchema,
 } from "./schema.js";
 export {
   formatPath,
