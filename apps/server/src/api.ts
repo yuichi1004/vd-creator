@@ -10,7 +10,10 @@ export type { ScenarioErrorIssue };
 /** The provider the server runs with, chosen by `vd serve --provider`. */
 export type ProviderInfo = {
   id: string;
-  /** True if each generation costs real money. Generation then needs `confirm: true`. */
+  /**
+   * True if each generation costs real money. Generation then needs `confirm: true` and the
+   * `approved` cost.
+   */
   paid: boolean;
 };
 
@@ -83,9 +86,12 @@ export type ScenarioErrorResponse = ScenarioErrorBody;
  *    `confirm` is ignored.
  * 2. Otherwise, with a free provider (`paid: false`): runs at once and returns 200 with a
  *    `GenerateRunResponse`. `confirm` is ignored.
- * 3. Otherwise, with a paid provider (`paid: true`): runs only with `confirm: true`, and
- *    returns 200 with a `GenerateRunResponse`. With `confirm` absent or false, generates
- *    nothing and returns 409 with a `ConfirmRequiredError`, which holds the plan.
+ * 3. Otherwise, with a paid provider (`paid: true`): runs only with `confirm: true` and an
+ *    `approved` cost, and returns 200 with a `GenerateRunResponse`. The server plans again
+ *    when the run's turn comes, after any edit sent before it, and runs only if that plan
+ *    needs no more characters and no more requests than `approved`. Otherwise, or with
+ *    `confirm` absent or false, or `approved` absent or not valid, it generates nothing and
+ *    returns 409 with a `ConfirmRequiredError`, which holds the new plan.
  */
 export type GenerateRequest = {
   /**
@@ -97,12 +103,27 @@ export type GenerateRequest = {
   dryRun?: boolean;
   /** Must be true to run a paid provider. Ignored with `dryRun: true` or a free provider. */
   confirm?: boolean;
+  /**
+   * The cost of the plan the user approved, sent with `confirm: true`. A paid run needs it.
+   * Ignored with `dryRun: true` or a free provider.
+   */
+  approved?: ApprovedCost;
+};
+
+/**
+ * The cost the user approved for a paid generation: `plan.cost` of the plan the UI showed.
+ * Both are whole numbers, 0 or more.
+ */
+export type ApprovedCost = {
+  characters: number;
+  requests: number;
 };
 
 /**
  * What a generation would do and its estimated cost: the 200 response of
  * `POST /api/generate` with `dryRun: true`, and the `plan` of a `ConfirmRequiredError`. The
- * UI shows "Generate (N characters)" from `plan.cost.characters`.
+ * UI shows "Generate (N characters)" from `plan.cost.characters`, and sends `plan.cost` as
+ * the `approved` cost of the confirm.
  */
 export type GeneratePlanResponse = {
   kind: "plan";
@@ -125,7 +146,7 @@ export type GenerateItemResult = {
 
 /**
  * The 200 response of `POST /api/generate` that ran the generation: without `dryRun`, with
- * a free provider, or with a paid provider and `confirm: true`.
+ * a free provider, or with a paid provider, `confirm: true`, and a plan within `approved`.
  */
 export type GenerateRunResponse = {
   kind: "run";
@@ -204,9 +225,11 @@ export type ApiError = {
 
 /**
  * Body of the 409 response of `POST /api/generate`: the provider is paid, `dryRun` is not
- * true, and `confirm` is absent or false. Nothing was generated. `plan` is the same plan a
- * `dryRun: true` request returns, so the UI can show "Generate (N characters)" and, when the
- * user presses it, send the same request again with `confirm: true`.
+ * true, and either `confirm` is absent or false, `approved` is absent or not valid, or the
+ * plan now needs more characters or more requests than `approved`. Nothing was generated.
+ * `plan` is the same plan a `dryRun: true` request returns at that moment, so the UI can show
+ * "Generate (N characters)" and, when the user presses it, send the same request again with
+ * `confirm: true` and `approved` set to `plan.plan.cost`.
  */
 export type ConfirmRequiredError = ApiError & {
   error: "confirm-required";

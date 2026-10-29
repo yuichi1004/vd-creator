@@ -44,9 +44,11 @@ import { streamSSE } from "hono/streaming";
 import type {
   ApiError,
   ApiErrorCode,
+  ApprovedCost,
   ConfirmRequiredError,
   GenerateItemResult,
   GeneratePlanResponse,
+  GenerateRequest,
   GenerateRunResponse,
   ItemPatchRequest,
   LibraryEntryInfo,
@@ -97,7 +99,7 @@ const MESSAGES: Record<ApiErrorCode, string> = {
   "bad-request": "The request is not valid",
   unauthorized: "This server needs the access token printed by vd serve",
   "not-found": "Not found",
-  "confirm-required": "A paid provider needs confirm: true to generate",
+  "confirm-required": "A paid provider needs confirm: true and the approved cost to generate",
   "server-error": "The server could not complete the request",
 };
 
@@ -304,27 +306,44 @@ export function createApp(options: AppOptions): Hono {
       }
       return scenario;
     };
-    const runs = body.dryRun !== true && (!providerInfo.paid || body.confirm === true);
-    if (!runs) {
-      // Only reads, so it need not wait for the queue.
-      const scenario = await scenarioFor();
-      const plan: GeneratePlanResponse = {
-        kind: "plan",
-        provider: providerInfo,
-        plan: await planGeneration(scenario, await AssetCache.load(projectDir), resolvers, only),
-      };
-      if (body.dryRun === true) return c.json(plan);
-      const refused: ConfirmRequiredError = {
+    const planFor = async (
+      scenario: Scenario,
+      cache: AssetCache,
+    ): Promise<GeneratePlanResponse> => ({
+      kind: "plan",
+      provider: providerInfo,
+      plan: await planGeneration(scenario, cache, resolvers, only),
+    });
+    const refused = (plan: GeneratePlanResponse) => {
+      const error: ConfirmRequiredError = {
         ...apiError("confirm-required"),
         error: "confirm-required",
         plan,
       };
-      return c.json(refused, 409);
+      return c.json(error, 409);
+    };
+    const runs = body.dryRun !== true && (!providerInfo.paid || body.confirm === true);
+    if (!runs) {
+      // Only reads, so it need not wait for the queue.
+      const plan = await planFor(await scenarioFor(), await AssetCache.load(projectDir));
+      return body.dryRun === true ? c.json(plan) : refused(plan);
     }
-    // Loaded in the queue, so that a run waiting behind an edit generates the edited text.
-    const result = await exclusive(async () =>
-      runGeneration(await scenarioFor(), await AssetCache.load(projectDir), resolvers, only),
-    );
+    // Loaded in the queue, so that a run waiting behind an edit generates the edited text. A
+    // paid run is planned again there, and runs only within the cost the user approved.
+    type Outcome =
+      | { refused: GeneratePlanResponse }
+      | { result: Awaited<ReturnType<typeof runGeneration>> };
+    const outcome = await exclusive(async (): Promise<Outcome> => {
+      const scenario = await scenarioFor();
+      const cache = await AssetCache.load(projectDir);
+      if (providerInfo.paid) {
+        const plan = await planFor(scenario, cache);
+        if (!withinApproved(plan.plan.cost, body.approved)) return { refused: plan };
+      }
+      return { result: await runGeneration(scenario, cache, resolvers, only) };
+    });
+    if ("refused" in outcome) return refused(outcome.refused);
+    const { result } = outcome;
     const response: GenerateRunResponse = {
       kind: "run",
       provider: providerInfo,
@@ -551,9 +570,14 @@ function soundSource(value: unknown, name: string): SoundSource {
   throw invalid();
 }
 
-function generateRequest(body: unknown): { ids?: string[]; dryRun?: boolean; confirm?: boolean } {
-  const record = checkFields(body, ["ids", "dryRun", "confirm"]);
-  const request: { ids?: string[]; dryRun?: boolean; confirm?: boolean } = {};
+/**
+ * The body of `POST /api/generate`. An `approved` that is not two whole numbers, 0 or more,
+ * is dropped rather than refused with 400, so that a paid confirm with it gets the 409 with
+ * the plan, and a free provider ignores it.
+ */
+function generateRequest(body: unknown): GenerateRequest {
+  const record = checkFields(body, ["ids", "dryRun", "confirm", "approved"]);
+  const request: GenerateRequest = {};
   if (record.ids !== undefined) {
     if (!Array.isArray(record.ids) || !record.ids.every((id) => typeof id === "string")) {
       throw badRequest("ids must be a list of item IDs");
@@ -568,7 +592,28 @@ function generateRequest(body: unknown): { ids?: string[]; dryRun?: boolean; con
     if (typeof value !== "boolean") throw badRequest(`${key} must be a boolean`);
     request[key] = value;
   }
+  const approved = approvedCost(record.approved);
+  if (approved) request.approved = approved;
   return request;
+}
+
+/** `value` as an approved cost: exactly `characters` and `requests`, whole numbers, 0 or more. */
+function approvedCost(value: unknown): ApprovedCost | undefined {
+  if (!isRecord(value)) return undefined;
+  const keys = Object.keys(value).sort();
+  if (keys.length !== 2 || keys[0] !== "characters" || keys[1] !== "requests") return undefined;
+  const { characters, requests } = value;
+  const count = (n: unknown): n is number => Number.isSafeInteger(n) && (n as number) >= 0;
+  return count(characters) && count(requests) ? { characters, requests } : undefined;
+}
+
+/** True if a plan's cost needs no more characters and no more requests than approved. */
+function withinApproved(cost: ApprovedCost, approved: ApprovedCost | undefined): boolean {
+  return (
+    approved !== undefined &&
+    cost.characters <= approved.characters &&
+    cost.requests <= approved.requests
+  );
 }
 
 /** The body as a record, refusing anything that is not an object or has unknown fields. */

@@ -11,7 +11,7 @@ import { LibraryPanel, type LibraryTarget } from "./components/LibraryPanel.js";
 import { LineEditor } from "./components/LineEditor.js";
 import { PlayerControls } from "./components/PlayerControls.js";
 import { SceneList } from "./components/SceneList.js";
-import { nothingSummary, runSummary, startGeneration } from "./generation.js";
+import { type GenerationStart, nothingSummary, runSummary, startGeneration } from "./generation.js";
 import { placeIssues } from "./issues.js";
 import { LiveUpdates } from "./live.js";
 import { imageAt, itemAt, startOf } from "./playback.js";
@@ -185,31 +185,25 @@ export function App() {
     async (id: string, onCancel?: () => Promise<unknown>) => {
       if (!project) return;
       setBusy(id, true);
-      try {
-        const start = await startGeneration(client, project.provider, [id]);
-        if (start.kind === "done") {
-          setNotice({ text: runSummary(start.run), kind: "info" });
-          await reload();
-          setBusy(id, false);
-          return;
-        }
-        if (start.kind === "nothing") {
-          setNotice({ text: nothingSummary(start.plan), kind: "info" });
+      // Shows the outcome of a start or a confirm: a notice, or the confirm dialog, which comes
+      // back with the new plan when the server refused a confirm because the plan grew.
+      const settle = async (start: GenerationStart): Promise<void> => {
+        if (start.kind !== "confirm") {
+          const text = start.kind === "done" ? runSummary(start.run) : nothingSummary(start.plan);
+          setNotice({ text, kind: "info" });
           await reload();
           setBusy(id, false);
           return;
         }
         setConfirm({
           plan: start.plan,
+          changed: start.changed,
           onConfirm: async () => {
             setConfirm(undefined);
             try {
-              const run = await start.confirm();
-              setNotice({ text: runSummary(run), kind: "info" });
-              await reload();
+              await settle(await start.confirm());
             } catch (error) {
               showError(error);
-            } finally {
               setBusy(id, false);
             }
           },
@@ -219,6 +213,9 @@ export function App() {
             await onCancel?.();
           },
         });
+      };
+      try {
+        await settle(await startGeneration(client, project.provider, [id]));
       } catch (error) {
         showError(error);
         setBusy(id, false);

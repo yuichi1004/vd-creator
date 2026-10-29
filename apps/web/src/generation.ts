@@ -3,20 +3,27 @@
 //
 // A free provider runs with one request. A paid provider first gets the plan, the UI shows
 // "Generate (N characters)", and only when the user presses it is the same request sent
-// with `confirm: true`.
+// with `confirm: true` and the cost of the plan shown as `approved`. If the plan has grown
+// since, the server refuses with the new plan, which the UI shows again.
 
 import type { GeneratePlanResponse, GenerateRunResponse, ProviderInfo } from "@vd-creator/server";
 import { type ApiClient, ApiRequestError, isConfirmRequired } from "./client.js";
 
-/** The outcome of starting a generation. */
+/** The outcome of starting a generation, or of confirming one. */
 export type GenerationStart =
   /** The generation ran. */
   | { kind: "done"; run: GenerateRunResponse }
   /**
    * The provider is paid and nothing ran yet. Show `plan` and call `confirm` only after the
-   * user pressed "Generate (N characters)".
+   * user pressed "Generate (N characters)". `changed` is true when the server refused an
+   * earlier confirm because the plan now costs more than the user approved.
    */
-  | { kind: "confirm"; plan: GeneratePlanResponse; confirm: () => Promise<GenerateRunResponse> }
+  | {
+      kind: "confirm";
+      plan: GeneratePlanResponse;
+      changed: boolean;
+      confirm: () => Promise<GenerationStart>;
+    }
   /**
    * The plan has no item to generate, so there is nothing to confirm and nothing was sent
    * with `confirm`. Refresh the project instead.
@@ -31,8 +38,10 @@ export function confirmLabel(plan: GeneratePlanResponse): string {
 /**
  * Starts a generation of `ids`, or of every item when absent. With a paid provider this
  * only asks for the plan (`dryRun: true`) and never generates; the caller runs it with
- * `confirm`. With a free provider it sends one request. If a free provider's request is
- * refused with 409 `confirm-required`, the plan from that body is used instead.
+ * `confirm`, which sends the plan's cost as `approved` and, if the server refuses with a new
+ * plan, returns that plan to confirm again. With a free provider it sends one request. If a
+ * free provider's request is refused with 409 `confirm-required`, the plan from that body is
+ * used instead.
  */
 export async function startGeneration(
   client: ApiClient,
@@ -40,14 +49,27 @@ export async function startGeneration(
   ids?: string[],
 ): Promise<GenerationStart> {
   const base = ids ? { ids } : {};
-  const confirm = async (): Promise<GenerateRunResponse> => {
-    const response = await client.generate({ ...base, confirm: true });
-    if (response.kind !== "run") throw new ApiRequestError("Unexpected response.", 200);
-    return response;
-  };
 
-  const fromPlan = (plan: GeneratePlanResponse): GenerationStart =>
-    hasWork(plan) ? { kind: "confirm", plan, confirm } : { kind: "nothing", plan };
+  const fromPlan = (plan: GeneratePlanResponse, changed = false): GenerationStart => {
+    if (!hasWork(plan)) return { kind: "nothing", plan };
+    const confirm = async (): Promise<GenerationStart> => {
+      try {
+        const response = await client.generate({
+          ...base,
+          confirm: true,
+          approved: { characters: plan.plan.cost.characters, requests: plan.plan.cost.requests },
+        });
+        if (response.kind !== "run") throw new ApiRequestError("Unexpected response.", 200);
+        return { kind: "done", run: response };
+      } catch (error) {
+        if (error instanceof ApiRequestError && isConfirmRequired(error.body)) {
+          return fromPlan(error.body.plan, true);
+        }
+        throw error;
+      }
+    };
+    return { kind: "confirm", plan, changed, confirm };
+  };
 
   if (provider.paid) {
     const response = await client.generate({ ...base, dryRun: true });

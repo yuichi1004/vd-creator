@@ -8,6 +8,7 @@ import { SCENARIO_FILE } from "@vd-creator/scenario";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type {
   ApiError,
+  ApprovedCost,
   ConfirmRequiredError,
   GeneratePlanResponse,
   GenerateRunResponse,
@@ -43,7 +44,7 @@ afterEach(async () => {
 
 /**
  * Fake providers that count their calls and record the TTS texts, optionally waiting before
- * each call. Never a real API.
+ * each call. A line's estimate is one character per character of its text. Never a real API.
  */
 function fakeProviders(paid = false, options: { delayMs?: number } = {}) {
   const calls = { count: 0, texts: [] as string[] };
@@ -57,7 +58,7 @@ function fakeProviders(paid = false, options: { delayMs?: number } = {}) {
     tts: {
       id: "fake",
       paid,
-      estimate: cost,
+      estimate: (req) => ({ characters: req.text.length, requests: 1 }),
       synthesize: (req) => {
         calls.texts.push(req.text);
         return audio();
@@ -94,6 +95,13 @@ function send(app: TestApp, method: string, path: string, body?: unknown, header
 async function getJson<T>(app: TestApp, path: string): Promise<T> {
   const response = await app.request(path);
   return (await response.json()) as T;
+}
+
+/** The cost of the dry-run plan of `ids`, as the UI shows it before a paid confirm. */
+async function planCost(app: TestApp, ids: string[]): Promise<ApprovedCost> {
+  const response = await send(app, "POST", "/api/generate", { ids, dryRun: true });
+  expect(response.status).toBe(200);
+  return ((await response.json()) as GeneratePlanResponse).plan.cost;
 }
 
 async function scenarioText(): Promise<string> {
@@ -395,11 +403,15 @@ describe("POST /api/generate", () => {
     expect(calls.count).toBe(0);
   });
 
-  test("a paid provider generates with confirm", async () => {
+  test("a paid provider generates with confirm and the approved cost of the plan", async () => {
     const { providers, calls } = fakeProviders(true);
-    const response = await send(makeApp({ provider: providers }), "POST", "/api/generate", {
+    const app = makeApp({ provider: providers });
+    const approved = await planCost(app, ["s1-l1"]);
+    expect(approved).toEqual({ characters: "Is anyone up there?".length, requests: 1 });
+    const response = await send(app, "POST", "/api/generate", {
       ids: ["s1-l1"],
       confirm: true,
+      approved,
     });
     expect(response.status).toBe(200);
     const body = (await response.json()) as GenerateRunResponse;
@@ -409,10 +421,134 @@ describe("POST /api/generate", () => {
     expect(calls.count).toBe(1);
   });
 
-  test("a free provider generates and ignores confirm", async () => {
+  test("a paid confirm without a valid approved cost returns 409 and makes no call", async () => {
+    const { providers, calls } = fakeProviders(true);
+    const app = makeApp({ provider: providers });
+    const lots = { characters: 1_000_000, requests: 1_000 };
+    for (const approved of [
+      undefined,
+      null,
+      {},
+      { characters: lots.characters },
+      { ...lots, extra: 1 },
+      { ...lots, characters: -1 },
+      { ...lots, requests: 1.5 },
+      { ...lots, characters: "1000" },
+      { ...lots, requests: Number.MAX_SAFE_INTEGER + 1 },
+      [lots.characters, lots.requests],
+      "lots",
+    ]) {
+      const response = await send(app, "POST", "/api/generate", {
+        ids: ["s1-l1"],
+        confirm: true,
+        approved,
+      });
+      expect(response.status, JSON.stringify(approved)).toBe(409);
+      const error = (await errorBody(response)) as ConfirmRequiredError;
+      expect(error.error).toBe("confirm-required");
+      expect(error.plan.plan.cost).toEqual({ characters: 19, requests: 1 });
+    }
+    expect(calls.count).toBe(0);
+  });
+
+  test("a paid confirm over the approved characters or requests returns 409", async () => {
+    const { providers, calls } = fakeProviders(true);
+    const app = makeApp({ provider: providers });
+    const cost = await planCost(app, ["s1-l1", "s1-l2"]);
+    for (const approved of [
+      { ...cost, characters: cost.characters - 1 },
+      { ...cost, requests: cost.requests - 1 },
+    ]) {
+      const response = await send(app, "POST", "/api/generate", {
+        ids: ["s1-l1", "s1-l2"],
+        confirm: true,
+        approved,
+      });
+      expect(response.status, JSON.stringify(approved)).toBe(409);
+      expect(((await response.json()) as ConfirmRequiredError).plan.plan.cost).toEqual(cost);
+    }
+    expect(calls.count).toBe(0);
+  });
+
+  test("an edit after the plan that adds characters makes the confirm return the new plan", async () => {
+    const { providers, calls } = fakeProviders(true);
+    const app = makeApp({ provider: providers });
+    const approved = await planCost(app, ["s1-l2"]);
+    const longer = "A much longer line than the one the user approved";
+    expect((await send(app, "PATCH", "/api/items/s1-l2", { text: longer })).status).toBe(200);
+
+    const response = await send(app, "POST", "/api/generate", {
+      ids: ["s1-l2"],
+      confirm: true,
+      approved,
+    });
+    expect(response.status).toBe(409);
+    const error = (await response.json()) as ConfirmRequiredError;
+    expect(error.error).toBe("confirm-required");
+    expect(error.plan.plan.cost).toEqual({ characters: longer.length, requests: 1 });
+    expect(calls.count).toBe(0);
+    const cache = await readFile(join(project, "cache.json"), "utf8").catch(() => "");
+    expect(cache).not.toContain("s1-l2");
+
+    // Confirming the new numbers runs.
+    const again = await send(app, "POST", "/api/generate", {
+      ids: ["s1-l2"],
+      confirm: true,
+      approved: error.plan.plan.cost,
+    });
+    expect(again.status).toBe(200);
+    expect(calls.texts).toEqual([longer]);
+  });
+
+  test("an edit after the plan that removes characters still runs", async () => {
+    const { providers, calls } = fakeProviders(true);
+    const app = makeApp({ provider: providers });
+    const approved = await planCost(app, ["s1-l1"]);
+    expect((await send(app, "PATCH", "/api/items/s1-l1", { text: "Hi?" })).status).toBe(200);
+    const response = await send(app, "POST", "/api/generate", {
+      ids: ["s1-l1"],
+      confirm: true,
+      approved,
+    });
+    expect(response.status).toBe(200);
+    expect(calls.texts).toEqual(["Hi?"]);
+  });
+
+  test("a paid confirm queued behind an edit is checked against the edited plan", async () => {
+    const { providers, calls } = fakeProviders(true, { delayMs: 100 });
+    const app = makeApp({ provider: providers });
+    const firstCost = await planCost(app, ["s1-l1"]);
+    const approved = await planCost(app, ["s1-l2"]);
+    const first = send(app, "POST", "/api/generate", {
+      ids: ["s1-l1"],
+      confirm: true,
+      approved: firstCost,
+    });
+    // Let the first run take the queue before the edit and the confirm are sent.
+    await new Promise((r) => setTimeout(r, 30));
+    const edit = send(app, "PATCH", "/api/items/s1-l2", { text: "Edited while busy" });
+    await new Promise((r) => setTimeout(r, 10));
+    const second = send(app, "POST", "/api/generate", {
+      ids: ["s1-l2"],
+      confirm: true,
+      approved,
+    });
+    expect((await first).status).toBe(200);
+    expect((await edit).status).toBe(200);
+    const response = await second;
+    expect(response.status).toBe(409);
+    const error = (await response.json()) as ConfirmRequiredError;
+    expect(error.plan.plan.cost.characters).toBe("Edited while busy".length);
+    expect(calls.texts).toEqual(["Is anyone up there?"]);
+  });
+
+  test("a free provider generates and ignores confirm and approved", async () => {
     const { providers, calls } = fakeProviders(false);
     const app = makeApp({ provider: providers });
-    const response = await send(app, "POST", "/api/generate", { confirm: false });
+    const response = await send(app, "POST", "/api/generate", {
+      confirm: false,
+      approved: { characters: 0, requests: 0 },
+    });
     expect(response.status).toBe(200);
     const body = (await response.json()) as GenerateRunResponse;
     expect(body.items.filter((i) => i.status === "generated")).toHaveLength(GENERATED.length);
