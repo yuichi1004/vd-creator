@@ -197,8 +197,8 @@ export type RenderAudioResult = {
  * asset, such as `vd render`, check the timeline first.
  *
  * Every failure is a `RenderError`, or its subclass `FfmpegError` when ffmpeg fails, with a
- * fixed message that holds at most a project-relative path and a Node error code, never an
- * absolute path. The original error is its `cause`.
+ * fixed message that holds at most a project-relative path and an error code from
+ * `REPORTED_ERROR_CODES`, never an absolute path. No original error leaves, not even as `cause`.
  */
 export async function renderAudio(
   projectDir: string,
@@ -228,7 +228,7 @@ async function renderAudioSteps(
   }
   const cache = await AssetCache.load(projectDir).catch((e: unknown) => {
     throw e instanceof CacheFormatError
-      ? new RenderError(`${CACHE_FILE} is not a valid cache`, { cause: e })
+      ? new RenderError(`${CACHE_FILE} is not a valid cache`)
       : stepError(`Could not read ${CACHE_FILE}`, e);
   });
   const timeline = await computeTimeline(scenario, cache, options.resolvers).catch((e: unknown) => {

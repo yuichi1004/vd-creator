@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
+import { inspect, promisify } from "node:util";
 import { AssetCache, defaultResolvers, runGeneration } from "@vd-creator/core";
 import { createMockProviders } from "@vd-creator/providers";
 import { loadScenario } from "@vd-creator/scenario";
@@ -167,7 +167,7 @@ describe("renderAudio errors", { timeout: 60_000 }, () => {
     const error = await renderError();
     expect(error.message).toBe("Could not write out/drama.mp3 (EISDIR)");
     expect(error.code).toBe("EISDIR");
-    expect(error.cause).toBeInstanceOf(Error);
+    expect(error.cause).toEqual({ message: "system error EISDIR", code: "EISDIR" });
     // The temporary files are removed.
     expect(await readdir(join(project, "out"))).toEqual(["drama.mp3"]);
   });
@@ -176,7 +176,7 @@ describe("renderAudio errors", { timeout: 60_000 }, () => {
     await writeFile(join(project, "out"), "");
     const error = await renderError();
     expect(error.message).toMatch(/^Could not create out\/ \(E[A-Z]+\)$/);
-    expect(error.cause).toBeInstanceOf(Error);
+    expect(error.cause).not.toBeInstanceOf(Error);
   });
 
   test("reports a missing scenario.yaml", async () => {
@@ -202,7 +202,19 @@ describe("renderAudio errors", { timeout: 60_000 }, () => {
     await writeFile(join(project, "cache.json"), "{");
     const error = await renderError();
     expect(error.message).toBe("cache.json is not a valid cache");
-    expect(error.cause).toBeInstanceOf(Error);
+    expect(error.cause).toBeUndefined();
+  });
+
+  test("keeps every part of a missing project's path out of the whole error", async () => {
+    const missing = join(project, "home-alice-secret", "drama");
+    const error = await renderAudio(missing, { resolvers }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(RenderError);
+    // The cause, stack, and every other property are inspected too.
+    const shown = inspect(error, { depth: Number.POSITIVE_INFINITY, showHidden: true });
+    expect(shown).toContain("Could not read scenario.yaml (ENOENT)");
+    for (const part of [project, "vd-render-errors-", "alice-secret"]) {
+      expect(shown).not.toContain(part);
+    }
   });
 
   test("reports a deleted working folder when given a relative project folder", async () => {

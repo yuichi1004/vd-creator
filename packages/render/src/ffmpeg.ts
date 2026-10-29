@@ -5,7 +5,7 @@ import { type ChildProcessByStdio, spawn } from "node:child_process";
 import { realpath } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import type { Readable } from "node:stream";
-import { errorCode, RenderError } from "./errors.js";
+import { causeOptions, RenderError, type RenderErrorOptions } from "./errors.js";
 
 /** At most this much of ffmpeg's stderr is kept, from the end. */
 const STDERR_LIMIT = 64 * 1024;
@@ -31,9 +31,14 @@ const SAFE_RELATIVE_PATH = new RegExp(`^[${NAME}]+(?:${SEPARATOR}[${NAME}]+)*$`,
  */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching ESC and BEL is the point.
 const ESCAPE_SEQUENCE = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[ -~]?/g;
-const CONTROL_CHARACTER = /[\p{Cc}\p{Cf}]/gu;
-/** What a line must not hold, once its verified path tokens are taken out. */
-const UNSAFE_TEXT = /[/\\%~]|\.\./;
+// A tab is kept, so that SAFE_TEXT drops its line.
+const CONTROL_CHARACTER = /(?!\t)[\p{Cc}\p{Cf}]/gu;
+/**
+ * What the rest of a line, once its verified path tokens are taken out, may hold: ASCII
+ * letters, digits, space, and fixed punctuation. Every other character, such as / \\ % ~, a
+ * tab, U+FFFD, or any non-ASCII look-alike of a slash, drops the line, and so does "..".
+ */
+const SAFE_TEXT = /^[A-Za-z0-9 .,:;()[\]=+\-_'"!?#@*<>|]*$/;
 
 /** Thrown when ffmpeg cannot start or exits with an error. */
 export class FfmpegError extends RenderError {
@@ -44,7 +49,7 @@ export class FfmpegError extends RenderError {
 
   constructor(
     message: string,
-    details: { exitCode?: number; stderr?: string[]; code?: string; cause?: unknown } = {},
+    details: RenderErrorOptions & { exitCode?: number; stderr?: string[] } = {},
   ) {
     super(message, {
       ...(details.code === undefined ? {} : { code: details.code }),
@@ -93,12 +98,19 @@ export async function runFfmpeg(
   } catch (e) {
     // For example a deleted working folder, whose Node error names it.
     if (e instanceof FfmpegError) throw e;
-    const code = errorCode(e);
-    throw new FfmpegError(`${program} could not be started (${code ?? "error"})`, {
-      ...(code ? { code } : {}),
-      cause: e,
-    });
+    throw startError(program, e);
   }
+}
+
+/**
+ * The error for a program that could not be started. Node's error names the command, the
+ * folder, or an argument, so only its code is kept.
+ */
+function startError(program: string, error: unknown, onPathHint = false): FfmpegError {
+  const options = causeOptions(error);
+  const hint = onPathHint && options.code === "ENOENT" ? `; check that ${program} is on PATH` : "";
+  const code = options.code ? ` (${options.code})` : "";
+  return new FfmpegError(`${program} could not be started${code}${hint}`, options);
 }
 
 function spawnFfmpeg(
@@ -121,14 +133,8 @@ function spawnFfmpeg(
         windowsHide: true,
       });
     } catch (e) {
-      // For example a null byte in an argument. Node's message quotes the argument.
-      const code = errorCode(e);
-      reject(
-        new FfmpegError(`${program} could not be started (${code ?? "error"})`, {
-          ...(code ? { code } : {}),
-          cause: e,
-        }),
-      );
+      // For example a null byte in an argument.
+      reject(startError(program, e));
       return;
     }
     child.stderr.setEncoding("utf8");
@@ -142,15 +148,7 @@ function spawnFfmpeg(
       }
     });
     child.on("error", (e) => {
-      // Node's message names the command and the folder, so only the code is used.
-      const code = errorCode(e);
-      const reason = code === "ENOENT" ? `; check that ${program} is on PATH` : "";
-      reject(
-        new FfmpegError(`${program} could not be started (${code ?? "error"})${reason}`, {
-          ...(code ? { code } : {}),
-          cause: e,
-        }),
-      );
+      reject(startError(program, e, true));
     });
     child.on("close", (code, signal) => {
       if (code === 0) {
@@ -175,6 +173,11 @@ function spawnFfmpeg(
         new FfmpegError(`${what}${detail}`, {
           ...(code === null ? {} : { exitCode: code }),
           stderr: lines,
+          cause: Object.freeze(
+            code === null
+              ? { message: "stopped by a signal", ...(signal ? { signal } : {}) }
+              : { message: "exited with an error", exitCode: code },
+          ),
         }),
       );
     });
@@ -205,14 +208,14 @@ export type StderrContext = {
 
 /**
  * The last `FFMPEG_ERROR_LINES` non-empty lines of stderr that are safe to show, by an
- * allowlist on characters. Escape sequences and control characters are removed first. Then
- * these path tokens are verified, each only as a whole token at a boundary:
+ * allowlist on characters. Escape sequences and control characters other than tab are removed
+ * first. Then these path tokens are verified, each only as a whole token at a boundary:
  *
  * - a working-folder form followed by a path that has no ".." segment, shown as "./path";
  * - one of the given relative paths, shown as written.
  *
- * A line is shown only if, with its verified tokens taken out, it has none of `/ \ % ~` and no
- * "..". Every other line is left out, and a last line says how many were.
+ * A line is shown only if, with its verified tokens taken out, it holds only the characters of
+ * `SAFE_TEXT` and no "..". Every other line is left out, and a last line says how many were.
  */
 export function reportableStderr(stderr: string, context: StderrContext = {}): string[] {
   const token = pathTokenPattern(context);
@@ -223,7 +226,7 @@ export function reportableStderr(stderr: string, context: StderrContext = {}): s
   const kept: string[] = [];
   for (const line of lines) {
     const { shown, rest } = verifyPathTokens(line, token);
-    if (!UNSAFE_TEXT.test(rest)) kept.push(shown);
+    if (SAFE_TEXT.test(rest) && !rest.includes("..")) kept.push(shown);
   }
   const result = kept.slice(-FFMPEG_ERROR_LINES);
   const hidden = lines.length - kept.length;

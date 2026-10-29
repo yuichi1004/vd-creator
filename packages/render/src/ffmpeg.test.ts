@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { inspect } from "node:util";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { RenderError } from "./audio.js";
 import { FfmpegError, reportableStderr, runFfmpeg } from "./ffmpeg.js";
@@ -103,8 +104,9 @@ describe("runFfmpeg", () => {
       (e: unknown) => e,
     )) as FfmpegError;
     expect(error).toBeInstanceOf(FfmpegError);
-    expect(error.message).toBe("ffmpeg could not be started (ERR_INVALID_ARG_VALUE)");
-    expect(error.cause).toBeInstanceOf(Error);
+    // ERR_INVALID_ARG_VALUE is not on the list of codes that are shown.
+    expect(error.message).toBe("ffmpeg could not be started");
+    expect(error.cause).toBeUndefined();
   });
 
   test("names a command given by an absolute path by its file name only", async () => {
@@ -115,6 +117,23 @@ describe("runFfmpeg", () => {
     expect(error).toBeInstanceOf(FfmpegError);
     expect(error.message).not.toContain(dir);
     expect(error.message).toMatch(/^vd-no-such-ffmpeg could not be started \(ENOENT\)/);
+  });
+
+  test("keeps every part of a missing absolute command's path out of the whole error", async () => {
+    const home = await mkdtemp(join(dir, "home-alice-secret-"));
+    const command = join(home, "vd-no-such-ffmpeg");
+    const error = await runFfmpeg([], { command }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(FfmpegError);
+    // The cause, stack, and every other property are inspected too.
+    const shown = inspect(error, { depth: Number.POSITIVE_INFINITY, showHidden: true });
+    expect(shown).toContain("vd-no-such-ffmpeg could not be started (ENOENT)");
+    for (const part of [home, "alice-secret", "home-alice"]) {
+      expect(shown).not.toContain(part);
+    }
+    expect((error as FfmpegError).cause).toEqual({
+      message: "system error ENOENT",
+      code: "ENOENT",
+    });
   });
 
   test("leaves out the stderr line that the size limit cut, which may hold a path's end", async () => {
@@ -142,7 +161,7 @@ describe("runFfmpeg", () => {
       expect(error).toBeInstanceOf(FfmpegError);
       expect(error.message).toBe("ffmpeg could not be started (ENOENT)");
       expect(error.code).toBe("ENOENT");
-      expect(error.cause).toBeInstanceOf(Error);
+      expect(error.cause).toEqual({ message: "system error ENOENT", code: "ENOENT" });
     } finally {
       process.chdir(before);
     }
@@ -164,10 +183,26 @@ describe("runFfmpeg", () => {
   });
 
   test("never runs its arguments through a shell", async () => {
-    const error = (await runFfmpeg(["-hide_banner", "-nostdin", "-i", "$(echo x);ls"], {
-      cwd: dir,
+    // The script says whether it got the argument as written; a shell would have expanded it.
+    const script =
+      'process.stderr.write(process.argv[1] === "$(echo x);ls" ? "as written" : "expanded"); process.exit(1);';
+    const error = (await runFfmpeg(["-e", script, "$(echo x);ls"], {
+      command: process.execPath,
     }).catch((e: unknown) => e)) as FfmpegError;
-    expect(error.message).toContain("$(echo x);ls");
+    expect(error.message).toContain("as written");
+  });
+});
+
+describe("RenderError", () => {
+  test("rebuilds a cause from its allowed fields, dropping any error object", () => {
+    const original = Object.assign(new Error("open /home/alice-secret/x.wav"), {
+      code: "ENOENT",
+      path: "/home/alice-secret/x.wav",
+    });
+    const error = new RenderError("failed", { cause: original as never, code: "BAD" as never });
+    expect(error.cause).toEqual({ message: "system error ENOENT", code: "ENOENT" });
+    expect(error.code).toBeUndefined();
+    expect(inspect(error, { showHidden: true })).not.toContain("alice-secret");
   });
 });
 
@@ -283,6 +318,28 @@ describe("reportableStderr", () => {
     expect(reportableStderr(line, { folders: ["/srv/proj"] })).toEqual([
       "(1 line left out that may hold a path)",
     ]);
+  });
+
+  test.each([
+    ["a fullwidth slash", "\uff0fhome\uff0falice\uff0fprivate.wav: No such file or directory"],
+    [
+      "a fullwidth backslash",
+      "C:\uff3cUsers\uff3calice\uff3cprivate.wav: No such file or directory",
+    ],
+    ["U+FFFD from overlong slash bytes", "\ufffdhome\ufffdalice\ufffdprivate.wav: Invalid data"],
+    ["a tab", "Input #0,\twav, from alice: denied"],
+    ["a non-ASCII letter", "Error opening ålice: denied"],
+    ["a dollar sign", "Error opening $HOME: denied"],
+  ])("leaves out a line with %s", (_, line) => {
+    expect(reportableStderr(`${line}\nok`, { folders: ["/srv/proj"] })).toEqual([
+      "ok",
+      "(1 line left out that may hold a path)",
+    ]);
+  });
+
+  test("keeps a line of ASCII letters, digits, and the allowed punctuation", () => {
+    const line = `[mp3 @ 0x1f] Error (code=-22): 'a.b', 'c' "b" #1 *x* <y> | z; done! why? +1 _`;
+    expect(reportableStderr(line)).toEqual([line]);
   });
 
   test("shows names with combining marks", () => {
