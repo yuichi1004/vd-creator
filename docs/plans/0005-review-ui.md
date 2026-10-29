@@ -171,3 +171,5 @@ Phone checklist for the human: open the URL from the guide on a phone over Tails
 - Should the UI show a running total of paid characters used in this session?
 - Should `vd serve --host` print a QR code of the URL, so that the long token need not be typed? It needs a small dependency such as `qrcode-terminal`. The default is no QR in this plan.
 - Should paid generation be disabled entirely for requests coming through `--host`, leaving phones with the mock only? The default is to allow it with the confirm step.
+- Should the confirm step of a paid run carry the plan the user approved, such as a plan hash or a character ceiling, so that an edit made between the plan and the confirm (by an agent or another tab) cannot spend more than was shown? This changes the API and the web UI. The default is no check in this plan.
+- Should the Host allowlist accept a single trailing dot, such as `localhost.`? The default is to refuse it with 403, which is safe.
