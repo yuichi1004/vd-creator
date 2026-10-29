@@ -76,17 +76,30 @@ export type PatchResponse = ProjectResponse;
  */
 export type ScenarioErrorResponse = ScenarioErrorBody;
 
-/** Body of `POST /api/generate`. */
+/**
+ * Body of `POST /api/generate`. The server answers by these rules, for any provider:
+ *
+ * 1. `dryRun: true`: returns 200 with a `GeneratePlanResponse` and never generates.
+ *    `confirm` is ignored.
+ * 2. Otherwise, with a free provider (`paid: false`): runs at once and returns 200 with a
+ *    `GenerateRunResponse`. `confirm` is ignored.
+ * 3. Otherwise, with a paid provider (`paid: true`): runs only with `confirm: true`, and
+ *    returns 200 with a `GenerateRunResponse`. With `confirm` absent or false, generates
+ *    nothing and returns 409 with a `ConfirmRequiredError`, which holds the plan.
+ */
 export type GenerateRequest = {
   /** Only these item IDs. A BGM uses its scene's ID. All items when absent. */
   ids?: string[];
-  /** Required to run a paid provider. Without it, the response is the plan only. */
+  /** True returns the plan only and never generates, for any provider. */
+  dryRun?: boolean;
+  /** Must be true to run a paid provider. Ignored with `dryRun: true` or a free provider. */
   confirm?: boolean;
 };
 
 /**
- * Response of `POST /api/generate` without `confirm`: what would be generated and its
- * estimated cost. The UI shows "Generate (N characters)" from `plan.cost.characters`.
+ * What a generation would do and its estimated cost: the 200 response of
+ * `POST /api/generate` with `dryRun: true`, and the `plan` of a `ConfirmRequiredError`. The
+ * UI shows "Generate (N characters)" from `plan.cost.characters`.
  */
 export type GeneratePlanResponse = {
   kind: "plan";
@@ -107,7 +120,10 @@ export type GenerateItemResult = {
   | { status: "failed"; message: string }
 );
 
-/** Response of `POST /api/generate` that ran the generation. */
+/**
+ * The 200 response of `POST /api/generate` that ran the generation: without `dryRun`, with
+ * a free provider, or with a paid provider and `confirm: true`.
+ */
 export type GenerateRunResponse = {
   kind: "run";
   provider: ProviderInfo;
@@ -117,6 +133,7 @@ export type GenerateRunResponse = {
   failed: number;
 };
 
+/** A 200 response of `POST /api/generate`. `kind` tells the two apart. */
 export type GenerateResponse = GeneratePlanResponse | GenerateRunResponse;
 
 /** Query of `GET /api/library`. */
@@ -171,10 +188,21 @@ export type ApiErrorCode =
 
 /**
  * Body of every error response other than 422: 400 `bad-request`, 401 `unauthorized`
- * (missing or wrong token with `--host`), 404 `not-found`, 409 `confirm-required` (a paid
- * generation without `confirm`), and 500 `server-error`. `message` is fixed text.
+ * (missing or wrong token with `--host`), 404 `not-found`, 409 `confirm-required` (see
+ * `ConfirmRequiredError`), and 500 `server-error`. `message` is fixed text.
  */
 export type ApiError = {
   error: ApiErrorCode;
   message: string;
+};
+
+/**
+ * Body of the 409 response of `POST /api/generate`: the provider is paid, `dryRun` is not
+ * true, and `confirm` is absent or false. Nothing was generated. `plan` is the same plan a
+ * `dryRun: true` request returns, so the UI can show "Generate (N characters)" and, when the
+ * user presses it, send the same request again with `confirm: true`.
+ */
+export type ConfirmRequiredError = ApiError & {
+  error: "confirm-required";
+  plan: GeneratePlanResponse;
 };
