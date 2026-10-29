@@ -13,11 +13,14 @@ export const USAGE = `Usage: vd <command> [options]
 
 Commands:
   init <dir>        Create a project folder with a minimal scenario.yaml. The folder
-                    must not exist or contain only dotfiles, such as .git
+                    must not exist, or contain only .git, .gitignore, .gitattributes,
+                    or .DS_Store
   validate [dir]    Check <dir>/scenario.yaml (default: the current folder)
 
 Options:
-  -h, --help        Show this help`;
+  -h, --help        Show this help
+
+Set VD_DEBUG=1 to print stack traces of unexpected errors.`;
 
 /** Exit codes: 0 success, 1 failure such as validation errors, 2 bad usage. */
 export const EXIT_OK = 0;
@@ -29,8 +32,42 @@ const consoleOutput: CliOutput = {
   stderr: (line) => process.stderr.write(`${line}\n`),
 };
 
-/** Runs the vd command with `args` (without the node and script paths). Returns the exit code. */
-export async function run(args: string[], output: CliOutput = consoleOutput): Promise<number> {
+/** The Node error code, such as ENOENT or EACCES, of a file system error. */
+function errorCode(e: unknown): string | undefined {
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === "string" ? code : undefined;
+}
+
+/**
+ * Runs the vd command with `args` (without the node and script paths). Returns the exit code.
+ * Messages name paths as the user typed them. Raw error messages and stacks, which can hold
+ * absolute paths, are printed only when `env.VD_DEBUG` is "1".
+ */
+export async function run(
+  args: string[],
+  output: CliOutput = consoleOutput,
+  env: Record<string, string | undefined> = process.env,
+): Promise<number> {
+  const debug = (e: unknown) => {
+    if (env.VD_DEBUG === "1")
+      output.stderr(e instanceof Error ? (e.stack ?? e.message) : String(e));
+  };
+  try {
+    return await dispatch(args, output, debug);
+  } catch (e) {
+    const code = errorCode(e);
+    output.stderr(`vd: unexpected error${code ? ` (${code})` : ""}`);
+    if (env.VD_DEBUG === "1") debug(e);
+    else output.stderr("Set VD_DEBUG=1 for details.");
+    return EXIT_FAILURE;
+  }
+}
+
+async function dispatch(
+  args: string[],
+  output: CliOutput,
+  debug: (e: unknown) => void,
+): Promise<number> {
   let parsed: ReturnType<typeof parse>;
   try {
     parsed = parse(args);
@@ -46,9 +83,9 @@ export async function run(args: string[], output: CliOutput = consoleOutput): Pr
   }
   switch (command) {
     case "init":
-      return init(rest, output);
+      return init(rest, output, debug);
     case "validate":
-      return validate(rest, output);
+      return validate(rest, output, debug);
     case undefined:
       output.stderr(USAGE);
       return EXIT_USAGE;
@@ -67,24 +104,38 @@ function parse(args: string[]) {
   });
 }
 
-async function init(args: string[], output: CliOutput): Promise<number> {
+async function init(
+  args: string[],
+  output: CliOutput,
+  debug: (e: unknown) => void,
+): Promise<number> {
   const [dir, ...extra] = args;
   if (dir === undefined || extra.length > 0) {
     output.stderr("Usage: vd init <dir>");
     return EXIT_USAGE;
   }
   try {
-    const projectDir = await initProject(dir);
-    output.stdout(`Created ${projectDir}`);
-    return EXIT_OK;
+    await initProject(dir);
   } catch (e) {
-    if (!(e instanceof InitError)) throw e;
-    output.stderr(`vd init: ${e.message}`);
+    if (e instanceof InitError) {
+      output.stderr(`vd init: ${e.message}`);
+      return EXIT_FAILURE;
+    }
+    const code = errorCode(e);
+    if (code === undefined) throw e;
+    output.stderr(`vd init: cannot create ${dir}: ${code}`);
+    debug(e);
     return EXIT_FAILURE;
   }
+  output.stdout(`Created ${dir}`);
+  return EXIT_OK;
 }
 
-async function validate(args: string[], output: CliOutput): Promise<number> {
+async function validate(
+  args: string[],
+  output: CliOutput,
+  debug: (e: unknown) => void,
+): Promise<number> {
   const [dir = ".", ...extra] = args;
   if (extra.length > 0) {
     output.stderr("Usage: vd validate [dir]");
@@ -94,9 +145,10 @@ async function validate(args: string[], output: CliOutput): Promise<number> {
   try {
     result = await validateProject(dir);
   } catch (e) {
-    const code = (e as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT" && code !== "ENOTDIR" && code !== "EISDIR") throw e;
-    output.stderr(`vd validate: cannot read ${SCENARIO_FILE} in ${dir}`);
+    const code = errorCode(e);
+    if (code === undefined) throw e;
+    output.stderr(`vd validate: cannot read ${SCENARIO_FILE} in ${dir}: ${code}`);
+    debug(e);
     return EXIT_FAILURE;
   }
   for (const issue of result.issues) output.stderr(formatIssue(issue));

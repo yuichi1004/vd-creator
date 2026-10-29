@@ -7,7 +7,7 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "vd": "./dist/bin.js"
+    "vd": "./bin/vd.js"
   },
   "exports": {
     ".": {
@@ -16,7 +16,7 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && node -e \"require('node:fs').chmodSync('dist/bin.js', 0o755)\"",
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },

@@ -1,9 +1,19 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  cp,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseScenario } from "@vd-creator/scenario";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
@@ -26,15 +36,36 @@ afterEach(async () => {
   await rm(tmp, { recursive: true, force: true });
 });
 
-async function vd(...args: string[]) {
+// Permission tests do not work as root, who can write anywhere.
+const isRoot = process.getuid?.() === 0;
+
+async function vdWith(env: Record<string, string>, output: Partial<CliOutput>, args: string[]) {
   const stdout: string[] = [];
   const stderr: string[] = [];
-  const output: CliOutput = {
-    stdout: (line) => stdout.push(line),
-    stderr: (line) => stderr.push(line),
-  };
-  const code = await run(args, output);
+  const code = await run(
+    args,
+    {
+      stdout: output.stdout ?? ((line) => stdout.push(line)),
+      stderr: output.stderr ?? ((line) => stderr.push(line)),
+    },
+    env,
+  );
   return { code, stdout: stdout.join("\n"), stderr: stderr.join("\n") };
+}
+
+function vd(...args: string[]) {
+  return vdWith({}, {}, args);
+}
+
+/** Runs `fn` with `dir` as the current folder, so tests can pass relative paths. */
+async function inDir<T>(dir: string, fn: () => Promise<T>): Promise<T> {
+  const cwd = process.cwd();
+  process.chdir(dir);
+  try {
+    return await fn();
+  } finally {
+    process.chdir(cwd);
+  }
 }
 
 describe("vd init", () => {
@@ -53,19 +84,51 @@ describe("vd init", () => {
     expect(scenario?.title).toBe("my-drama");
   });
 
-  test("points the yaml-language-server comment at the shipped schema", async () => {
+  test("points the yaml-language-server comment at the schema's absolute file URL", async () => {
     const dir = join(tmp, "nested", "drama");
     expect((await vd("init", dir)).code).toBe(EXIT_OK);
     const text = await readFile(join(dir, "scenario.yaml"), "utf8");
-    const ref = /^# yaml-language-server: \$schema=(.+)$/m.exec(text)?.[1];
-    expect(ref).toBeDefined();
-    expect(resolve(dir, ref as string)).toBe(scenarioSchemaPath());
+    const ref = /^# yaml-language-server: \$schema=(.+)$/m.exec(text)?.[1] as string;
+    expect(ref).toBe(pathToFileURL(scenarioSchemaPath()).href);
+    expect(fileURLToPath(ref)).toBe(scenarioSchemaPath());
     expect((await stat(scenarioSchemaPath())).isFile()).toBe(true);
+
+    // The comment keeps working after the project folder moves.
+    const moved = join(tmp, "elsewhere", "deeper", "drama");
+    await mkdir(dirname(moved), { recursive: true });
+    await rename(dir, moved);
+    const movedRef = /\$schema=(.+)$/m.exec(await readFile(join(moved, "scenario.yaml"), "utf8"));
+    expect((await stat(fileURLToPath(movedRef?.[1] as string))).isFile()).toBe(true);
   });
 
   test("accepts an existing empty folder", async () => {
     expect((await vd("init", tmp)).code).toBe(EXIT_OK);
     expect((await vd("validate", tmp)).code).toBe(EXIT_OK);
+  });
+
+  test("accepts .git and .gitignore", async () => {
+    await mkdir(join(tmp, ".git"));
+    await writeFile(join(tmp, ".gitignore"), "out/\n");
+    expect((await vd("init", tmp)).code).toBe(EXIT_OK);
+    expect((await readdir(tmp)).sort()).toEqual([
+      ".git",
+      ".gitignore",
+      "assets",
+      "out",
+      "scenario.yaml",
+    ]);
+  });
+
+  test.each([
+    ["a hidden file", ".notes", "file"],
+    ["a hidden folder", ".drafts", "folder"],
+  ])("refuses a folder with %s", async (_, name, kind) => {
+    if (kind === "file") await writeFile(join(tmp, name), "secret");
+    else await mkdir(join(tmp, name));
+    const result = await vd("init", tmp);
+    expect(result.code).toBe(EXIT_FAILURE);
+    expect(result.stderr).toContain("is not empty");
+    expect(await readdir(tmp)).toEqual([name]);
   });
 
   test("refuses a folder that is not empty and leaves it untouched", async () => {
@@ -76,22 +139,18 @@ describe("vd init", () => {
     expect(await readdir(tmp)).toEqual(["notes.txt"]);
   });
 
-  test("accepts a folder with only dotfiles, such as a fresh git repository", async () => {
-    await mkdir(join(tmp, ".git"));
-    expect((await vd("init", tmp)).code).toBe(EXIT_OK);
-    expect((await readdir(tmp)).sort()).toEqual([".git", "assets", "out", "scenario.yaml"]);
-  });
-
-  test("names the project after the folder when given a relative path", async () => {
-    const cwd = process.cwd();
-    process.chdir(tmp);
-    try {
-      expect((await vd("init", "relative-drama")).code).toBe(EXIT_OK);
-    } finally {
-      process.chdir(cwd);
-    }
+  test("names the project after a relative folder and prints it as typed", async () => {
+    const result = await inDir(tmp, () => vd("init", "relative-drama"));
+    expect(result).toEqual({ code: EXIT_OK, stdout: "Created relative-drama", stderr: "" });
     const text = await readFile(join(tmp, "relative-drama", "scenario.yaml"), "utf8");
     expect(parseScenario(text).scenario?.title).toBe("relative-drama");
+  });
+
+  test.skipIf(isRoot)("reports a file system error by code, naming the path as typed", async () => {
+    await mkdir(join(tmp, "locked"), { mode: 0o500 });
+    const result = await inDir(tmp, () => vd("init", "locked/drama"));
+    expect(result.code).toBe(EXIT_FAILURE);
+    expect(result.stderr).toBe("vd init: cannot create locked/drama: EACCES");
   });
 
   test("refuses a path that is a file or inside a file", async () => {
@@ -184,10 +243,17 @@ describe("vd validate", () => {
     expect(result.stderr).toMatch(/^\(root\): /);
   });
 
-  test("fails when there is no scenario.yaml", async () => {
-    const result = await vd("validate", join(tmp, "missing"));
+  test("fails when there is no scenario.yaml, naming the folder as typed", async () => {
+    const result = await inDir(tmp, () => vd("validate", "missing"));
     expect(result.code).toBe(EXIT_FAILURE);
-    expect(result.stderr).toContain("cannot read scenario.yaml");
+    expect(result.stderr).toBe("vd validate: cannot read scenario.yaml in missing: ENOENT");
+  });
+
+  test("reports an unreadable scenario.yaml by code", async () => {
+    await mkdir(join(tmp, "scenario.yaml"));
+    const result = await inDir(tmp, () => vd("validate"));
+    expect(result.code).toBe(EXIT_FAILURE);
+    expect(result.stderr).toBe("vd validate: cannot read scenario.yaml in .: EISDIR");
   });
 
   test("passes the package sample", async () => {
@@ -199,12 +265,34 @@ describe("vd validate", () => {
   });
 });
 
-// The built bin, run as a real process. Skipped when the workspace has not been built.
-const bin = fileURLToPath(new URL("../dist/bin.js", import.meta.url));
+const cliRoot = fileURLToPath(new URL("..", import.meta.url));
+const bin = join(cliRoot, "bin", "vd.js");
+const built = existsSync(join(cliRoot, "dist", "bin.js"));
 
-describe.skipIf(!existsSync(bin))("dist/bin.js", () => {
-  test("is executable and passes exit codes through", async () => {
-    expect((await stat(bin)).mode & 0o111).not.toBe(0);
+describe("bin/vd.js", () => {
+  test("is the bin entry, checked in outside the build output, and executable", async () => {
+    const pkg = JSON.parse(await readFile(join(cliRoot, "package.json"), "utf8"));
+    const entry = resolve(cliRoot, pkg.bin.vd);
+    expect(entry).toBe(bin);
+    // npm links bins during npm ci, before anything is built.
+    expect(relative(cliRoot, entry).split(sep)[0]).not.toBe("dist");
+    expect(existsSync(entry)).toBe(true);
+    expect((await stat(entry)).mode & 0o111).not.toBe(0);
+    expect((await readFile(entry, "utf8")).startsWith("#!/usr/bin/env node\n")).toBe(true);
+  });
+
+  test("tells the user to build when dist is missing", async () => {
+    // A copy of the launcher with no dist/ next to it.
+    const copy = join(tmp, "bin", "vd.js");
+    await mkdir(dirname(copy));
+    await cp(bin, copy);
+    const result = spawnSync(process.execPath, [copy, "--help"], { encoding: "utf8" });
+    expect(result.status).toBe(EXIT_FAILURE);
+    expect(result.stderr.trim().split("\n")).toHaveLength(1);
+    expect(result.stderr).toContain("npm run build");
+  });
+
+  test.skipIf(!built)("passes exit codes through", async () => {
     const dir = join(tmp, "proc");
     expect(spawnSync(bin, ["init", dir], { encoding: "utf8" }).status).toBe(EXIT_OK);
     expect(spawnSync(bin, ["validate", dir], { encoding: "utf8" }).status).toBe(EXIT_OK);
@@ -217,6 +305,25 @@ describe.skipIf(!existsSync(bin))("dist/bin.js", () => {
 });
 
 describe("vd", () => {
+  // An output that fails stands in for an unexpected error whose message holds a path.
+  const failingStdout = () => {
+    throw new Error("boom at /some/absolute/path");
+  };
+
+  test("hides the message and stack of an unexpected error", async () => {
+    const result = await vdWith({}, { stdout: failingStdout }, ["--help"]);
+    expect(result.code).toBe(EXIT_FAILURE);
+    expect(result.stderr).toBe("vd: unexpected error\nSet VD_DEBUG=1 for details.");
+  });
+
+  test("prints the stack of an unexpected error with VD_DEBUG=1", async () => {
+    const result = await vdWith({ VD_DEBUG: "1" }, { stdout: failingStdout }, ["--help"]);
+    expect(result.code).toBe(EXIT_FAILURE);
+    expect(result.stderr).toMatch(
+      /^vd: unexpected error\nError: boom at \/some\/absolute\/path\n\s+at /,
+    );
+  });
+
   test("prints help", async () => {
     const result = await vd("--help");
     expect(result.code).toBe(EXIT_OK);

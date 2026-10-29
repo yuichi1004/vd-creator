@@ -1,6 +1,6 @@
 import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { SCENARIO_FILE } from "@vd-creator/scenario";
 
@@ -47,19 +47,29 @@ scenes:
 `;
 }
 
-/** How scenario.yaml in `projectDir` refers to the schema: relative if possible. */
-function schemaRefFor(projectDir: string): string {
-  const schema = scenarioSchemaPath();
-  const rel = relative(projectDir, schema);
-  // On Windows a schema on another drive has no relative path.
-  if (isAbsolute(rel)) return pathToFileURL(schema).href;
-  return rel.split(sep).join("/");
+/**
+ * How a new scenario.yaml refers to the schema: the absolute location of the installed
+ * schema as a file:// URL. Unlike a path relative to the project, it keeps working when
+ * the project folder moves on the same machine. If the vd installation moves, or the
+ * project is opened on another machine, rerun `vd init` elsewhere or edit the comment.
+ * The URL lands only in the user's project, never in this repository.
+ */
+export function scenarioSchemaUrl(): string {
+  return pathToFileURL(scenarioSchemaPath()).href;
 }
+
+/** Entries that may already be in the folder that `vd init` fills, such as a fresh git repo. */
+export const ALLOWED_EXISTING_ENTRIES: readonly string[] = [
+  ".git",
+  ".gitignore",
+  ".gitattributes",
+  ".DS_Store",
+];
 
 /**
  * Creates a project folder with a minimal valid scenario.yaml and empty `assets/` and
- * `out/` folders. Throws an `InitError` if the folder has entries other than dotfiles,
- * such as `.git`. Returns the absolute path of the project folder.
+ * `out/` folders. Throws an `InitError`, naming `dir` as given, if the folder has entries
+ * other than `ALLOWED_EXISTING_ENTRIES`. Returns the absolute path of the project folder.
  */
 export async function initProject(dir: string): Promise<string> {
   const projectDir = resolve(dir);
@@ -68,18 +78,17 @@ export async function initProject(dir: string): Promise<string> {
     if (e.code === "ENOTDIR") throw new InitError(`${dir} is a file or is inside a file`);
     throw e;
   });
-  if (existing.some((name) => !name.startsWith("."))) {
+  if (existing.some((name) => !ALLOWED_EXISTING_ENTRIES.includes(name))) {
     throw new InitError(`${dir} is not empty`);
   }
 
   await mkdir(projectDir, { recursive: true });
   const title = basename(projectDir) || "Untitled";
   // "wx" fails instead of overwriting if another process created the file meanwhile.
-  await writeFile(
-    join(projectDir, SCENARIO_FILE),
-    scenarioTemplate(title, schemaRefFor(projectDir)),
-    { encoding: "utf8", flag: "wx" },
-  );
+  await writeFile(join(projectDir, SCENARIO_FILE), scenarioTemplate(title, scenarioSchemaUrl()), {
+    encoding: "utf8",
+    flag: "wx",
+  });
   for (const folder of PROJECT_FOLDERS) await mkdir(join(projectDir, folder));
   return projectDir;
 }
