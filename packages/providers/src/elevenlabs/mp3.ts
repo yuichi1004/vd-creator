@@ -7,9 +7,6 @@ const BITRATES_V2 = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 16
 // Hertz, by sample rate index, for MPEG 1. MPEG 2 halves them and MPEG 2.5 quarters them.
 const SAMPLE_RATES_V1 = [44100, 48000, 32000];
 
-const ID3V1_LENGTH = 128;
-const ID3V1_ENHANCED_LENGTH = 227;
-const APE_FOOTER_LENGTH = 32;
 /** Encoder strings that start a LAME-style tag with the encoder delay and padding. */
 const LAME_ENCODERS = ["LAME", "Lavc", "Lavf"];
 
@@ -20,26 +17,30 @@ const LAME_ENCODERS = ["LAME", "Lavc", "Lavf"];
 export type Mp3Frames = { start: number; end: number; durationSec: number };
 
 /**
- * Finds the run of whole MPEG Layer III frames after an optional ID3v2 tag, or throws if there is
- * none. Trailing ID3v1 and APEv2 tags are removed first, so a truncated last frame cannot reach
- * into them, and an incomplete last frame is left out of the range.
+ * Finds the run of MPEG Layer III frames after an optional ID3v2 tag, or throws if there is none.
+ * A frame is kept only if the next frame header starts exactly at its end, or if it ends exactly
+ * at the end of the data. The walk stops at the first frame that fails this, and drops it and
+ * everything after it. Trailing data of any kind, such as an ID3v1 or APEv2 tag, is never parsed
+ * and never kept, at the cost of the last frame when there is such data.
  */
 export function mp3Frames(data: Uint8Array): Mp3Frames {
   const start = id3v2Length(data);
-  const limit = trailingTagsStart(data, start);
   let offset = start;
   let frames = 0;
   let sampleRate = 0;
   let samplesPerFrame = 0;
   let header: GaplessInfo | undefined;
-  while (offset + 4 <= limit) {
+  for (;;) {
     const frame = parseFrameHeader(data, offset);
-    if (!frame || offset + frame.length > limit) break;
-    if (frames === 0) header = gaplessInfo(data.subarray(offset, offset + frame.length), frame);
+    if (!frame) break;
+    const next = offset + frame.length;
+    if (next > data.length || (next < data.length && !parseFrameHeader(data, next))) break;
+    if (frames === 0) header = gaplessInfo(data.subarray(offset, next), frame);
     frames++;
     sampleRate = frame.sampleRate;
     samplesPerFrame = frame.samples;
-    offset += frame.length;
+    offset = next;
+    if (offset === data.length) break;
   }
   if (frames === 0) {
     throw new Error("The audio is not MP3: no MPEG Layer III frame found");
@@ -69,6 +70,7 @@ type FrameHeader = {
 };
 
 function parseFrameHeader(data: Uint8Array, offset: number): FrameHeader | undefined {
+  if (offset < 0 || offset + 4 > data.length) return undefined;
   const b1 = data[offset] ?? 0;
   const b2 = data[offset + 1] ?? 0;
   const b3 = data[offset + 2] ?? 0;
@@ -118,28 +120,6 @@ function gaplessInfo(frame: Uint8Array, header: FrameHeader): GaplessInfo | unde
   return { delay: (b0 << 4) | (b1 >> 4), padding: ((b1 & 0x0f) << 8) | b2 };
 }
 
-/**
- * Where the trailing tags start: an ID3v1 tag (with an optional enhanced TAG+ block before it),
- * and an APEv2 tag before that, if present. Never before `start`.
- */
-function trailingTagsStart(data: Uint8Array, start: number): number {
-  let end = data.length;
-  if (end - ID3V1_LENGTH >= start && ascii(data, end - ID3V1_LENGTH, 3) === "TAG") {
-    end -= ID3V1_LENGTH;
-    const enhanced = end - ID3V1_ENHANCED_LENGTH;
-    if (enhanced >= start && ascii(data, enhanced, 4) === "TAG+") end = enhanced;
-  }
-  const footer = end - APE_FOOTER_LENGTH;
-  if (footer >= start && ascii(data, footer, 8) === "APETAGEX") {
-    // The size counts the items and the footer. A header, when flagged, adds 32 more bytes.
-    const size = readUint32LE(data, footer + 12);
-    const hasHeader = ((data[footer + 23] ?? 0) & 0x80) !== 0;
-    const tagStart = end - size - (hasHeader ? APE_FOOTER_LENGTH : 0);
-    end = Math.max(start, Math.min(footer, tagStart));
-  }
-  return end;
-}
-
 function ascii(data: Uint8Array, offset: number, length: number): string {
   if (offset < 0 || offset + length > data.length) return "";
   return String.fromCharCode(...data.subarray(offset, offset + length));
@@ -151,15 +131,6 @@ function readUint32(data: Uint8Array, offset: number): number {
     ((data[offset + 1] ?? 0) << 16) +
     ((data[offset + 2] ?? 0) << 8) +
     (data[offset + 3] ?? 0)
-  );
-}
-
-function readUint32LE(data: Uint8Array, offset: number): number {
-  return (
-    (data[offset] ?? 0) +
-    ((data[offset + 1] ?? 0) << 8) +
-    ((data[offset + 2] ?? 0) << 16) +
-    (((data[offset + 3] ?? 0) << 24) >>> 0)
   );
 }
 

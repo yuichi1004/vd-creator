@@ -13,7 +13,7 @@ import {
   ElevenLabsSfxProvider,
   ElevenLabsTtsProvider,
 } from "./index.js";
-import { mp3DurationSec } from "./mp3.js";
+import { mp3DurationSec, mp3Frames } from "./mp3.js";
 import { containsSecret, redactKey } from "./redact.js";
 
 const FAKE_KEY = "test-key-not-real";
@@ -324,12 +324,14 @@ test("a successful response returns the MP3 with its duration and meta", async (
   });
 });
 
-test("mp3DurationSec skips an ID3v2 tag and trailing bytes", () => {
+test("mp3DurationSec skips an ID3v2 tag and drops the frame before trailing bytes", () => {
   const tag = new Uint8Array([0x49, 0x44, 0x33, 4, 0, 0, 0, 0, 0, 5, 1, 2, 3, 4, 5]);
   const frames = fakeMp3(3);
   const trailer = new Uint8Array([0x54, 0x41, 0x47, 0]);
   const data = new Uint8Array([...tag, ...frames, ...trailer]);
-  expect(mp3DurationSec(data)).toBeCloseTo((3 * 1152) / 44100, 9);
+  // The third frame is not followed by a frame header or the end of the data, so it is dropped.
+  expect(mp3DurationSec(data)).toBeCloseTo((2 * 1152) / 44100, 9);
+  expect(mp3DurationSec(new Uint8Array([...tag, ...frames]))).toBeCloseTo((3 * 1152) / 44100, 9);
   expect(() => mp3DurationSec(new Uint8Array([1, 2, 3, 4, 5]))).toThrow(/not MP3/);
 });
 
@@ -787,7 +789,7 @@ test("redirect: Node's fetch never sends the key to the origin a 302 points at",
   expect(expectNoKey(error).code).toBe("unexpected_redirect");
 });
 
-test("audio: ID3 tags and trailing bytes are dropped, and the duration is unchanged", async () => {
+test("audio: ID3 tags and trailing bytes are dropped, with the frame before trailing data", async () => {
   const marker = new TextEncoder().encode(`key=${LEAK_KEY}`);
   // An ID3v2 tag whose 40-byte body holds the key.
   const id3v2Body = new Uint8Array(40);
@@ -798,21 +800,21 @@ test("audio: ID3 tags and trailing bytes are dropped, and the duration is unchan
   id3v1.set([0x54, 0x41, 0x47]);
   id3v1.set(marker, 3);
   const frames = fakeMp3(5);
-  for (const parts of [
-    [id3v2, frames],
-    [frames, id3v1],
-    [frames, marker],
-    [id3v2, frames, id3v1, marker],
-  ]) {
+  for (const [parts, kept] of [
+    [[id3v2, frames], 5],
+    [[frames, id3v1], 4],
+    [[frames, marker], 4],
+    [[id3v2, frames, id3v1, marker], 4],
+  ] as const) {
     const body = new Uint8Array(parts.flatMap((p) => [...p]));
     const stub = stubFetch(() => new Response(body, { status: 200 }));
     const result = await createElevenLabsProviders({
       env: { ELEVENLABS_API_KEY: LEAK_KEY },
       fetch: stub.fetch,
     }).sfx.generate({ prompt: "x", take: 0 });
-    expect(result.data).toEqual(frames);
+    expect(result.data).toEqual(fakeMp3(kept));
     expect(result.durationSec).toBeCloseTo(mp3DurationSec(body), 9);
-    expect(result.durationSec).toBeCloseTo((5 * 1152) / 44100, 9);
+    expect(result.durationSec).toBeCloseTo((kept * 1152) / 44100, 9);
     expectNoLeak(Buffer.from(result.data).toString("latin1"), LEAK_KEY);
   }
 });
@@ -970,3 +972,83 @@ test.skipIf(!hasFfmpeg)("audio: the duration matches what ffmpeg decodes", () =>
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/** An ID3v1 tag and an APEv2 tag with a header and footer, each holding the key. */
+function trailingTags(): { id3v1: Uint8Array; ape: Uint8Array } {
+  const id3v1 = new Uint8Array(128);
+  id3v1.set(ascii("TAG"));
+  id3v1.set(ascii(LEAK_KEY), 3);
+  const items = concat(ascii(`title\u0000${LEAK_KEY}`), new Uint8Array(100));
+  const apeBlock = (flags: number) => {
+    const block = new Uint8Array(32);
+    const view = new DataView(block.buffer);
+    block.set(ascii("APETAGEX"));
+    view.setUint32(8, 2000, true);
+    view.setUint32(12, items.length + 32, true);
+    view.setUint32(16, 1, true);
+    view.setUint32(20, flags, true);
+    return block;
+  };
+  return { id3v1, ape: concat(apeBlock(0xa0000000), items, apeBlock(0x80000000)) };
+}
+
+test("audio: stacked or reversed trailing tags after a truncated frame never enter the audio", async () => {
+  const { id3v1, ape } = trailingTags();
+  const whole = frame();
+  const truncated = frame().subarray(0, 300);
+  for (const [name, tail] of [
+    ["two ID3v1", [id3v1, id3v1]],
+    ["two APEv2", [ape, ape]],
+    ["ID3v1 then APEv2", [id3v1, ape]],
+    ["APEv2, ID3v1, APEv2", [ape, id3v1, ape]],
+  ] as const) {
+    const result = await generateAudio(concat(whole, truncated, ...tail));
+    expect(result.data, name).toEqual(whole);
+    expect(result.durationSec).toBeCloseTo(1152 / 44100, 9);
+    expectNoLeak(Buffer.from(result.data).toString("latin1"), LEAK_KEY);
+  }
+});
+
+test("audio: tag signatures inside the last frame do not drop it", async () => {
+  // A clean file whose final frame happens to hold "TAG" 128 bytes and "APETAGEX" 32 bytes before
+  // the end, in its ancillary data. Every frame is real audio and is kept.
+  const frames = Array.from({ length: 10 }, () => frame());
+  const body = concat(...frames);
+  body.set(ascii("TAG"), body.length - 128);
+  body.set(ascii("APETAGEX"), body.length - 32);
+  const result = await generateAudio(body);
+  expect(result.data).toEqual(body);
+  expect(result.durationSec).toBeCloseTo((10 * 1152) / 44100, 9);
+});
+
+test("audio: a clean file with no trailing data keeps every frame", async () => {
+  const body = concat(headerFrame("Info", 40, { delay: 576, padding: 1404 }), fakeMp3(40));
+  const result = await generateAudio(body);
+  expect(result.data).toEqual(body);
+  expect(Math.abs(result.durationSec - 1)).toBeLessThan(0.001);
+});
+
+test.skipIf(!hasFfmpeg)(
+  "audio: ffmpeg audio keeps every frame, even with tag signatures in it",
+  () => {
+    const dir = mkdtempSync(join(tmpdir(), "vd-mp3-"));
+    try {
+      const file = join(dir, "tone.mp3");
+      const encoded = spawnSync("ffmpeg", [
+        ...["-v", "error", "-y", "-f", "lavfi", "-i", "sine=d=0.7:sample_rate=44100"],
+        ...["-c:a", "libmp3lame", "-b:a", "128k", file],
+      ]);
+      if (encoded.status !== 0) return;
+      const clean = new Uint8Array(readFileSync(file));
+      const parsed = mp3Frames(clean);
+      expect(parsed.end).toBe(clean.length);
+      // The same bytes with the signatures written into the final frame's data.
+      const signed = clean.slice();
+      signed.set(ascii("TAG"), signed.length - 128);
+      signed.set(ascii("APETAGEX"), signed.length - 32);
+      expect(mp3Frames(signed)).toEqual(parsed);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
