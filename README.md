@@ -138,7 +138,7 @@ The user directory can hold these files, all optional:
 └── docs/         # Free-form private notes for you and your agents
 ```
 
-Agents read your `AGENTS.md` and `docs/` before working, as described in [`AGENTS.md`](AGENTS.md). Your `AGENTS.md` can add rules but cannot loosen the repository's rules. Don't put API keys in the user directory; keep them in environment variables or a gitignored `.env`. See [plan 0008](docs/plans/0008-user-config.md) for the design.
+Agents read your `AGENTS.md` and `docs/` before working, as described in [`AGENTS.md`](AGENTS.md). Your `AGENTS.md` can add rules but cannot loosen the repository's rules. Don't put API keys in the user directory; set them as environment variables, such as `ELEVENLABS_API_KEY`, in your shell. vd does not read a `.env` file. See [plan 0008](docs/plans/0008-user-config.md) for the design.
 
 ## Development
 
