@@ -1052,3 +1052,106 @@ test.skipIf(!hasFfmpeg)(
     }
   },
 );
+
+const allAudio = [
+  (set: ReturnType<typeof createElevenLabsProviders>) =>
+    set.tts.synthesize({ text: "Hi.", voiceId: "v", take: 0 }),
+  sfx,
+  (set: ReturnType<typeof createElevenLabsProviders>) =>
+    set.music.generate({ prompt: "x", durationSec: 10, take: 0 }),
+];
+
+/** Asserts that TTS, SFX, and music each fail with the fixed key guard error. */
+async function expectAudioHoldsKey(body: Uint8Array): Promise<void> {
+  for (const call of allAudio) {
+    const { error } = await failWith(LEAK_KEY, () => new Response(body, { status: 200 }), call);
+    const e = expectNoKey(error);
+    expect(e.code).toBe("audio_holds_key");
+    // The message is the fixed template, with no response bytes in it.
+    expect(e.message).toMatch(
+      /: HTTP 200, the audio holds the API key, so it is not returned \(audio_holds_key\)$/,
+    );
+  }
+}
+
+test("audio: trailing bytes that complete a claimed frame cannot carry the key out", async () => {
+  // 417 bytes of a frame, 289 bytes of another that claims 417, and an ID3v1 tag with the key:
+  // the tag completes the second frame, so the frame rule alone keeps all 834 bytes.
+  const id3v1 = new Uint8Array(128);
+  id3v1.set(ascii("TAG"));
+  id3v1.set(ascii(LEAK_KEY), 3);
+  const body = concat(frame(), frame().subarray(0, 289), id3v1);
+  expect(body.length).toBe(834);
+  expect(mp3Frames(body).end).toBe(834);
+  await expectAudioHoldsKey(body);
+});
+
+test("audio: a chain of valid frames crafted to carry the key fails", async () => {
+  const frames = Array.from({ length: 5 }, () => frame());
+  frames[2]?.set(ascii(`x${LEAK_KEY}x`), 100);
+  const body = concat(...frames);
+  expect(mp3Frames(body).end).toBe(body.length);
+  await expectAudioHoldsKey(body);
+  // An 8-character piece of the key is enough.
+  const piece = concat(frame(), frame());
+  piece.set(ascii(LEAK_KEY.slice(5, 13)), 200);
+  await expectAudioHoldsKey(piece);
+});
+
+test("audio: a key split by case still fails", async () => {
+  const mixed = [...LEAK_KEY].map((c, i) => (i % 2 ? c.toUpperCase() : c.toLowerCase())).join("");
+  expect(mixed).not.toBe(LEAK_KEY);
+  const body = concat(frame(), frame());
+  body.set(ascii(mixed), 50);
+  await expectAudioHoldsKey(body);
+});
+
+test("mp3: every reserved or invalid frame header value is rejected", () => {
+  const withHeader = (bytes: readonly number[]) => {
+    const f = frame();
+    f.set(bytes);
+    return concat(f, f);
+  };
+  expect(mp3DurationSec(withHeader([0xff, 0xfb, 0x90, 0x00]))).toBeCloseTo((2 * 1152) / 44100, 9);
+  for (const [name, header] of [
+    ["version 01", [0xff, 0xeb, 0x90, 0x00]],
+    ["layer 00", [0xff, 0xf9, 0x90, 0x00]],
+    ["bitrate index 1111", [0xff, 0xfb, 0xf0, 0x00]],
+    ["free format bitrate 0000", [0xff, 0xfb, 0x00, 0x00]],
+    ["sample rate index 11", [0xff, 0xfb, 0x9c, 0x00]],
+    ["emphasis 10", [0xff, 0xfb, 0x90, 0x02]],
+  ] as const) {
+    expect(() => mp3DurationSec(withHeader(header)), name).toThrow(/not MP3/);
+  }
+});
+
+test("audio: clean audio without the key keeps every frame for TTS, SFX, and music", async () => {
+  const body = concat(headerFrame("Info", 12, { delay: 576, padding: 1404 }), fakeMp3(12));
+  for (const call of allAudio) {
+    const stub = stubFetch(() => new Response(body, { status: 200 }));
+    const set = createElevenLabsProviders({
+      env: { ELEVENLABS_API_KEY: LEAK_KEY },
+      fetch: stub.fetch,
+    });
+    const result = (await call(set)) as AudioResult;
+    expect(result.data).toEqual(body);
+  }
+});
+
+test.skipIf(!hasFfmpeg)("audio: ffmpeg audio passes the key guard with every frame", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "vd-mp3-"));
+  try {
+    const file = join(dir, "tone.mp3");
+    const encoded = spawnSync("ffmpeg", [
+      ...["-v", "error", "-y", "-f", "lavfi", "-i", "sine=d=0.7:sample_rate=44100"],
+      ...["-c:a", "libmp3lame", "-b:a", "128k", file],
+    ]);
+    if (encoded.status !== 0) return;
+    const clean = new Uint8Array(readFileSync(file));
+    const { start } = mp3Frames(clean);
+    const result = await generateAudio(clean);
+    expect(result.data).toEqual(clean.subarray(start));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

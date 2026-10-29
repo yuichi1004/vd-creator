@@ -7,13 +7,14 @@
 // of scope: it can read the environment directly.
 //
 // The key is sent only to the configured https host: redirects are never followed, since fetch
-// would send the key header to the new location. Audio from that host is trusted as audio, but
-// only a run of MPEG frames is kept. After an optional leading ID3v2 tag, whose size is in its
-// header, a frame is kept only if the next frame header starts exactly at its end or it ends
-// exactly at the end of the response. Everything from the first frame that fails this is
-// dropped, so trailing data of any kind never enters the asset file. Trailing tags are never
-// parsed, and nothing inside a frame is inspected for tag signatures. A file with trailing data
-// loses its last frame, about 26 ms, which is accepted.
+// would send the key header to the new location. Audio from that host is trimmed to a run of
+// chained MPEG frames after an optional leading ID3v2 tag, which drops tags and trailing bytes
+// from clean files and keeps the duration accurate. That trimming is not a secret boundary: it
+// cannot tell trailing bytes from frame data. What keeps the key out of the asset file is a
+// final guard on the bytes about to be returned, read as latin1: if they hold the key or any
+// 8-character piece of it, ignoring ASCII case, the result fails with a fixed error that holds
+// none of the response. An encoding of the key other than raw bytes, such as base64 or a hash, is
+// out of scope: only the trusted host, which already has the key, could produce one.
 
 const REDACTED = "[redacted]";
 /** A key substring at least this long counts as a leak. Shorter keys are matched whole. */

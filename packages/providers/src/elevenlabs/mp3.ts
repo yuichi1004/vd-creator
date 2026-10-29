@@ -1,7 +1,7 @@
 // MP3 duration by walking the MPEG audio frames. Only Layer III is supported, which is what
 // ElevenLabs returns for its mp3_* output formats.
 
-// Kilobits per second, by bitrate index. Index 0 (free) and 15 (bad) are not supported.
+// Kilobits per second, by bitrate index. Index 0 (free) and 15 (bad) are rejected.
 const BITRATES_V1 = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0];
 const BITRATES_V2 = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0];
 // Hertz, by sample rate index, for MPEG 1. MPEG 2 halves them and MPEG 2.5 quarters them.
@@ -76,6 +76,7 @@ function parseFrameHeader(data: Uint8Array, offset: number): FrameHeader | undef
   const b3 = data[offset + 2] ?? 0;
   const b4 = data[offset + 3] ?? 0;
   if (b1 !== 0xff || (b2 & 0xe0) !== 0xe0) return undefined;
+  if ((b4 & 0b11) === 0b10) return undefined; // reserved emphasis
   const version = (b2 >> 3) & 0b11; // 0: MPEG 2.5, 1: reserved, 2: MPEG 2, 3: MPEG 1
   const layer = (b2 >> 1) & 0b11; // 1: Layer III
   if (version === 1 || layer !== 1) return undefined;

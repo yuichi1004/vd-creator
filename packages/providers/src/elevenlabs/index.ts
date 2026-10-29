@@ -63,6 +63,7 @@ const LOCAL_ERRORS = {
   unexpected_redirect: "the API answered with a redirect, which is not followed",
   body_read_failed: "response body read failed",
   bad_audio: "the response is not MP3 audio",
+  audio_holds_key: "the audio holds the API key, so it is not returned",
   internal_error: "internal error",
 } as const;
 
@@ -175,15 +176,21 @@ class ElevenLabsClient {
       } catch {
         throw fail("body_read_failed", status);
       }
-      // Only the MPEG frames are kept: ID3 tags and trailing bytes could carry any data.
+      // Only the chained MPEG frames are kept. This trims tags and trailing bytes for clean audio
+      // and an accurate duration, but it cannot tell trailing bytes from frame data.
       let frames: Mp3Frames;
       try {
         frames = mp3Frames(body);
       } catch {
         throw fail("bad_audio", status);
       }
+      const data = body.slice(frames.start, frames.end);
+      // The guard that keeps the key out of the asset file, for every TTS, SFX, and music result.
+      if (containsSecret(Buffer.from(data).toString("latin1"), apiKey)) {
+        throw fail("audio_holds_key", status);
+      }
       return {
-        data: body.slice(frames.start, frames.end),
+        data,
         format: "mp3",
         durationSec: frames.durationSec,
         meta: { ...prepared.meta, provider: ELEVENLABS_PROVIDER_ID },
