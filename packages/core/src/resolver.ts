@@ -27,8 +27,9 @@ export type PlannedAsset =
   | { status: "unresolved"; reason: string }
   /**
    * The item's request cannot be keyed, such as a line whose speaker settings hold a
-   * non-finite number or a cycle. The pipeline sets this status, not the resolvers: it is the
-   * outcome when `plan` throws the `canonicalJson` error. The reason names only the item.
+   * non-finite number or a cycle. The pipeline sets this status when `plan` throws the
+   * `canonicalJson` error, and a resolver may also return it. The item is never generated: a
+   * generation run reports it as failed. The reason names only the item, never its request.
    */
   | { status: "invalid"; reason: string };
 

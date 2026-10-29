@@ -6,8 +6,9 @@ import { parseScenario, type Scenario } from "@vd-creator/scenario";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AssetCache } from "./cache.js";
 import { CANONICAL_JSON_UNSUPPORTED } from "./canonical.js";
-import { GenerationError, planGeneration, runGeneration } from "./generate.js";
-import { defaultResolvers } from "./resolver.js";
+import { GenerationError, planGeneration, planPlayback, runGeneration } from "./generate.js";
+import type { ScenarioItem } from "./items.js";
+import { type AssetResolver, defaultResolvers, type PlannedAsset } from "./resolver.js";
 import { computeTimeline } from "./timeline.js";
 
 // Speaker settings are free-form in the scenario schema, so a valid scenario can hold values
@@ -45,6 +46,9 @@ scenes:
 
 const CASES = [
   { name: "a .inf value", settings: "{ stability: .inf }" },
+  { name: "a .nan value", settings: "{ stability: .nan }" },
+  { name: "a 1e400 value", settings: "{ stability: 1e400 }" },
+  { name: "a !!binary value", settings: "{ stability: !!binary aGVsbG8= }" },
   { name: "a cyclic alias", settings: "&c { stability: 0.5, self: *c }" },
 ];
 
@@ -115,5 +119,101 @@ describe.each(CASES)("a line whose speaker settings hold $name", ({ settings }) 
     // The estimate still moves the items after it.
     const bad1 = item("bad");
     expect(item("fx")?.startSec).toBeCloseTo((bad1?.startSec ?? 0) + (bad1?.durationSec ?? 0), 6);
+  });
+});
+
+describe("a resolver outside the package", () => {
+  const scenario = scenarioWith("{ stability: 0.5 }");
+  const isFx = (item: ScenarioItem) => item.id === "fx";
+
+  /** A resolver for "fx" only, whose plan is given, and that counts its resolve calls. */
+  const fxResolver = (plan: () => Promise<PlannedAsset>) => {
+    const resolver = {
+      id: "custom",
+      resolved: 0,
+      handles: isFx,
+      plan,
+      resolve: async () => {
+        resolver.resolved++;
+        return { file: "sfx/custom.wav", durationSec: 1, generated: true };
+      },
+    } satisfies AssetResolver & { resolved: number };
+    return resolver;
+  };
+  const withMock = (resolver: AssetResolver) => [
+    resolver,
+    ...defaultResolvers(createMockProviders()),
+  ];
+
+  test("that throws the canonicalJson error makes the item invalid everywhere", async () => {
+    const resolvers = withMock(
+      fxResolver(async () => {
+        throw new TypeError(CANONICAL_JSON_UNSUPPORTED);
+      }),
+    );
+    const cache = new AssetCache(dir);
+    const invalid = {
+      id: "fx",
+      kind: "sfx",
+      sceneId: "s1",
+      resolver: "custom",
+      status: "invalid",
+      reason: expect.stringContaining('sfx "fx"'),
+    };
+    const plan = await planGeneration(scenario, cache, resolvers);
+    expect(plan.items.find((i) => i.id === "fx")).toEqual(invalid);
+    expect(plan.items.filter((i) => i.status === "to-generate")).toHaveLength(3);
+    expect((await planPlayback(scenario, cache, resolvers)).find((i) => i.id === "fx")).toEqual(
+      invalid,
+    );
+    const timeline = await computeTimeline(scenario, cache, resolvers);
+    expect(timeline.items.find((i) => i.id === "fx")).toMatchObject({
+      missing: true,
+      invalid: true,
+    });
+    expect(timeline.items.find((i) => i.id === "good")?.invalid).toBeUndefined();
+  });
+
+  test("that returns invalid is never generated and fails in a generation run", async () => {
+    const resolver = fxResolver(async () => ({ status: "invalid", reason: 'sfx "fx" is bad' }));
+    const result = await runGeneration(scenario, new AssetCache(dir), withMock(resolver));
+    expect(resolver.resolved).toBe(0);
+    const fx = result.items.find((i) => i.id === "fx");
+    expect(fx).toMatchObject({ status: "failed", resolver: "custom" });
+    if (fx?.status !== "failed") throw new Error("fx must fail");
+    expect(fx.error).toBeInstanceOf(GenerationError);
+    expect(fx.error.message).toBe('Failed to plan sfx "fx"');
+    expect(result.failed).toBe(1);
+    expect(result.items.filter((i) => i.status === "generated")).toHaveLength(3);
+  });
+
+  test("that returns an unknown status is never generated and fails in a generation run", async () => {
+    const resolver = fxResolver(async () => ({ status: "later" }) as unknown as PlannedAsset);
+    const result = await runGeneration(scenario, new AssetCache(dir), withMock(resolver));
+    expect(resolver.resolved).toBe(0);
+    expect(result.items.find((i) => i.id === "fx")).toMatchObject({ status: "failed" });
+    expect(result.failed).toBe(1);
+  });
+
+  test("that throws another TypeError still fails planning and the timeline", async () => {
+    const resolvers = withMock(
+      fxResolver(async () => {
+        throw new TypeError("something else");
+      }),
+    );
+    const cache = new AssetCache(dir);
+    for (const run of [
+      () => planGeneration(scenario, cache, resolvers),
+      () => planPlayback(scenario, cache, resolvers),
+      () => computeTimeline(scenario, cache, resolvers),
+    ]) {
+      const error = await run().then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+      expect(error).toBeInstanceOf(GenerationError);
+      expect((error as GenerationError).message).toBe('Failed to plan sfx "fx"');
+      expect((error as GenerationError).cause).toEqual(new TypeError("something else"));
+    }
   });
 });

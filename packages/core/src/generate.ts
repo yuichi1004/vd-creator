@@ -175,16 +175,32 @@ async function runItem(
   } catch (e) {
     return { ...withResolver, status: "failed", error: new GenerationError(item, "plan", e) };
   }
-  if (planned.status === "unresolved") {
-    return { ...withResolver, status: "unresolved", reason: planned.reason };
-  }
-  if (planned.status === "cached") {
-    return {
-      ...withResolver,
-      status: "cached",
-      file: planned.file,
-      durationSec: planned.durationSec,
-    };
+  // Only a to-generate item is generated. Any other status, including one this code does not
+  // know, never reaches resolve().
+  switch (planned.status) {
+    case "to-generate":
+      break;
+    case "cached":
+      return {
+        ...withResolver,
+        status: "cached",
+        file: planned.file,
+        durationSec: planned.durationSec,
+      };
+    case "unresolved":
+      return { ...withResolver, status: "unresolved", reason: planned.reason };
+    case "invalid":
+      return {
+        ...withResolver,
+        status: "failed",
+        error: new GenerationError(item, "plan", new Error(planned.reason)),
+      };
+    default: {
+      // A resolver outside this package may return a status added later.
+      const _unknown: never = planned;
+      const cause = new Error("The resolver returned an unknown plan status");
+      return { ...withResolver, status: "failed", error: new GenerationError(item, "plan", cause) };
+    }
   }
   try {
     const asset = await resolver.resolve(item, ctx);
