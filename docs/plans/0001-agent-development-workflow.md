@@ -165,8 +165,8 @@ Problems and fixes (applied to [`docs/development-workflow.md`](../development-w
 
 From running plans 0003 to 0008 on 2026-10-29, with up to three Claude implementers in parallel:
 
-1. **Reviewer routing by size used up Codex.** Codex hit its usage limit in the middle of the run, and reviews waited. Fix: route by risk instead. Codex reviews security-sensitive code, Astra reviews hard-to-undo format and interface changes, and Claude reviews the rest and every fix round.
-2. **Fix rounds kept finding new low-severity issues.** Fix: cap fix rounds at two. After that, only a P1 or a secret leak blocks a merge, and the rest becomes follow-ups in the plan's review notes.
+1. **Reviewer routing by size used up Codex.** Codex hit its usage limit in the middle of the run, and reviews waited. Fix: route by risk instead. Codex with `gpt-6.1-sol` reviews security-sensitive code, Codex with `gpt-6-astra` reviews hard-to-undo format and interface changes, and Claude reviews the rest and every fix round.
+2. **Fix rounds kept finding new low-severity issues.** Fix: cap fix rounds at two. After that, only a P1 or a real secret or token leak blocks a merge, and the rest becomes follow-ups in the plan's review notes.
 3. **Parallel tasks were safe when Ownership split by workspace.** For example, `vd render` owned `apps/cli` while provider records owned `packages/core`. A worker that needed a change in the other workspace asked instead of editing it.
 4. **A `--help` check in the main checkout read stale compiled output.** It made a merged command look missing. Fix: rebuild after each merge.
 5. **Health checks every few minutes were too frequent for the human.** A watchdog every 10 minutes, with one-line replies to heartbeat-only relays, was enough.

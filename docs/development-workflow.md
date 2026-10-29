@@ -93,12 +93,12 @@ A timeout means "nothing yet", not failure. After three empty waits in a row, in
 
 ## 5. Review
 
-When a worker reports `--outcome succeeded`, start a reviewer on the same worktree. Every change gets a reviewer, including small documentation changes. The coordinator still reads the diff (`git diff main...<task branch>`), but that does not replace the review.
+When a worker reports `--outcome succeeded`, start a reviewer on the same worktree. Every change gets a reviewer, including small documentation changes, except a small diff that the coordinator may review directly (see below). Otherwise the coordinator still reads the diff (`git diff main...<task branch>`), but that does not replace the review.
 
 Codex usage is limited, so choose the reviewer by what the change touches:
 
 - **Security-sensitive code** gets a Codex reviewer (`gpt-6.1-sol`) for its first review: the server and its token, API keys, and paid generation.
-- **A hard-to-undo change to a public interface or a file format**, such as the scenario schema, gets a `gpt-6-astra` reviewer.
+- **A hard-to-undo change to a public interface or a file format**, such as the scenario schema, gets a Codex reviewer (`gpt-6-astra`).
 - **Everything else** gets a Claude reviewer (`--agent claude`), and so does every fix round, whoever did the first review. A small diff, such as a few lines of documentation, may be reviewed by the coordinator directly.
 
 If Codex is at its usage limit, either wait for the reset or ask the human whether a Claude review is enough for now.
@@ -114,12 +114,12 @@ orca orchestration worker-start --worktree <implementer_worktree_selector> --age
   --spec "Review branch task/NNNN-<short-name> against this spec: <spec>. Check AGENTS.md rules. Report findings in worker_done. Do not edit files." --json
 ```
 
-Always pass `--model` and `--effort` for a Codex reviewer. Without them, Codex may run with no reasoning effort. Choose the model by what a wrong review would cost:
+Always pass `--model` and `--effort` for a Codex reviewer. Without them, Codex may run with no reasoning effort. Choose the model by the routing above:
 
 | Model | Use for |
 |---|---|
-| `gpt-6.1-sol`, effort `high` | The default for every review. Close to Astra in quality, with about three times the usage limit. |
-| `gpt-6-astra`, effort `high` | Reviews where a mistake is expensive later: architecture, public interfaces, file formats such as the scenario schema, and security. Its usage limit is low, so use it only for these. |
+| `gpt-6.1-sol`, effort `high` | The first review of security-sensitive code. Close to Astra in quality, with about three times the usage limit. |
+| `gpt-6-astra`, effort `high` | Hard-to-undo changes to architecture, public interfaces, or file formats such as the scenario schema. Its usage limit is low, so use it only for these. |
 
 `gpt-6.1-terra` is meant for writing and images, and `gpt-6-luna` is too light for review. Neither is used for code review.
 
