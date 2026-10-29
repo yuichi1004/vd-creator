@@ -47,7 +47,9 @@ export function placeIssues(
   }
 
   for (const issue of licenseIssues) {
-    const keys = issue.target === "entry" && scenario ? libraryUsers(scenario, issue.id) : [];
+    // An issue without a target, such as an unreadable credits.json, concerns the project.
+    const target = issue.target;
+    const keys = target?.type === "entry" && scenario ? libraryUsers(scenario, target) : [];
     if (keys.length === 0) add(undefined, issue);
     for (const key of keys) add(key, issue);
   }
@@ -55,14 +57,16 @@ export function placeIssues(
 }
 
 /** The items that use a library entry, by key. */
-function libraryUsers(scenario: Scenario, entryId: string): ItemKey[] {
+function libraryUsers(scenario: Scenario, entry: { kind: "sfx" | "bgm"; id: string }): ItemKey[] {
   const keys: ItemKey[] = [];
   scenario.scenes.forEach((scene, sceneIndex) => {
-    if (scene.bgm && "library" in scene.bgm && scene.bgm.library === entryId) {
+    const bgm = scene.bgm;
+    if (entry.kind === "bgm" && bgm && "library" in bgm && bgm.library === entry.id) {
       keys.push(`${sceneIndex}/bgm`);
     }
     scene.items.forEach((item, itemIndex) => {
-      if ("sfx" in item && typeof item.sfx === "object" && item.sfx.library === entryId) {
+      if (entry.kind !== "sfx") return;
+      if ("sfx" in item && typeof item.sfx === "object" && item.sfx.library === entry.id) {
         keys.push(`${sceneIndex}/${itemIndex}`);
       }
     });

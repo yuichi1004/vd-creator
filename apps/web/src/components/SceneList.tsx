@@ -100,7 +100,12 @@ type ItemRowProps = SceneProps & { item: Item; entry: TimelineItem | undefined }
 
 function ItemRow(props: ItemRowProps) {
   const { item, entry } = props;
-  const time = entry ? <span className="time">{formatTime(entry.startSec)}</span> : null;
+  // The space keeps the time apart from the label in the row's text, as in "0:03 Pause 1.5 s".
+  const time = entry ? (
+    <>
+      <span className="time">{formatTime(entry.startSec)}</span>{" "}
+    </>
+  ) : null;
   if ("line" in item) return <LineRow {...props} item={item} time={time} />;
   if ("sfx" in item) return <SfxRow {...props} item={item} time={time} />;
   if ("pause" in item) {

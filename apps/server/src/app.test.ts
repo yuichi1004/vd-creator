@@ -4,7 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ASSETS_DIR, type AssetResolver } from "@vd-creator/core";
-import { importEntry, initLibrary } from "@vd-creator/library";
+import {
+  CREDITS_FILE,
+  findEntry,
+  importEntry,
+  initLibrary,
+  readLibrary,
+  toCreditEntry,
+} from "@vd-creator/library";
 import { SCENARIO_FILE } from "@vd-creator/scenario";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type {
@@ -146,7 +153,11 @@ describe("GET /api/project", () => {
     expect(body.scenario?.title).toBe("The Lighthouse Keeper");
     expect(body.timeline).toBeDefined();
     expect(body.issues).toEqual([]);
-    expect(body.licenseIssues).toEqual([]);
+    // As in `vd validate`: without a library, the sample's library sounds cannot be checked.
+    expect(body.licenseIssues.map((i) => [i.target, i.severity])).toEqual([
+      [{ type: "entry", kind: "sfx", id: "door-creak-wood-01" }, "warning"],
+      [{ type: "entry", kind: "bgm", id: "ambient-hum-low" }, "warning"],
+    ]);
     expect(body.provider).toEqual({ id: "fake", paid: false });
     expect(body.library).toBe(false);
     const withLibrary = await getJson<ProjectResponse>(makeApp({ library }), "/api/project");
@@ -168,6 +179,83 @@ describe("GET /api/project", () => {
     const text = await response.text();
     expect(text).not.toContain(dir);
     expect((JSON.parse(text) as ProjectResponse).scenario).toBeUndefined();
+  });
+});
+
+describe("license issues of GET /api/project", () => {
+  /** A scenario for `publish.use` with one line and one SFX from the library. */
+  async function writeScenario(use: string) {
+    await writeFile(
+      join(project, SCENARIO_FILE),
+      [
+        "version: 1",
+        "title: Door",
+        "publish:",
+        `  use: ${use}`,
+        "speakers:",
+        "  - id: mira",
+        "    name: Mira",
+        "    voice: { provider: fake, voiceId: v1 }",
+        "scenes:",
+        "  - id: s1",
+        "    items:",
+        "      - line: Hello",
+        "        id: s1-l1",
+        "        speaker: mira",
+        "      - sfx: { library: door-creak-01 }",
+        "        id: s1-door",
+        "",
+      ].join("\n"),
+    );
+  }
+
+  test("checks a provider in cache.json that credits.json lacks, as vd validate does", async () => {
+    const app = makeApp();
+    const run = await send(app, "POST", "/api/generate", {});
+    expect(run.status).toBe(200);
+    expect((await readFile(join(project, "cache.json"), "utf8")).length).toBeGreaterThan(0);
+    await rm(join(project, CREDITS_FILE), { force: true });
+
+    const body = await getJson<ProjectResponse>(app, "/api/project");
+    expect(body.licenseIssues).toContainEqual({
+      target: { type: "provider", id: "fake" },
+      message: expect.stringMatching(/Provider "fake" made assets .* has no record of it/),
+      severity: "warning",
+    });
+  });
+
+  test("shows an unreadable credits.json as an issue without a target", async () => {
+    await writeFile(join(project, CREDITS_FILE), "{ not json");
+    const body = await getJson<ProjectResponse>(makeApp(), "/api/project");
+    expect(body.licenseIssues).toEqual([
+      { message: expect.stringContaining(CREDITS_FILE), severity: "error" },
+    ]);
+    expect(JSON.stringify(body.licenseIssues)).not.toContain(dir);
+  });
+
+  test("a library entry not copied yet is checked from the library", async () => {
+    await addLibraryEntry();
+    await writeScenario("private");
+    const body = await getJson<ProjectResponse>(makeApp({ library }), "/api/project");
+    expect(body.licenseIssues).toContainEqual({
+      target: { type: "entry", kind: "sfx", id: "door-creak-01" },
+      message: expect.stringMatching(/not copied into the project yet; run vd generate/),
+      severity: "warning",
+    });
+  });
+
+  test("an issue of a copied entry includes the hint to run library status and sync", async () => {
+    await addLibraryEntry();
+    await writeScenario("commercial");
+    const lib = await readLibrary(library);
+    const credit = toCreditEntry(findEntry(lib, "door-creak-01", "sfx"), lib.licenses, "door.wav");
+    const credits = { version: 1, entries: [credit], providers: [] };
+    await writeFile(join(project, CREDITS_FILE), JSON.stringify(credits));
+
+    const body = await getJson<ProjectResponse>(makeApp({ library }), "/api/project");
+    const issue = body.licenseIssues.find((i) => i.target?.type === "entry");
+    expect(issue).toMatchObject({ target: { kind: "sfx", id: "door-creak-01" } });
+    expect(issue?.message).toContain("run vd library status and vd library sync");
   });
 });
 

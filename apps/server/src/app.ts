@@ -1,29 +1,26 @@
 // The Hono app with the HTTP API of docs/plans/0005-review-ui.md, section "HTTP API".
 
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   ASSETS_DIR,
   AssetCache,
   type AssetResolver,
   BudgetExceededError,
+  checkLibraryLicenses,
   computeTimeline,
   defaultResolvers,
   type GeneratedItemResolver,
+  type ProjectLicenseIssue,
   planGeneration,
   type RunGenerationOptions,
   runGeneration,
   scenarioItems,
 } from "@vd-creator/core";
 import {
-  CREDITS_FILE,
-  CreditsSchema,
-  checkProjectLicenses,
   type Entry,
   LIBRARY_KINDS,
   LibraryError,
   type LibraryKind,
-  type LicenseCheckIssue,
   type LicenseRegistry,
   lookupLicense,
   readLibrary,
@@ -110,6 +107,7 @@ const NOT_WEB = ["/api/", "/assets/", "/library-files/"];
 
 const PROJECT_UNREADABLE = "scenario.yaml cannot be read";
 const LIBRARY_UNREADABLE = "The library cannot be read; run vd library check";
+const LICENSES_UNCHECKED = "The licenses cannot be checked; run vd validate";
 const NOT_VERIFIED = "The entry was not verified; run vd library check";
 
 type Status = 400 | 401 | 404 | 409 | 500;
@@ -196,16 +194,13 @@ export function createApp(options: AppOptions): Hono {
     return { ...base, scenario, issues, licenseIssues: await licenseIssues(scenario), timeline };
   }
 
-  async function licenseIssues(scenario: Scenario): Promise<LicenseCheckIssue[]> {
-    let data: unknown;
+  // The check of `vd validate`, so the UI shows the same license issues as the CLI.
+  async function licenseIssues(scenario: Scenario): Promise<ProjectLicenseIssue[]> {
     try {
-      data = JSON.parse(await readFile(join(projectDir, CREDITS_FILE), "utf8"));
+      return await checkLibraryLicenses(projectDir, scenario, { library });
     } catch {
-      // No credits yet, or a file that `vd validate` reports.
-      return [];
+      return [{ message: LICENSES_UNCHECKED, severity: "error" }];
     }
-    const credits = CreditsSchema.safeParse(data);
-    return credits.success ? checkProjectLicenses(credits.data, scenario.publish.use) : [];
   }
 
   app.get("/api/project", async (c) => c.json(await project()));

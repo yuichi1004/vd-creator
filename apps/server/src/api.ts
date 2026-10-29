@@ -1,8 +1,13 @@
 // Request and response types of the HTTP API. See "HTTP API" in docs/plans/0005-review-ui.md.
 // Types only: apps/web imports them with `import type`, so nothing here may be runtime code.
 
-import type { GenerationPlan, ScenarioItemKind, Timeline } from "@vd-creator/core";
-import type { Entry, LibraryKind, LicenseCheckIssue, LicenseTerms } from "@vd-creator/library";
+import type {
+  GenerationPlan,
+  ProjectLicenseIssue,
+  ScenarioItemKind,
+  Timeline,
+} from "@vd-creator/core";
+import type { Entry, LibraryKind, LicenseTerms } from "@vd-creator/library";
 import type { Issue, Scenario, ScenarioErrorBody, ScenarioErrorIssue } from "@vd-creator/scenario";
 
 export type { ScenarioErrorIssue };
@@ -23,8 +28,12 @@ export type ProjectResponse = {
   scenario?: Scenario;
   /** YAML and validation issues of `scenario.yaml`, errors and warnings. */
   issues: Issue[];
-  /** License issues of the library entries and the provider used by the project (0007). */
-  licenseIssues: LicenseCheckIssue[];
+  /**
+   * License issues of the library entries and the providers used by the project (0007), from
+   * the same check as `vd validate`. An issue without a `target` concerns the whole project,
+   * such as an unreadable `credits.json` or `cache.json`.
+   */
+  licenseIssues: ProjectLicenseIssue[];
   /**
    * Start time and duration of every item. Absent when there is no valid scenario. Asset
    * files are relative to `assets/` and are fetched from `assets/<file>`.
