@@ -76,7 +76,7 @@ When the server knows a library (`VD_LIBRARY` or `vd serve --library`), the UI s
 | `GET /api/events` | Server-sent events: `project-changed` when `scenario.yaml` or `cache.json` changes on disk. |
 | `PATCH /api/items/:id` | Change `text`, `speaker`, `gapBeforeSec`, or `take` of one item, or the source of an SFX (`{ prompt }` or `{ library }`). Saved through `updateItem`, so comments survive. |
 | `PATCH /api/scenes/:id` | Change the scene's BGM source and volume. |
-| `POST /api/generate` | Body `{ ids?: string[], confirm?: boolean }`. Without `confirm`, returns the plan only. Returns 409 if a paid run lacks `confirm`. Library items are resolved, not generated, and cost nothing. |
+| `POST /api/generate` | Body `{ ids?: string[], dryRun?: boolean, confirm?: boolean }`. With `dryRun: true`, returns the plan only and never generates, for any provider. Otherwise it runs: a free provider runs at once and ignores `confirm`; a paid provider runs only with `confirm: true`, and without it returns 409 `confirm-required` with the plan in the body, so the UI can show "Generate (N characters)". Library items are resolved, not generated, and cost nothing. (The `dryRun` field and the 409 body were fixed during implementation, because the first wording left a request without `confirm` meaning both "plan" and "refuse".) |
 | `GET /api/library` | Query `q`, `kind`. Entries with license and verified state. 404 when no library is set. |
 | `POST /api/library/:kind/:id/verify` | Body `{ confirm: true, approveCommercial?: boolean }`. Marks the entry verified. |
 | `GET /library-files/:kind/:id` | The entry's audio, for preview. Only files named in an `entry.yaml` are served. |
