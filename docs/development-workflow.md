@@ -99,10 +99,20 @@ When a worker reports `--outcome succeeded`:
 - Otherwise, start a reviewer on the same worktree, preferably with a different model:
 
 ```sh
-orca orchestration worker-start --worktree <implementer_worktree_selector> --agent <reviewer_agent> \
+orca orchestration worker-start --worktree <implementer_worktree_selector> --agent codex \
+  --model gpt-6.1-sol --effort high \
   --task-title "Review: <short task name>" \
   --spec "Review branch task/NNNN-<short-name> against this spec: <spec>. Check AGENTS.md rules. Report findings in worker_done. Do not edit files." --json
 ```
+
+Always pass `--model` and `--effort` for a Codex reviewer. Without them, Codex may run with no reasoning effort. Choose the model by what a wrong review would cost:
+
+| Model | Use for |
+|---|---|
+| `gpt-6.1-sol`, effort `high` | The default for every review. Close to Astra in quality, with about three times the usage limit. |
+| `gpt-6-astra`, effort `high` | Reviews where a mistake is expensive later: architecture, public interfaces, file formats such as the scenario schema, and security. Its usage limit is low, so use it only for these. |
+
+`gpt-6.1-terra` is meant for writing and images, and `gpt-6-luna` is too light for review. Neither is used for code review.
 
 If there are findings, send them back as a follow-up on the same Task branch. Reuse the implementer's terminal if it is still live, or start a new implementer with `--retry-of`.
 
