@@ -171,12 +171,11 @@ async function runItem(
   const withResolver = { ...base, resolver: resolver.id };
   let planned: PlannedAsset;
   try {
-    planned = await resolver.plan(item, ctx);
+    planned = checkedPlan(item, await resolver.plan(item, ctx));
   } catch (e) {
     return { ...withResolver, status: "failed", error: new GenerationError(item, "plan", e) };
   }
-  // Only a to-generate item is generated. Any other status, including one this code does not
-  // know, never reaches resolve().
+  // Only a to-generate item is generated; every other status returns here.
   switch (planned.status) {
     case "to-generate":
       break;
@@ -189,18 +188,14 @@ async function runItem(
       };
     case "unresolved":
       return { ...withResolver, status: "unresolved", reason: planned.reason };
-    case "invalid":
+    // "invalid", and any status checkedPlan missed, so that nothing unknown is generated.
+    default:
+      // The cause is the fixed text, not the resolver's reason, which may hold request text.
       return {
         ...withResolver,
         status: "failed",
-        error: new GenerationError(item, "plan", new Error(planned.reason)),
+        error: new GenerationError(item, "plan", new Error(invalidReason(item))),
       };
-    default: {
-      // A resolver outside this package may return a status added later.
-      const _unknown: never = planned;
-      const cause = new Error("The resolver returned an unknown plan status");
-      return { ...withResolver, status: "failed", error: new GenerationError(item, "plan", cause) };
-    }
   }
   try {
     const asset = await resolver.resolve(item, ctx);
@@ -224,7 +219,7 @@ async function planItem(
   const resolver = resolvers.find((r) => r.handles(item));
   if (!resolver) return { ...base, status: "unresolved", reason: NO_RESOLVER };
   try {
-    return { ...base, resolver: resolver.id, ...(await resolver.plan(item, ctx)) };
+    return { ...base, resolver: resolver.id, ...checkedPlan(item, await resolver.plan(item, ctx)) };
   } catch (e) {
     // A request that cannot be keyed affects only its own item.
     if (isCanonicalJsonError(e)) {
@@ -232,6 +227,18 @@ async function planItem(
     }
     throw new GenerationError(item, "plan", e);
   }
+}
+
+const PLAN_STATUSES = new Set<string>(["cached", "to-generate", "unresolved", "invalid"]);
+
+/**
+ * The plan a resolver returned, or `invalid` with the fixed reason if its status is not one
+ * this package knows, such as a status a resolver outside the package added later.
+ */
+function checkedPlan(item: ScenarioItem, planned: PlannedAsset): PlannedAsset {
+  return PLAN_STATUSES.has(planned?.status)
+    ? planned
+    : { status: "invalid", reason: invalidReason(item) };
 }
 
 function selectItems(scenario: Scenario, options: GenerationOptions): ScenarioItem[] {

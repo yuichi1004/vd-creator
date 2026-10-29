@@ -6,7 +6,13 @@ import { parseScenario, type Scenario } from "@vd-creator/scenario";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AssetCache } from "./cache.js";
 import { CANONICAL_JSON_UNSUPPORTED } from "./canonical.js";
-import { GenerationError, planGeneration, planPlayback, runGeneration } from "./generate.js";
+import {
+  GenerationError,
+  type GenerationResult,
+  planGeneration,
+  planPlayback,
+  runGeneration,
+} from "./generate.js";
 import type { ScenarioItem } from "./items.js";
 import { type AssetResolver, defaultResolvers, type PlannedAsset } from "./resolver.js";
 import { computeTimeline } from "./timeline.js";
@@ -174,25 +180,69 @@ describe("a resolver outside the package", () => {
     expect(timeline.items.find((i) => i.id === "good")?.invalid).toBeUndefined();
   });
 
-  test("that returns invalid is never generated and fails in a generation run", async () => {
-    const resolver = fxResolver(async () => ({ status: "invalid", reason: 'sfx "fx" is bad' }));
-    const result = await runGeneration(scenario, new AssetCache(dir), withMock(resolver));
-    expect(resolver.resolved).toBe(0);
+  /** Stands for request text that a careless resolver puts in its reason. */
+  const SECRET = "SECRET-MARKER-4f2a";
+  const FIXED_CAUSE = /^The request of sfx "fx" is not plain JSON/;
+
+  /** Checks that a failed fx has the fixed error, with no trace of the resolver's reason. */
+  const expectFixedFailure = (result: GenerationResult) => {
     const fx = result.items.find((i) => i.id === "fx");
     expect(fx).toMatchObject({ status: "failed", resolver: "custom" });
     if (fx?.status !== "failed") throw new Error("fx must fail");
     expect(fx.error).toBeInstanceOf(GenerationError);
     expect(fx.error.message).toBe('Failed to plan sfx "fx"');
+    const cause = fx.error.cause;
+    expect(cause).toBeInstanceOf(Error);
+    expect((cause as Error).message).toMatch(FIXED_CAUSE);
+    for (const text of [
+      fx.error.message,
+      fx.error.stack,
+      (cause as Error).message,
+      (cause as Error).stack,
+    ]) {
+      expect(String(text)).not.toContain(SECRET);
+    }
     expect(result.failed).toBe(1);
+  };
+
+  test("that returns invalid is never generated and fails with the fixed cause", async () => {
+    const resolver = fxResolver(async () => ({ status: "invalid", reason: `bad: ${SECRET}` }));
+    const result = await runGeneration(scenario, new AssetCache(dir), withMock(resolver));
+    expect(resolver.resolved).toBe(0);
+    expectFixedFailure(result);
     expect(result.items.filter((i) => i.status === "generated")).toHaveLength(3);
   });
 
-  test("that returns an unknown status is never generated and fails in a generation run", async () => {
-    const resolver = fxResolver(async () => ({ status: "later" }) as unknown as PlannedAsset);
+  const unknownStatus = () =>
+    fxResolver(async () => ({ status: "later", reason: SECRET }) as unknown as PlannedAsset);
+
+  test("that returns an unknown status is never generated and fails with the fixed cause", async () => {
+    const resolver = unknownStatus();
     const result = await runGeneration(scenario, new AssetCache(dir), withMock(resolver));
     expect(resolver.resolved).toBe(0);
-    expect(result.items.find((i) => i.id === "fx")).toMatchObject({ status: "failed" });
-    expect(result.failed).toBe(1);
+    expectFixedFailure(result);
+  });
+
+  test("that returns an unknown status makes the item invalid in plan, playback, and timeline", async () => {
+    const resolvers = withMock(unknownStatus());
+    const cache = new AssetCache(dir);
+    const invalid = {
+      id: "fx",
+      kind: "sfx",
+      sceneId: "s1",
+      resolver: "custom",
+      status: "invalid",
+      reason: expect.stringMatching(FIXED_CAUSE),
+    };
+    expect(
+      (await planGeneration(scenario, cache, resolvers)).items.find((i) => i.id === "fx"),
+    ).toEqual(invalid);
+    expect((await planPlayback(scenario, cache, resolvers)).find((i) => i.id === "fx")).toEqual(
+      invalid,
+    );
+    const fx = (await computeTimeline(scenario, cache, resolvers)).items.find((i) => i.id === "fx");
+    expect(fx).toMatchObject({ missing: true, invalid: true });
+    expect(fx?.unresolved).toBeUndefined();
   });
 
   test("that throws another TypeError still fails planning and the timeline", async () => {

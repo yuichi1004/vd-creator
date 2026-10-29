@@ -91,10 +91,12 @@ export async function computeTimeline(
         return { asset: { file: planned.file, durationSec: planned.durationSec } };
       case "to-generate":
         return {};
-      case "invalid":
-        return { invalid: true };
-      default:
+      case "unresolved":
+      case undefined:
         return { unresolved: true };
+      default:
+        // planPlayback has already made any unknown status invalid.
+        return { invalid: true };
     }
   };
 
