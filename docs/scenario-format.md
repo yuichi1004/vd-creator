@@ -2,15 +2,45 @@
 
 This guide is for agents that write or edit `scenario.yaml`, the source of truth for a drama. It describes schema version 1 as the code defines it: the Zod schema in [`packages/scenario/src/schema.ts`](../packages/scenario/src/schema.ts) and the ID and reference checks in [`packages/scenario/src/validate.ts`](../packages/scenario/src/validate.ts). The design behind it is in [plan 0003](plans/0003-scenario-format.md). If this guide and the code disagree, the code wins.
 
+## Starting a project
+
+A project is a folder with a `scenario.yaml`, an `assets/` folder, and an `out/` folder. Start a new one with `vd init`:
+
+```sh
+npx vd init <dir>
+```
+
+The `vd` command lives in this repository. Run `npm run build` once before you use it, and again after you pull changes. `npx vd` works only inside this repository, so run it from the repository root and pass the project folder as `<dir>`. From any other folder, run `node <repository>/apps/cli/bin/vd.js` instead of `npx vd`. Do not run `npx vd` outside the repository: npx would then look for a package named `vd` on the npm registry.
+
+`vd init` creates the folder if it does not exist. It refuses a folder that is not empty, apart from `.git`, `.gitignore`, `.gitattributes`, and `.DS_Store`. It writes a minimal scenario that passes validation, with one `mock` speaker, one scene, and one line, and uses the folder name as the title. Edit that file rather than starting from an empty one.
+
 ## Validating
 
-Check every scenario you write before you report it as done. The `vd validate` command is not merged yet. Until it is, build with `npm run build` and call `parseScenario(text)` from `@vd-creator/scenario`. It returns `{ scenario, issues }`. `scenario` is set only when there are no errors. Each issue has a `path` such as `["scenes", 0, "items", 2, "id"]`, a `message`, and a `severity` of `error` or `warning`. Only errors make a scenario invalid. Fix warnings too, but they do not block it.
+Check every scenario you write before you report it as done:
 
-Editors can also use the JSON Schema at [`packages/scenario/schema/scenario.schema.json`](../packages/scenario/schema/scenario.schema.json). It checks types and shapes only. It does not check that IDs are unique or that references resolve, so a file that passes the JSON Schema can still fail `parseScenario`. To make YAML editors pick the schema up, add a comment as the first line, with a path relative to the scenario file:
+```sh
+npx vd validate <dir>
+```
+
+`<dir>` is the project folder, the one that holds `scenario.yaml`. It defaults to the current folder. Each issue is printed to stderr as `path: message`, with ` (warning)` at the end for a warning. A YAML syntax issue also shows the lines around it, so it takes several lines. The path names the field, as in `scenes.0.items.2.speaker`, or is `(root)` for the whole file, such as a YAML syntax error. When there are no errors, the command prints `scenario.yaml is valid` to stdout.
+
+The exit code tells you the result:
+
+- **0**: no errors. Warnings may still be printed. Fix them too, but they do not block the scenario.
+- **1**: the scenario has errors, or `scenario.yaml` cannot be read.
+- **2**: the command was used wrongly, for example with an unknown option or more than one folder.
+
+If `vd` prints `not built yet` or `cannot load the build`, run `npm run build` and try again. That is not a problem in the scenario.
+
+Code that needs the same check calls `parseScenario(text)` from `@vd-creator/scenario`, or `loadScenario(dir)`, which reads `<dir>/scenario.yaml` and is what `vd validate` uses. `parseScenario` returns `{ scenario, issues }`. `scenario` is set only when there are no errors. Each issue has a `path` such as `["scenes", 0, "items", 2, "id"]`, a `message`, and a `severity` of `error` or `warning`.
+
+Editors can also use the JSON Schema at [`packages/scenario/schema/scenario.schema.json`](../packages/scenario/schema/scenario.schema.json). It checks types and shapes only. It does not check that IDs are unique or that references resolve, so a file that passes the JSON Schema can still fail `vd validate`. YAML editors pick the schema up from a comment on the first line of the scenario. `vd init` writes this comment for you:
 
 ```yaml
-# yaml-language-server: $schema=<path to>/scenario.schema.json
+# yaml-language-server: $schema=file://<absolute path of this repository>/packages/scenario/schema/scenario.schema.json
 ```
+
+The URL is absolute and points into the local checkout of this repository whose `vd` command you ran. It keeps working when the project folder moves, but not when the checkout moves or the project is opened on another machine. Then edit the comment, or leave it out. When you write a scenario by hand, copy this line from a project that `vd init` made on the same machine, or leave it out. Validation does not need it. Never commit a scenario with this line into this repository, because the path is specific to one machine.
 
 ## Full example
 
