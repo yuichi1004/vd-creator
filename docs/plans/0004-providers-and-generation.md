@@ -81,7 +81,11 @@ interface AssetResolver {
 
 ### Timeline
 
-`computeTimeline(scenario, cache)` returns, for each item, `{ id, kind, startSec, durationSec, assetFile? }`, plus image spans and BGM spans per scene. Items play in order, separated by `gapBeforeSec`. An SFX with `overlap: true` does not push the next item. Items without an asset yet get an estimated duration and `missing: true`, so that the UI can still show a layout.
+`computeTimeline(scenario, cache, resolvers)` is async and returns, for each item, `{ id, kind, startSec, durationSec, assetFile? }`, plus image spans and BGM spans per scene. It finds assets through the same resolver list as `planGeneration`. Items play in order, separated by `gapBeforeSec`. An SFX with `overlap: true` does not push the next item. Items without an asset yet get an estimated duration and `missing: true`, so that the UI can still show a layout. A cache entry whose file is missing counts as no asset.
+
+An image takes no time and never moves the audio. Its span starts at its own position, but never before the previous image's start. A span of zero length is dropped. With a negative gap, the next audio item can start before the image appears.
+
+`planGeneration` counts an item as cached only for the chosen provider, so that `vd generate --provider X` makes assets from X. The timeline, and anything else that plays an asset, uses the newest asset for the item's current request from any provider. So a project generated with ElevenLabs plays and renders without a `--provider` flag.
 
 ### `vd generate`
 
