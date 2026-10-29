@@ -65,49 +65,50 @@ export async function cleanProject(
   }
 
   // Phase 1: check the folders and list every file to remove. Every refusal happens here.
+  // Every fs call on a path under assets/, in both phases, follows a `changedPath` check of the
+  // recorded folders, so the first mismatch stops clean.
+  // Residual risk: Node has no openat or unlinkat, so a folder swapped for a symbolic link in
+  // the instant between a check and the next fs call can still redirect that one call: a
+  // readdir or lstat while listing, or the unlink while removing. At most one fs call can touch
+  // a swapped folder. That needs write access to the project folder.
   const folders = await snapshotFolders(cache);
+  const refuse = (changed: string) =>
+    new CleanRefusedError(`${changed} changed while it was being listed`);
   const targets: Target[] = [];
-  for (const [dir, identity] of folders.kinds) {
+  for (const dir of folders.kinds.keys()) {
     const folder = cache.assetPath(dir);
+    await ensureUnchanged(cache, folders, dir, undefined, refuse);
     const names = await readdir(folder);
-    // If the folder was swapped before readdir, refuse before looking at any entry.
-    await checkFolders(cache, folders);
     for (const name of names) {
       const file = `${dir}/${name}`;
       if (keptFiles.has(file)) continue;
+      await ensureUnchanged(cache, folders, dir, undefined, refuse);
       const stats = await lstatOrUndefined(join(folder, name));
-      if (stats?.isFile()) targets.push({ file, dir, folder: identity, identity: idOf(stats) });
+      if (stats?.isFile()) targets.push({ file, dir, identity: idOf(stats) });
     }
   }
-  // Also covers a dry run: the listing is only reported if no folder changed during it.
-  await checkFolders(cache, folders);
+  await checkProject(cache, folders);
   targets.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
   const files = targets.map((target) => target.file);
-  if (options.dryRun) return { files, keys };
+  if (options.dryRun) {
+    // A dry run checks every listed file and folder as a real run does before each unlink.
+    for (const target of targets) await ensureUnchanged(cache, folders, target.dir, target, refuse);
+    for (const dir of folders.kinds.keys()) {
+      await ensureUnchanged(cache, folders, dir, undefined, refuse);
+    }
+    return { files, keys };
+  }
 
-  // Phase 2: remove the listed files, checking each one and its folders right before.
-  // Residual risk: Node has no unlinkat, so a folder swapped for a symbolic link in the instant
-  // between the last check and unlink can still redirect it. That needs write access to the
-  // project folder, and these checks keep the window to a few system calls.
+  // Phase 2: remove the listed files, checking each one and its folders right before. Any
+  // change, including a listed file that is gone, stops the removal at once.
   const project = await realpath(cache.projectDir);
   let removed = 0;
+  const interrupt = () => new CleanInterruptedError(removed);
   for (const target of targets) {
     const path = cache.assetPath(target.file);
-    if (!(await realpath(path).catch(() => path)).startsWith(project + sep)) {
-      throw new CleanInterruptedError(removed);
-    }
-    // A target exists only if assets/ did, so folders.assets is set here.
-    const unchanged =
-      folders.assets !== undefined &&
-      (await isSame(join(cache.projectDir, ASSETS_DIR), folders.assets)) &&
-      (await isSame(cache.assetPath(target.dir), target.folder));
-    if (!unchanged) throw new CleanInterruptedError(removed);
-    const stats = await lstatOrUndefined(path);
-    // A file that is already gone is not a threat, so it is skipped.
-    if (!stats) continue;
-    if (!stats.isFile() || !sameId(stats, target.identity)) {
-      throw new CleanInterruptedError(removed);
-    }
+    await ensureUnchanged(cache, folders, target.dir, undefined, interrupt);
+    if (!(await realpath(path).catch(() => path)).startsWith(project + sep)) throw interrupt();
+    await ensureUnchanged(cache, folders, target.dir, target, interrupt);
     await unlink(path);
     removed++;
   }
@@ -123,8 +124,8 @@ export async function cleanProject(
 /** A device and inode number pair, which identifies a file or folder while it exists. */
 type Identity = { dev: bigint; ino: bigint };
 
-/** A file to remove, with the identities it and its folder had when it was listed. */
-type Target = { file: string; dir: string; folder: Identity; identity: Identity };
+/** A file to remove, in the generated folder `dir`, with the identity it had when listed. */
+type Target = { file: string; dir: string; identity: Identity };
 
 /** The checked folders. `assets` is undefined if the project has no assets/ folder. */
 type FolderSnapshot = {
@@ -184,18 +185,35 @@ async function snapshotFolders(cache: AssetCache): Promise<FolderSnapshot> {
   return { project, assets: idOf(assets), kinds };
 }
 
-/** Throws a `CleanRefusedError` if a folder of the snapshot is no longer the same folder. */
-async function checkFolders(cache: AssetCache, folders: FolderSnapshot): Promise<void> {
-  const project = await stat(cache.projectDir, { bigint: true });
-  const same =
-    sameId(project, folders.project) &&
-    (folders.assets === undefined ||
-      (await isSame(join(cache.projectDir, ASSETS_DIR), folders.assets)));
-  if (!same) throw new CleanRefusedError(`${ASSETS_DIR} changed while it was being listed`);
-  for (const [dir, identity] of folders.kinds) {
-    if (!(await isSame(cache.assetPath(dir), identity))) {
-      throw new CleanRefusedError(`${ASSETS_DIR}/${dir} changed while it was being listed`);
-    }
+/** Throws a `CleanRefusedError` if the project folder is no longer the same folder. */
+async function checkProject(cache: AssetCache, folders: FolderSnapshot): Promise<void> {
+  if (!sameId(await stat(cache.projectDir, { bigint: true }), folders.project)) {
+    throw new CleanRefusedError("the project folder changed while it was being listed");
+  }
+}
+
+/**
+ * Checks, in order, that assets/, its generated folder `dir`, and, if given, the listed file
+ * are still the ones recorded. Throws `fail` with the path of the first that changed, relative
+ * to the project. The file is looked at only after both folders passed.
+ */
+async function ensureUnchanged(
+  cache: AssetCache,
+  folders: FolderSnapshot,
+  dir: string,
+  target: Target | undefined,
+  fail: (changed: string) => Error,
+): Promise<void> {
+  const kind = folders.kinds.get(dir);
+  // A generated folder is recorded only if assets/ was.
+  if (!folders.assets || !(await isSame(join(cache.projectDir, ASSETS_DIR), folders.assets))) {
+    throw fail(ASSETS_DIR);
+  }
+  if (!kind || !(await isSame(cache.assetPath(dir), kind))) throw fail(`${ASSETS_DIR}/${dir}`);
+  if (!target) return;
+  const stats = await lstatOrUndefined(cache.assetPath(target.file));
+  if (!stats?.isFile() || !sameId(stats, target.identity)) {
+    throw fail(`${ASSETS_DIR}/${target.file}`);
   }
 }
 

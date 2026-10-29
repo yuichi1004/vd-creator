@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readdirSync,
   renameSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -147,6 +148,63 @@ describe("vd clean when a folder is swapped while it runs", () => {
     expect(fsHook.paths.filter((path) => path.startsWith(outside))).toEqual([]);
     expect(fsHook.paths.filter((path) => path.startsWith(`${voice}/`))).not.toEqual([]);
     expect(existsSync(join(outside, "stray1.wav"))).toBe(true);
+  });
+
+  test("a listed file that is gone stops the removal and reports the true count", async () => {
+    writeFileSync(join(voice, "stray3.wav"), "stray");
+    let moved = false;
+    fsHook.after = (name) => {
+      if (name !== "unlink" || moved) return;
+      moved = true;
+      renameSync(join(voice, "stray2.wav"), join(tmp, "stray2-moved.wav"));
+    };
+    const result = await vd("clean", dir);
+    expect(result.code).toBe(EXIT_FAILURE);
+    expect(result.stderr).toBe(
+      `vd clean: stopped cleaning ${dir}: a folder or file under assets changed while cleaning; stopped after removing 1 file`,
+    );
+    expect(existsSync(join(voice, "stray1.wav"))).toBe(false);
+    expect(existsSync(join(voice, "stray3.wav"))).toBe(true);
+  });
+
+  test("a dry run refuses a listed file replaced by a folder", async () => {
+    let strays = 0;
+    fsHook.after = (name, path) => {
+      if (name === "lstat" && path.startsWith(join(voice, "stray")) && ++strays === 2) {
+        rmSync(join(voice, "stray1.wav"));
+        mkdirSync(join(voice, "stray1.wav"));
+      }
+    };
+    const result = await vd("clean", dir, "--dry-run");
+    expect(result.code).toBe(EXIT_FAILURE);
+    expect(result.stderr).toBe(
+      `vd clean: refusing to clean ${dir}: assets/voice/stray1.wav changed while it was being listed`,
+    );
+    expect(result.stdout).toBe("");
+  });
+
+  test("a swap after the first entry is looked at stops the listing at the next check", async () => {
+    for (let i = 3; i <= 20; i++) writeFileSync(join(voice, `stray${i}.wav`), "stray");
+    for (let i = 3; i <= 20; i++) writeFileSync(join(outside, `stray${i}.wav`), "outside");
+    const swap = swapVoiceOnce();
+    let swappedAt = -1;
+    fsHook.after = (name, path) => {
+      if (swappedAt < 0 && name === "lstat" && path.startsWith(`${voice}/`)) {
+        swap();
+        swappedAt = fsHook.paths.length;
+      }
+    };
+    const result = await vd("clean", dir);
+    expect(result.code).toBe(EXIT_FAILURE);
+    expect(result.stderr).toBe(
+      `vd clean: refusing to clean ${dir}: assets/voice changed while it was being listed`,
+    );
+    // Paths under the swapped link reach the outside folder.
+    const touched = fsHook.paths
+      .slice(swappedAt)
+      .filter((path) => path.startsWith(`${voice}/`) || path.startsWith(outside));
+    expect(touched.length).toBeLessThanOrEqual(1);
+    expect(outsideFiles()).toHaveLength(20);
   });
 
   test("without a swap, clean removes the strays", async () => {
