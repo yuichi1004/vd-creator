@@ -197,7 +197,7 @@ The library package task fixes a file format and the license checks, so it is re
   - Constraints: runtime dependencies `zod` and `yaml` only, which 0003 already adds. Depends on `packages/scenario` from 0003. No network access.
   - Ownership: `packages/library/`, the `workspaces` field of the root `package.json`, and the root `package-lock.json`. It must not touch `packages/core/`, which 0004 may be editing at the same time.
   - Acceptance: the full acceptance chain from AGENTS.md passes. Tests cover every row of the check table, hash mismatch, missing evidence, an unverified agent import, and search by tag.
-- [ ] Library commands
+- [x] Library commands
   - Target: `apps/cli/`
   - Change: the `vd library` commands above, except `promote`, `status`, and `sync`, which need the generation pipeline.
   - Constraints: no new dependencies. Depends on the library package task and on the 0003 CLI task. Must not run at the same time as another task that owns `apps/cli/`, such as `vd generate` in 0004.
@@ -206,12 +206,12 @@ The library package task fixes a file format and the license checks, so it is re
 - [ ] Project integration
   - Target: `packages/core/`, `apps/cli/`
   - Change: a library `AssetResolver` (the hook from 0004) that copies entries into `assets/library/` and writes `credits.json`, so the plan and the timeline use library durations; `vd validate` runs the project license check; `vd library promote`, `status`, and `sync`.
-  - Constraints: no new dependencies. Do not change the pipeline itself; only add a resolver. Depends on the 0004 core and CLI tasks.
+  - Constraints: no new dependencies. Do not change the pipeline itself; only add a resolver. Depends on the 0004 core and CLI tasks. `--library` is already accepted by `validate`, `generate`, and `clean` but ignored; this task makes it choose the library root for them.
   - Ownership: `packages/core/src/library/` (new), the line in `packages/core/src/index.ts` that registers default resolvers, the `dependencies` field of `packages/core/package.json`, the root `package-lock.json`, and `apps/cli/`.
   - Acceptance: `npm test -w packages/core && npm test -w apps/cli` pass, with tests that render-check a project using one verified CC-BY entry (ok, attribution in credits) and one unverified entry under `use: commercial` (error).
 - [ ] Agent guidance
   - Target: `AGENTS.md`, `docs/scenario-format.md`
-  - Change: tell agents to search the library before generating SFX or BGM, how to reference entries, and the rules for importing downloaded sounds (source URL, evidence, never mark as verified).
+  - Change: tell agents to search the library before generating SFX or BGM, how to reference entries, and the rules for importing downloaded sounds (source URL, evidence, never mark as verified). Agents must never run `vd library verify` or answer its prompt: an agent terminal is a pseudo-terminal, so the TTY check alone cannot stop it.
   - Constraints: depends on the library commands task.
   - Ownership: `AGENTS.md`, `docs/scenario-format.md`.
   - Acceptance: the coordinator checks that the documented commands match `vd library --help`.
@@ -220,4 +220,5 @@ The library package task fixes a file format and the license checks, so it is re
 
 - Should still images use the same library and license records? They have the same licensing problem. The default is to extend this design to an `image` kind in a later plan.
 - Should the library support several roots, such as a personal library plus a team library? The default is one root.
+- `lookupBlockers` in `packages/library` blocks an entry on any issue whose file is `<kind>/<id>`, whatever its severity. That is right for the "not a folder" warning, but a later warning on that file would make the entry unfindable. Should it match that issue more narrowly? The default is to narrow it when another warning is added.
 - Should `vd library import` be able to fetch a URL itself, saving the evidence automatically? It would add network access and site-specific behavior. The default is no.
