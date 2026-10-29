@@ -10,7 +10,9 @@ A project is a folder with a `scenario.yaml`, an `assets/` folder, and an `out/`
 npx vd init <dir>
 ```
 
-The `vd` command lives in this repository. Run `npm run build` once before you use it, and again after you pull changes. `npx vd` works only inside this repository, so run it from the repository root and pass the project folder as `<dir>`. From any other folder, run `node <repository>/apps/cli/bin/vd.js` instead of `npx vd`. Do not run `npx vd` outside the repository: npx would then look for a package named `vd` on the npm registry.
+The `vd` command lives in this repository. Run `scripts/setup.sh` and then `npm run build` once before you use it, and run `npm run build` again after you pull changes. The setup links the command into `node_modules/.bin`. Without that link, npx looks for a package named `vd` on the npm registry instead.
+
+`npx vd` works anywhere inside this repository, but not outside it, where npx would also go to the npm registry. A relative `<dir>` is resolved from the current folder, so run `npx vd` from the repository root and give the project folder relative to the root, or give an absolute path. From a folder outside the repository, run `node <repository>/apps/cli/bin/vd.js` instead of `npx vd`.
 
 `vd init` creates the folder if it does not exist. It refuses a folder that is not empty, apart from `.git`, `.gitignore`, `.gitattributes`, and `.DS_Store`. It writes a minimal scenario that passes validation, with one `mock` speaker, one scene, and one line, and uses the folder name as the title. Edit that file rather than starting from an empty one.
 
@@ -22,7 +24,7 @@ Check every scenario you write before you report it as done:
 npx vd validate <dir>
 ```
 
-`<dir>` is the project folder, the one that holds `scenario.yaml`. It defaults to the current folder. Each issue is printed to stderr as `path: message`, with ` (warning)` at the end for a warning. A YAML syntax issue also shows the lines around it, so it takes several lines. The path names the field, as in `scenes.0.items.2.speaker`, or is `(root)` for the whole file, such as a YAML syntax error. When there are no errors, the command prints `scenario.yaml is valid` to stdout.
+`<dir>` is the project folder, the one that holds `scenario.yaml`. It defaults to the current folder. Each issue is printed to stderr as `path: message`, with ` (warning)` at the end for a warning. A YAML syntax issue takes several lines: the message, a blank line, the source line, and a line of `^` under the problem. For such a warning, ` (warning)` comes on its own line after them. The path names the field, as in `scenes.0.items.2.speaker`, or is `(root)` for the whole file, such as a YAML syntax error. When there are no errors, the command prints `scenario.yaml is valid` to stdout.
 
 The exit code tells you the result:
 
@@ -30,7 +32,7 @@ The exit code tells you the result:
 - **1**: the scenario has errors, or `scenario.yaml` cannot be read.
 - **2**: the command was used wrongly, for example with an unknown option or more than one folder.
 
-If `vd` prints `not built yet` or `cannot load the build`, run `npm run build` and try again. That is not a problem in the scenario.
+If `vd` prints `not built yet` or `cannot load the build`, run `npm run build` and try again. These also exit with 1, so exit code 1 does not always mean that the scenario is bad. Read the message.
 
 Code that needs the same check calls `parseScenario(text)` from `@vd-creator/scenario`, or `loadScenario(dir)`, which reads `<dir>/scenario.yaml` and is what `vd validate` uses. `parseScenario` returns `{ scenario, issues }`. `scenario` is set only when there are no errors. Each issue has a `path` such as `["scenes", 0, "items", 2, "id"]`, a `message`, and a `severity` of `error` or `warning`.
 
@@ -40,7 +42,7 @@ Editors can also use the JSON Schema at [`packages/scenario/schema/scenario.sche
 # yaml-language-server: $schema=file://<absolute path of this repository>/packages/scenario/schema/scenario.schema.json
 ```
 
-The URL is absolute and points into the local checkout of this repository whose `vd` command you ran. It keeps working when the project folder moves, but not when the checkout moves or the project is opened on another machine. Then edit the comment, or leave it out. When you write a scenario by hand, copy this line from a project that `vd init` made on the same machine, or leave it out. Validation does not need it. Never commit a scenario with this line into this repository, because the path is specific to one machine.
+The URL is absolute and points into the local checkout of this repository whose `vd` command you ran. It keeps working when the project folder moves, but not when the checkout moves or the project is opened on another machine. In that case, edit the comment or leave it out. When you write a scenario by hand, copy this line from a project that `vd init` made on the same machine, or leave it out. Validation does not need it. Never commit a `file://` schema URL into this repository, because the path is specific to one machine. A scenario inside this repository, such as a test fixture, may refer to the schema with a path relative to the file instead, as in `$schema=../schema/scenario.schema.json`.
 
 ## Full example
 
