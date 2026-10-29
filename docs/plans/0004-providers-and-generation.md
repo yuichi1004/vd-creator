@@ -126,4 +126,5 @@ The interfaces task is reviewed with `gpt-6-astra`, because it fixes a public in
 ## Open questions
 
 - Should the cost gate in `vd generate` also enforce a per-run character limit from an environment variable? The default is no limit beyond `--yes`.
+- `Cost` counts characters and requests, but ElevenLabs bills SFX and music by duration or generation, not by prompt characters. For now their `estimate` reports 0 characters and 1 request, so the gate shows them only as a request count. Should `Cost` gain a field such as `seconds`, so the gate can show their real size? That changes a public interface and needs a decision gate.
 - Should a line's `direction` be sent to ElevenLabs, for example as a voice-design prompt, or used only by humans? The default is that it is sent only when the model supports it.
