@@ -1,10 +1,12 @@
 // planGeneration and runGeneration. See "vd generate" in docs/plans/0004-providers-and-generation.md.
 
+import { type LicenseRegistry, MOCK_PROVIDER_ID } from "@vd-creator/library";
 import type { Cost } from "@vd-creator/providers";
 import type { Scenario } from "@vd-creator/scenario";
 import type { AssetCache } from "./cache.js";
 import { isCanonicalJsonError } from "./canonical.js";
 import { itemLabel, type ScenarioItem, type ScenarioItemKind, scenarioItems } from "./items.js";
+import { playedProviders, recordProvider } from "./library/project.js";
 import type { AssetResolver, PlannedAsset, ResolveContext } from "./resolver.js";
 
 /** At most this many requests run at once. */
@@ -129,8 +131,11 @@ export type RunGenerationOptions = GenerationOptions & {
 /**
  * Generates every item that is not cached, running at most 4 requests at once. Each asset and
  * the cache are written as soon as the asset is ready, so an interrupted run keeps its
- * progress. A failed item does not stop the others: it is reported in its result with a
- * `GenerationError`. Throws only for invalid options.
+ * progress. The provider of each generated or cached asset the run visits is recorded in
+ * credits.json as soon as the item is done, and at the end so is the provider of every
+ * asset the scenario plays, with its license from the first resolver that has a license
+ * registry (see `recordProvider`). A failed item does not stop the others: it is reported in
+ * its result with a `GenerationError`. Throws only for invalid options.
  */
 export async function runGeneration(
   scenario: Scenario,
@@ -146,24 +151,72 @@ export async function runGeneration(
     : Math.max(1, Math.min(GENERATION_CONCURRENCY, requested));
   const results: ItemResult[] = new Array(targets.length);
   let next = 0;
+  let registry: Promise<LicenseRegistry | undefined> | undefined;
+  const licenses = () => {
+    registry ??= licenseRegistry(resolvers, ctx);
+    return registry;
+  };
 
   const worker = async () => {
     while (next < targets.length) {
       const index = next++;
       const item = targets[index] as ScenarioItem;
-      const result = await runItem(item, ctx, resolvers);
+      const result = await runItem(item, ctx, resolvers, licenses);
       results[index] = result;
       options.onItem?.(result);
     }
   };
   await Promise.all(Array.from({ length: Math.min(concurrency, targets.length) }, worker));
+  // The run may not visit every item, such as with `only`, so the providers of every asset
+  // the scenario plays are credited too, including ones cached before.
+  try {
+    for (const use of await playedProviders(scenario, cache)) {
+      await recordProvider(cache.projectDir, use.providerId, use.kind, await licenses());
+    }
+  } catch {
+    // Left to the license check, which counts an unrecorded provider's terms as unknown.
+  }
   return { items: results, failed: results.filter((r) => r.status === "failed").length };
+}
+
+/**
+ * The license registry of the first resolver that has one. A registry that cannot be read,
+ * such as a broken library, counts as none, so provider records keep their licenses.
+ */
+async function licenseRegistry(
+  resolvers: readonly AssetResolver[],
+  ctx: ResolveContext,
+): Promise<LicenseRegistry | undefined> {
+  for (const resolver of resolvers) {
+    try {
+      const registry = await resolver.licenseRegistry?.(ctx);
+      if (registry) return registry;
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Records in credits.json the provider of the generated asset with cache key `key`, if any, so
+ * that the license check and the credits cover it. Library copies have no key.
+ */
+async function creditProvider(
+  key: string | undefined,
+  ctx: ResolveContext,
+  licenses: () => Promise<LicenseRegistry | undefined>,
+): Promise<void> {
+  const entry = key === undefined ? undefined : ctx.cache.get(key);
+  if (!entry || entry.providerId === MOCK_PROVIDER_ID) return;
+  await recordProvider(ctx.cache.projectDir, entry.providerId, entry.kind, await licenses());
 }
 
 async function runItem(
   item: ScenarioItem,
   ctx: ResolveContext,
   resolvers: readonly AssetResolver[],
+  licenses: () => Promise<LicenseRegistry | undefined>,
 ): Promise<ItemResult> {
   const base = { id: item.id, kind: item.kind, sceneId: item.scene.id };
   const resolver = resolvers.find((r) => r.handles(item));
@@ -180,6 +233,15 @@ async function runItem(
     case "to-generate":
       break;
     case "cached":
+      try {
+        await creditProvider(planned.key, ctx, licenses);
+      } catch (e) {
+        return {
+          ...withResolver,
+          status: "failed",
+          error: new GenerationError(item, "generate", e),
+        };
+      }
       return {
         ...withResolver,
         status: "cached",
@@ -199,6 +261,8 @@ async function runItem(
   }
   try {
     const asset = await resolver.resolve(item, ctx);
+    // A failed record fails the item, so that a paid asset never goes uncredited unnoticed.
+    await creditProvider(asset.key, ctx, licenses);
     return {
       ...withResolver,
       status: asset.generated ? "generated" : "cached",

@@ -1,10 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  appendFile,
+  mkdir,
   mkdtemp,
   readdir,
   readFile,
   rename,
   rm,
+  stat,
   symlink,
   utimes,
   writeFile,
@@ -12,15 +15,18 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  buildCreditsText,
   CREDITS_FILE,
   type Credits,
+  checkProjectLicenses,
   findEntry,
   importEntry,
   initLibrary,
+  LICENSES_FILE,
   readLibrary,
   verifyEntry,
 } from "@vd-creator/library";
-import { createMockProviders, encodeWav } from "@vd-creator/providers";
+import { createMockProviders, encodeWav, type ProviderSet } from "@vd-creator/providers";
 import { type Scenario, ScenarioDocument } from "@vd-creator/scenario";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AssetCache } from "../cache.js";
@@ -29,7 +35,12 @@ import { scenarioItems } from "../items.js";
 import { defaultResolvers } from "../resolver.js";
 import { computeTimeline } from "../timeline.js";
 import { checkLibraryLicenses, STALE_CREDIT_HINT } from "./licenses.js";
-import { copyLibraryEntry, LIBRARY_DURATIONS_FILE, readCredits } from "./project.js";
+import {
+  copyLibraryEntry,
+  LIBRARY_DURATIONS_FILE,
+  ProjectCreditsError,
+  readCredits,
+} from "./project.js";
 import { libraryResolver, NO_LIBRARY } from "./resolver.js";
 import { libraryStatus, syncLibrary } from "./sync.js";
 
@@ -328,6 +339,202 @@ describe("library resolver", () => {
     const text = await readFile(join(project, "assets", LIBRARY_DURATIONS_FILE), "utf8");
     expect(JSON.parse(text)).toEqual({ version: 1, durations: expect.any(Object) });
     expect(text.endsWith("}\n")).toBe(true);
+  });
+});
+
+/**
+ * A paid provider set with the ID `id` that makes the mock's test tones, so that no test
+ * reaches a paid API.
+ */
+function fakePaidProviders(id: string): ProviderSet {
+  const mock = createMockProviders();
+  return {
+    tts: { id, paid: true, synthesize: (r) => mock.tts.synthesize(r), estimate: mock.tts.estimate },
+    sfx: { id, paid: true, generate: (r) => mock.sfx.generate(r), estimate: mock.sfx.estimate },
+    music: {
+      id,
+      paid: true,
+      generate: (r) => mock.music.generate(r),
+      estimate: mock.music.estimate,
+    },
+  };
+}
+
+/** A scenario with a line and a prompt SFX, both generated. */
+function generatedScenario(use: string): Scenario {
+  const doc = new ScenarioDocument(
+    [
+      "version: 1",
+      "title: Provider test",
+      `publish: { use: ${use} }`,
+      "speakers:",
+      "  - id: mira",
+      "    name: Mira",
+      "    voice: { provider: acme, voiceId: v1 }",
+      "scenes:",
+      "  - id: s1",
+      "    items:",
+      '      - line: "Hello?"',
+      "        id: l1",
+      "        speaker: mira",
+      '      - sfx: "distant thunder"',
+      "        id: thunder",
+    ].join("\n"),
+  );
+  const { scenario, issues } = doc.validate();
+  if (!scenario) throw new Error(`invalid scenario: ${JSON.stringify(issues)}`);
+  return scenario;
+}
+
+async function generateWith(s: Scenario, providers: ProviderSet, library?: string) {
+  const cache = await AssetCache.load(project);
+  return runGeneration(s, cache, [libraryResolver(library), ...defaultResolvers(providers)]);
+}
+
+const ACME_CREDIT = "Voices and sounds by Acme";
+
+/** Adds the license of the fake provider acme to the library, approved for commercial use. */
+async function addAcmeLicense() {
+  await appendFile(
+    join(root, LICENSES_FILE),
+    [
+      "",
+      "generated-acme:",
+      "  name: Acme terms of service",
+      "  attribution: required",
+      "  commercialUse: conditional",
+      "  modification: allowed",
+      "  shareAlike: false",
+      `  attributionText: "${ACME_CREDIT}"`,
+      "  approvedFor: commercial",
+      "",
+    ].join("\n"),
+  );
+}
+
+describe("provider records", () => {
+  test("a fake paid provider is recorded, and its unknown terms fail commercial use", async () => {
+    const s = generatedScenario("commercial");
+    const result = await generateWith(s, fakePaidProviders("acme"));
+    expect(result.failed).toBe(0);
+
+    const credits = await readCredits(project);
+    expect(credits.providers).toEqual([
+      { id: "acme", kinds: ["voice", "sfx"], license: { id: "generated-acme" } },
+    ]);
+    const issues = checkProjectLicenses(credits, "commercial");
+    expect(issues).toEqual([
+      expect.objectContaining({
+        target: "provider",
+        id: "acme",
+        code: "commercial-conditional",
+        severity: "error",
+      }),
+      expect.objectContaining({
+        target: "provider",
+        id: "acme",
+        code: "attribution-missing",
+        severity: "error",
+      }),
+    ]);
+    expect(await checkLibraryLicenses(project, s)).toEqual([
+      expect.objectContaining({ target: { type: "provider", id: "acme" }, severity: "error" }),
+      expect.objectContaining({ target: { type: "provider", id: "acme" }, severity: "error" }),
+    ]);
+    expect(buildCreditsText(credits)).toBe("Generated with: acme\n");
+  });
+
+  test("copies the provider's license from the library's registry", async () => {
+    await addAcmeLicense();
+    const s = generatedScenario("commercial");
+    expect((await generateWith(s, fakePaidProviders("acme"), root)).failed).toBe(0);
+
+    const credits = await readCredits(project);
+    expect(credits.providers).toEqual([
+      {
+        id: "acme",
+        kinds: ["voice", "sfx"],
+        license: expect.objectContaining({
+          id: "generated-acme",
+          terms: expect.objectContaining({ commercialUse: "conditional" }),
+          attribution: ACME_CREDIT,
+          approvedFor: "commercial",
+        }),
+      },
+    ]);
+    expect(checkProjectLicenses(credits, "commercial")).toEqual([]);
+    expect(buildCreditsText(credits)).toBe(`Sounds:\n${ACME_CREDIT}\n\nGenerated with: acme\n`);
+
+    // A run without the library keeps the license copied before.
+    await rm(join(project, "assets"), { recursive: true });
+    expect((await generateWith(s, fakePaidProviders("acme"))).failed).toBe(0);
+    expect(await readCredits(project)).toEqual(credits);
+  });
+
+  test("credits played assets outside `only`, sorted, and rewrites nothing unchanged", async () => {
+    const s = generatedScenario("private");
+    await generateWith(s, fakePaidProviders("zeta"));
+    // As in a project generated before providers were recorded.
+    const path = join(project, CREDITS_FILE);
+    await rm(path);
+
+    // Like vd generate, the run visits only the item to generate: acme's thunder. The line
+    // still plays zeta's cached asset, so zeta is credited for voice.
+    const cache = await AssetCache.load(project);
+    const resolvers = defaultResolvers(fakePaidProviders("acme"));
+    const result = await runGeneration(s, cache, resolvers, { only: ["thunder"] });
+    expect(result.items).toEqual([expect.objectContaining({ id: "thunder", status: "generated" })]);
+    const text = await readFile(path, "utf8");
+    expect((JSON.parse(text) as Credits).providers).toEqual([
+      expect.objectContaining({ id: "acme", kinds: ["sfx"] }),
+      expect.objectContaining({ id: "zeta", kinds: ["voice"] }),
+    ]);
+
+    // A full run generates acme's line; a run that finds everything cached writes nothing.
+    const run = async () =>
+      (await runGeneration(s, await AssetCache.load(project), resolvers)).items.map(
+        (i) => i.status,
+      );
+    expect(await run()).toEqual(["generated", "cached"]);
+    const settled = await readFile(path, "utf8");
+    const mtime = (await stat(path)).mtimeMs;
+    expect(await run()).toEqual(["cached", "cached"]);
+    expect(await readFile(path, "utf8")).toBe(settled);
+    expect((await stat(path)).mtimeMs).toBe(mtime);
+  });
+
+  test("the license check covers a provider that credits.json lacks", async () => {
+    const s = generatedScenario("commercial");
+    await generateWith(s, fakePaidProviders("acme"));
+    await rm(join(project, CREDITS_FILE));
+    const issues = await checkLibraryLicenses(project, s);
+    expect(issues).toEqual([
+      expect.objectContaining({
+        target: { type: "provider", id: "acme" },
+        severity: "warning",
+        message: expect.stringMatching(/has no record of it/),
+      }),
+      expect.objectContaining({ target: { type: "provider", id: "acme" }, severity: "error" }),
+      expect.objectContaining({ target: { type: "provider", id: "acme" }, severity: "error" }),
+    ]);
+  });
+
+  test("the mock provider is not recorded", async () => {
+    const s = generatedScenario("commercial");
+    expect((await generateWith(s, createMockProviders())).failed).toBe(0);
+    await expect(readFile(join(project, CREDITS_FILE))).rejects.toThrow(/ENOENT/);
+    expect(await checkLibraryLicenses(project, s)).toEqual([]);
+  });
+
+  test("a credits.json that cannot be read fails the generated item", async () => {
+    await mkdir(project, { recursive: true });
+    await writeFile(join(project, CREDITS_FILE), "{ not json");
+    const result = await generateWith(generatedScenario("private"), fakePaidProviders("acme"));
+    expect(result.failed).toBe(2);
+    expect(result.items[0]).toMatchObject({
+      status: "failed",
+      error: expect.objectContaining({ cause: expect.any(ProjectCreditsError) }),
+    });
   });
 });
 

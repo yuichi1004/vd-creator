@@ -6,6 +6,7 @@ import {
   type Library,
   type LibraryEntry,
   LibraryError,
+  type LicenseRegistry,
   readLibrary,
 } from "@vd-creator/library";
 import type { ScenarioItem } from "../items.js";
@@ -92,6 +93,12 @@ export class LibraryItemResolver implements AssetResolver {
     const found = await this.#entry(ref, ctx);
     const copy = await copyLibraryEntry(ctx.cache.projectDir, found.library, found.item);
     return { file: copy.credit.file, durationSec: copy.durationSec, generated: true };
+  }
+
+  /** The library's license registry, for provider records. `undefined` when no library is set. */
+  async licenseRegistry(ctx: ResolveContext): Promise<LicenseRegistry | undefined> {
+    if (this.root === undefined) return undefined;
+    return (await this.#library(ctx)).licenses;
   }
 
   #cleanup(ctx: ResolveContext): Promise<void> {

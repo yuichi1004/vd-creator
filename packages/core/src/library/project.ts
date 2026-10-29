@@ -9,6 +9,7 @@ import { pipeline } from "node:stream/promises";
 import {
   CREDITS_FILE,
   type CreditEntry,
+  type CreditProvider,
   type Credits,
   CreditsSchema,
   type Entry,
@@ -16,13 +17,16 @@ import {
   type LibraryEntry,
   LibraryError,
   type LibraryKind,
+  type LicenseRegistry,
+  MOCK_PROVIDER_ID,
   toCreditEntry,
+  toCreditProvider,
 } from "@vd-creator/library";
 import { readWavInfo } from "@vd-creator/providers";
 import type { Scenario } from "@vd-creator/scenario";
-import { ASSETS_DIR } from "../cache.js";
-import { ASSET_KEY_PREFIX_LENGTH } from "../canonical.js";
-import { type ScenarioItem, scenarioItems } from "../items.js";
+import { ASSETS_DIR, type AssetCache } from "../cache.js";
+import { ASSET_KEY_PREFIX_LENGTH, type AssetKind } from "../canonical.js";
+import { generationRequest, type ScenarioItem, scenarioItems } from "../items.js";
 
 /** Folder of the library copies, relative to assets/. */
 export const LIBRARY_ASSET_DIR = "library";
@@ -300,9 +304,77 @@ async function wavDuration(path: string): Promise<number | undefined> {
 const updates = new Map<string, Promise<void>>();
 
 /**
- * Reads credits.json and the durations, lets `change` edit them, and writes both back
- * atomically. Updates of one project run one at a time, so concurrent copies keep each
- * other's credits.
+ * The kinds a provider credit can have, in the order credits.json lists them, by the kind of
+ * the generated asset.
+ */
+const PROVIDER_KINDS: Record<AssetKind, CreditProvider["kinds"][number]> = {
+  tts: "voice",
+  sfx: "sfx",
+  music: "bgm",
+};
+
+/**
+ * Records in credits.json that `providerId` made an asset of `kind` for the project. The
+ * provider's license is taken from `licenses`, the library's registry, when it is given;
+ * otherwise an earlier record of the provider keeps its license, and a new one has no terms,
+ * so every term counts as unknown. The mock provider is not recorded: it makes test tones.
+ * Writes nothing if the record is already there.
+ */
+export async function recordProvider(
+  projectDir: string,
+  providerId: string,
+  kind: AssetKind,
+  licenses?: LicenseRegistry,
+): Promise<void> {
+  if (providerId === MOCK_PROVIDER_ID) return;
+  await updateProject(projectDir, (credits) => {
+    const old = credits.providers.find((p) => p.id === providerId);
+    const kinds = Object.values(PROVIDER_KINDS).filter(
+      (k) => k === PROVIDER_KINDS[kind] || old?.kinds.includes(k),
+    );
+    const fresh = toCreditProvider(providerId, licenses ?? {}, { name: old?.name, kinds });
+    const license = (licenses === undefined && old?.license) || fresh.license;
+    credits.providers = [
+      ...credits.providers.filter((p) => p.id !== providerId),
+      { ...fresh, license },
+    ];
+  });
+}
+
+/** A provider and an asset kind it made. */
+export type ProviderUse = { providerId: string; kind: AssetKind };
+
+/**
+ * The providers of the generated assets that a scenario plays: for each generated item, the
+ * asset `planPlayback` would pick, from any provider. The mock provider is left out. Items
+ * whose request cannot be built or keyed are skipped. Sorted by provider ID, then kind.
+ */
+export async function playedProviders(
+  scenario: Scenario,
+  cache: AssetCache,
+): Promise<ProviderUse[]> {
+  const uses = new Map<string, ProviderUse>();
+  for (const item of scenarioItems(scenario)) {
+    let found: Awaited<ReturnType<AssetCache["playbackAsset"]>>;
+    try {
+      const gen = generationRequest(scenario, item);
+      found = gen && (await cache.playbackAsset(gen.kind, gen.request));
+    } catch {
+      continue;
+    }
+    if (!found || found.entry.providerId === MOCK_PROVIDER_ID) continue;
+    const use = { providerId: found.entry.providerId, kind: found.entry.kind };
+    uses.set(`${use.providerId}\0${use.kind}`, use);
+  }
+  return [...uses.values()].sort(
+    (a, b) => compareText(a.providerId, b.providerId) || compareText(a.kind, b.kind),
+  );
+}
+
+/**
+ * Reads credits.json and the durations, lets `change` edit them, and writes back atomically
+ * the ones that changed. Updates of one project run one at a time, so concurrent copies keep
+ * each other's credits.
  */
 export function updateProject(
   projectDir: string,
@@ -311,17 +383,17 @@ export function updateProject(
   const run = (updates.get(projectDir) ?? Promise.resolve()).then(async () => {
     const credits = await readCredits(projectDir);
     const durations = await readDurations(projectDir);
+    const creditsBefore = creditsJson(credits);
+    const durationsBefore = durationsJson(durations);
     change(credits, durations);
-    // Sorted by kind, then ID, so that the file does not depend on the order of copies.
-    credits.entries.sort((a, b) => compareText(a.kind, b.kind) || compareText(a.id, b.id));
-    const sorted = Object.fromEntries(
-      Object.entries(durations).sort(([a], [b]) => compareText(a, b)),
-    );
-    await writeAtomic(
-      join(projectDir, ASSETS_DIR, LIBRARY_DURATIONS_FILE),
-      `${JSON.stringify({ version: 1, durations: sorted }, null, 2)}\n`,
-    );
-    await writeAtomic(join(projectDir, CREDITS_FILE), `${JSON.stringify(credits, null, 2)}\n`);
+    const durationsText = durationsJson(durations);
+    if (durationsText !== durationsBefore) {
+      await writeAtomic(join(projectDir, ASSETS_DIR, LIBRARY_DURATIONS_FILE), durationsText);
+    }
+    const creditsText = creditsJson(credits);
+    if (creditsText !== creditsBefore) {
+      await writeAtomic(join(projectDir, CREDITS_FILE), creditsText);
+    }
   });
   const tail = run.catch(() => {});
   updates.set(projectDir, tail);
@@ -329,6 +401,21 @@ export function updateProject(
     if (updates.get(projectDir) === tail) updates.delete(projectDir);
   });
   return run;
+}
+
+// The text of credits.json. Entries are sorted by kind, then ID, and providers by ID, so that
+// the file does not depend on the order of copies and generations.
+function creditsJson(credits: Credits): string {
+  credits.entries.sort((a, b) => compareText(a.kind, b.kind) || compareText(a.id, b.id));
+  credits.providers.sort((a, b) => compareText(a.id, b.id));
+  return `${JSON.stringify(credits, null, 2)}\n`;
+}
+
+function durationsJson(durations: LibraryDurations): string {
+  const sorted = Object.fromEntries(
+    Object.entries(durations).sort(([a], [b]) => compareText(a, b)),
+  );
+  return `${JSON.stringify({ version: 1, durations: sorted }, null, 2)}\n`;
 }
 
 function compareText(a: string, b: string): number {

@@ -2,6 +2,7 @@
 // the resolver for generated items. See "Asset resolvers" in
 // docs/plans/0004-providers-and-generation.md.
 
+import type { LicenseRegistry } from "@vd-creator/library";
 import type { AudioResult, Cost, ProviderSet } from "@vd-creator/providers";
 import type { Scenario } from "@vd-creator/scenario";
 import { type AssetCache, assetFileFor } from "./cache.js";
@@ -47,6 +48,11 @@ export interface AssetResolver {
   handles(item: ScenarioItem): boolean;
   plan(item: ScenarioItem, ctx: ResolveContext): Promise<PlannedAsset>;
   resolve(item: ScenarioItem, ctx: ResolveContext): Promise<ResolvedAsset>;
+  /**
+   * The license registry that `runGeneration` copies provider licenses from into credits.json,
+   * if this resolver knows one, such as the library resolver. Optional.
+   */
+  licenseRegistry?(ctx: ResolveContext): Promise<LicenseRegistry | undefined>;
 }
 
 /**

@@ -2,6 +2,7 @@
 // docs/plans/0007-sound-library.md.
 
 import {
+  CREDITS_FILE,
   type CreditEntry,
   checkProjectLicenses,
   findEntry,
@@ -10,13 +11,17 @@ import {
   type LibraryKind,
   readLibrary,
   toCreditEntry,
+  toCreditProvider,
 } from "@vd-creator/library";
 import type { Scenario } from "@vd-creator/scenario";
+import { AssetCache, CACHE_FILE } from "../cache.js";
 import {
   findCredit,
   LIBRARY_ASSET_DIR,
   libraryRefs,
   ProjectCreditsError,
+  type ProviderUse,
+  playedProviders,
   readCredits,
   refLabel,
 } from "./project.js";
@@ -35,7 +40,8 @@ export type ProjectLicenseIssue = {
  * An entry the project has copied is checked from its credit in credits.json. An entry not
  * copied yet is checked from the library, with a warning to copy it. Without a library its
  * license is unknown, so it is treated like an unverified entry: a warning for private use
- * and an error otherwise. Providers are checked as recorded in credits.json.
+ * and an error otherwise. Providers are checked as recorded in credits.json; a provider of an
+ * asset the scenario plays that credits.json lacks is checked with unknown terms, with a warning.
  */
 export async function checkLibraryLicenses(
   projectDir: string,
@@ -88,8 +94,31 @@ export async function checkLibraryLicenses(
     }
   }
 
+  // A provider whose assets the scenario plays but credits.json lacks, such as one cached
+  // before providers were recorded, is checked with unknown terms.
+  const providers = [...credits.providers];
+  let played: ProviderUse[] = [];
+  try {
+    played = await playedProviders(scenario, await AssetCache.load(projectDir));
+  } catch {
+    issues.push({
+      message: `Cannot read ${CACHE_FILE}, so the providers of generated assets are not checked`,
+      severity: "error",
+    });
+  }
+  for (const { providerId } of played) {
+    if (!providers.some((p) => p.id === providerId)) {
+      providers.push(toCreditProvider(providerId, {}));
+      issues.push({
+        target: { type: "provider", id: providerId },
+        message: `Provider "${providerId}" made assets that the scenario plays, but ${CREDITS_FILE} has no record of it, so its terms count as unknown`,
+        severity: "warning",
+      });
+    }
+  }
+
   for (const issue of checkProjectLicenses(
-    { version: 1, entries, providers: credits.providers },
+    { version: 1, entries, providers },
     scenario.publish.use,
   )) {
     const isCopied =
