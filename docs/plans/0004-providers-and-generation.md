@@ -64,7 +64,7 @@ It calls the ElevenLabs REST API with the built-in `fetch`, not the SDK. This av
 
 - The cache key is the SHA-256 of a canonical JSON of `{ kind, providerId, request }`, where `request` includes `take`.
 - The asset file is `assets/<voice|sfx|bgm>/<key prefix>.<format>`, using the first 16 hex characters of the key.
-- `cache.json` maps keys to `{ file, providerId, request, durationSec, createdAt }`, with `version: 1` at the top.
+- `cache.json` maps keys to `{ file, kind, providerId, request, durationSec, createdAt }`, with `version: 1` at the top. `file` is relative to `assets/`. (`kind` was added during implementation, so that an entry can be read without its key.)
 - Changing a line's text, voice, settings, or take changes the key, so only that item is regenerated. Old assets stay until `vd clean` removes unreferenced ones.
 
 ### Asset resolvers
