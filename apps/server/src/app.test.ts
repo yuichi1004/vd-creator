@@ -5,7 +5,6 @@ import { fileURLToPath } from "node:url";
 import { ASSETS_DIR } from "@vd-creator/core";
 import { importEntry, initLibrary } from "@vd-creator/library";
 import { SCENARIO_FILE } from "@vd-creator/scenario";
-import type { Hono } from "hono";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type {
   ApiError,
@@ -42,27 +41,49 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-/** Fake providers that count their calls. Never a real API. */
-function fakeProviders(paid = false) {
-  const calls = { count: 0 };
+/**
+ * Fake providers that count their calls and record the TTS texts, optionally waiting before
+ * each call. Never a real API.
+ */
+function fakeProviders(paid = false, options: { delayMs?: number } = {}) {
+  const calls = { count: 0, texts: [] as string[] };
   const audio = async () => {
     calls.count++;
+    if (options.delayMs) await new Promise((r) => setTimeout(r, options.delayMs));
     return { data: new Uint8Array([1, 2, 3]), format: "wav" as const, durationSec: 1, meta: {} };
   };
   const cost = () => ({ characters: 1, requests: 1 });
   const providers: ServerProviders = {
-    tts: { id: "fake", paid, estimate: cost, synthesize: audio },
+    tts: {
+      id: "fake",
+      paid,
+      estimate: cost,
+      synthesize: (req) => {
+        calls.texts.push(req.text);
+        return audio();
+      },
+    },
     sfx: { id: "fake", paid, estimate: cost, generate: audio },
     music: { id: "fake", paid, estimate: cost, generate: audio },
   };
   return { providers, calls };
 }
 
-function makeApp(options: Partial<AppOptions> = {}): Hono {
-  return createApp({ projectDir: project, provider: fakeProviders().providers, ...options });
+type TestApp = { request(path: string, init?: RequestInit): Promise<Response> };
+
+/** The app, with requests sent as from a browser on `localhost` unless they set `Host`. */
+function makeApp(options: Partial<AppOptions> = {}): TestApp {
+  const app = createApp({ projectDir: project, provider: fakeProviders().providers, ...options });
+  return {
+    request: async (path, init = {}) => {
+      const headers = new Headers(init.headers);
+      if (!headers.has("Host")) headers.set("Host", "localhost:5310");
+      return app.request(path, { ...init, headers });
+    },
+  };
 }
 
-function send(app: Hono, method: string, path: string, body?: unknown, headers = {}) {
+function send(app: TestApp, method: string, path: string, body?: unknown, headers = {}) {
   return app.request(path, {
     method,
     headers: { "Content-Type": "application/json", ...headers },
@@ -70,7 +91,7 @@ function send(app: Hono, method: string, path: string, body?: unknown, headers =
   });
 }
 
-async function getJson<T>(app: Hono, path: string): Promise<T> {
+async function getJson<T>(app: TestApp, path: string): Promise<T> {
   const response = await app.request(path);
   return (await response.json()) as T;
 }
@@ -285,6 +306,34 @@ describe("PATCH /api/scenes/:id", () => {
     expect(await scenarioText()).toContain("# yaml-language-server");
   });
 
+  test("switching a BGM between library and prompt keeps the source's comments", async () => {
+    const withComment = (await scenarioText()).replace(
+      '      prompt: "quiet piano, rain"\n',
+      '      # Placeholder until the score is done\n      prompt: "quiet piano, rain" # Keep it soft\n',
+    );
+    await writeFile(join(project, SCENARIO_FILE), withComment);
+    const app = makeApp();
+    let response = await send(app, "PATCH", "/api/scenes/s1", { bgm: { library: "piano-01" } });
+    expect(response.status).toBe(200);
+    let text = await scenarioText();
+    expect(text).toMatch(
+      /# Placeholder until the score is done\n\s+library: piano-01 # Keep it soft\n/,
+    );
+    expect(text).not.toContain("quiet piano");
+
+    response = await send(app, "PATCH", "/api/scenes/s2", { bgm: { prompt: "low hum" } });
+    expect(response.status).toBe(200);
+    text = await scenarioText();
+    expect(text).toMatch(/prompt: low hum # BGM from the shared library\n/);
+    expect(text).not.toContain("ambient-hum-low");
+    const body = (await response.json()) as ProjectResponse;
+    expect(body.scenario?.scenes[1]?.bgm).toMatchObject({ prompt: "low hum" });
+
+    response = await send(app, "PATCH", "/api/scenes/s2", { bgm: { library: "hum-02" } });
+    expect(response.status).toBe(200);
+    expect(await scenarioText()).toMatch(/library: hum-02 # BGM from the shared library\n/);
+  });
+
   test("adds a BGM to a scene without one", async () => {
     const text = (await scenarioText()).replace(
       '    bgm:\n      prompt: "quiet piano, rain"\n      volume: 0.3\n',
@@ -389,6 +438,22 @@ describe("POST /api/generate", () => {
     const body = JSON.parse(text) as GenerateRunResponse;
     expect(body.failed).toBe(1);
     expect(body.items[0]).toMatchObject({ id: "s1-l1", status: "failed" });
+  });
+
+  test("a run queued behind a PATCH generates the edited scenario", async () => {
+    const { providers, calls } = fakeProviders(false, { delayMs: 100 });
+    const app = makeApp({ provider: providers });
+    const first = send(app, "POST", "/api/generate", { ids: ["s1-l1"] });
+    // Let the first run take the queue before the edit and the second run are sent.
+    await new Promise((r) => setTimeout(r, 30));
+    const edit = send(app, "PATCH", "/api/items/s1-l2", { text: "Edited while busy" });
+    await new Promise((r) => setTimeout(r, 10));
+    const second = send(app, "POST", "/api/generate", { ids: ["s1-l2"] });
+    expect((await first).status).toBe(200);
+    expect((await edit).status).toBe(200);
+    const response = await second;
+    expect(response.status).toBe(200);
+    expect(calls.texts).toEqual(["Is anyone up there?", "Edited while busy"]);
   });
 
   test("refuses empty ids, unknown ids, and invalid fields with 400", async () => {
@@ -582,23 +647,52 @@ describe("GET /assets/*", () => {
 });
 
 describe("GET /* (web UI)", () => {
-  test("serves the built UI from webDir", async () => {
-    const webDir = join(dir, "web");
-    await mkdir(join(webDir, "assets"), { recursive: true });
+  let webDir: string;
+
+  beforeEach(async () => {
+    webDir = join(dir, "web");
+    await mkdir(join(webDir, "ui"), { recursive: true });
     await writeFile(join(webDir, "index.html"), "<!doctype html>");
-    await writeFile(join(webDir, "assets", "app.js"), "console.log(1)");
+    await writeFile(join(webDir, "ui", "app.js"), "console.log(1)");
+  });
+
+  test("serves index.html and the ui/ files of the built UI from webDir", async () => {
     const app = makeApp({ webDir });
     let response = await app.request("/");
     expect(response.status).toBe(200);
     expect(response.headers.get("Content-Type")).toMatch(/^text\/html/);
     expect(await response.text()).toBe("<!doctype html>");
-    response = await app.request("/assets/app.js");
-    // /assets/ is the project's assets folder, not the UI's.
-    expect(response.status).toBe(404);
-    response = await app.request("/missing.js");
-    expect(response.status).toBe(404);
-    response = await app.request("/../project/scenario.yaml");
-    expect(response.status).toBe(404);
+    response = await app.request("/index.html");
+    expect(response.status).toBe(200);
+    response = await app.request("/ui/app.js");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toMatch(/^text\/javascript/);
+    expect(await response.text()).toBe("console.log(1)");
+  });
+
+  test("never serves the UI for /api/, /assets/, or /library-files/, nor outside webDir", async () => {
+    await writeFile(join(webDir, "secret.txt"), "web file");
+    for (const prefix of ["api", "assets", "library-files"]) {
+      await mkdir(join(webDir, prefix), { recursive: true });
+      await writeFile(join(webDir, prefix, "x.txt"), "web file");
+    }
+    await symlink(join(project, SCENARIO_FILE), join(webDir, "ui", "link.yaml"));
+    const app = makeApp({ webDir });
+    for (const path of [
+      "/api/x.txt",
+      "/assets/x.txt",
+      "/library-files/x.txt",
+      "/missing.js",
+      "/../project/scenario.yaml",
+      "/ui/%2E%2E/%2E%2E/project/scenario.yaml",
+      "/ui/link.yaml",
+    ]) {
+      const response = await app.request(path);
+      expect(response.status, path).toBe(404);
+      const text = await response.text();
+      expect(text).not.toContain("web file");
+      expect(text).not.toContain("version: 1");
+    }
   });
 
   test("returns JSON 404 without webDir and for unknown API routes", async () => {
@@ -608,6 +702,88 @@ describe("GET /* (web UI)", () => {
       expect(response.status).toBe(404);
       expect((await errorBody(response)).error).toBe("not-found");
     }
+  });
+});
+
+describe("Host check without a token", () => {
+  test("accepts loopback names, .ts.net names, and allowedHosts, with or without a port", async () => {
+    const app = makeApp({ allowedHosts: ["Studio.Example"] });
+    for (const host of [
+      "localhost",
+      "localhost:5310",
+      "LOCALHOST:5310",
+      "127.0.0.1",
+      "127.0.0.1:5310",
+      "[::1]",
+      "[::1]:5310",
+      "pc.tail1234.ts.net",
+      "PC.Tail1234.TS.NET:443",
+      "studio.example",
+      "studio.example:8080",
+    ]) {
+      const response = await app.request("/api/project", { headers: { Host: host } });
+      expect(response.status, host).toBe(200);
+    }
+  });
+
+  test("refuses any other Host with 403 and a fixed body, on every route", async () => {
+    const webDir = join(dir, "web");
+    await mkdir(webDir);
+    await writeFile(join(webDir, "index.html"), "<!doctype html>");
+    await mkdir(join(project, ASSETS_DIR));
+    await writeFile(join(project, ASSETS_DIR, "a.wav"), "RIFF");
+    const { providers, calls } = fakeProviders(true);
+    const app = makeApp({ webDir, provider: providers, allowedHosts: ["studio.example"] });
+    const before = await scenarioText();
+    for (const host of [
+      "evil.example",
+      "evil.example:5310",
+      "localhost.evil.example",
+      "127.0.0.1.evil.example",
+      "ts.net",
+      "evil-ts.net",
+      "127.0.0.2",
+      "[::2]",
+      "studio.example.evil",
+      "localhost:",
+      "localhost:abc",
+      "localhost:5310:1",
+      "[::1",
+      "user@localhost",
+      "localhost/x",
+      "",
+    ]) {
+      const headers = { Host: host };
+      for (const response of [
+        await app.request("/api/project", { headers }),
+        await app.request("/api/events", { headers }),
+        await app.request("/", { headers }),
+        await app.request("/assets/a.wav", { headers }),
+        await send(app, "PATCH", "/api/items/s1-l1", { text: "pwned" }, headers),
+        await send(app, "POST", "/api/generate", { confirm: true }, headers),
+      ]) {
+        expect(response.status, host).toBe(403);
+        const body = await errorBody(response);
+        expect(body.error).toBe("unauthorized");
+        expect(JSON.stringify(body)).not.toContain(host || "\u0000");
+      }
+    }
+    expect(calls.count).toBe(0);
+    expect(await scenarioText()).toBe(before);
+  });
+
+  test("refuses a request without a Host header", async () => {
+    const app = createApp({ projectDir: project, provider: fakeProviders().providers });
+    const response = await app.request("/api/project");
+    expect(response.status).toBe(403);
+  });
+
+  test("with a token, the token check applies instead", async () => {
+    const app = makeApp({ token: "test-token-value" });
+    const response = await app.request("/api/project", {
+      headers: { Host: "192.168.1.5:5310", Cookie: `${TOKEN_COOKIE}=test-token-value` },
+    });
+    expect(response.status).toBe(200);
   });
 });
 
@@ -629,15 +805,24 @@ describe("token", () => {
     expect(response.status).toBe(401);
   });
 
-  test("a valid ?token= sets a cookie that later requests use", async () => {
+  test("a valid ?token= sets a cookie and redirects to the page without the token", async () => {
     const app = makeApp({ token });
-    let response = await app.request(`/api/project?token=${token}`);
-    expect(response.status).toBe(200);
+    let response = await app.request(`/?token=${token}`);
+    expect(response.status).toBe(303);
+    expect(response.headers.get("Location")).toBe("./");
     const cookie = response.headers.get("Set-Cookie") ?? "";
     expect(cookie).toContain(`${TOKEN_COOKIE}=${token}`);
     expect(cookie).toContain("HttpOnly");
     expect(cookie).toContain("SameSite=Strict");
     expect(cookie).not.toContain("Path=");
+    expect(response.headers.get("Referrer-Policy")).toBe("no-referrer");
+
+    response = await app.request(`/ui/page.html?a=1&token=${token}&b=2`);
+    expect(response.status).toBe(303);
+    expect(response.headers.get("Location")).toBe("./page.html?a=1&b=2");
+    response = await app.request(`/ui/?token=${token}`);
+    expect(response.headers.get("Location")).toBe("./");
+
     response = await app.request("/api/project", {
       headers: { Cookie: `${TOKEN_COOKIE}=${token}` },
     });
@@ -647,6 +832,25 @@ describe("token", () => {
   test("no token is needed when none is set", async () => {
     expect((await makeApp().request("/api/project")).status).toBe(200);
   });
+});
+
+test("every response has Referrer-Policy: no-referrer", async () => {
+  const webDir = join(dir, "web");
+  await mkdir(webDir);
+  await writeFile(join(webDir, "index.html"), "<!doctype html>");
+  for (const [app, path] of [
+    [makeApp({ webDir }), "/"],
+    [makeApp(), "/api/project"],
+    [makeApp(), "/api/nope"],
+    [makeApp(), "/assets/nope.wav"],
+    [makeApp({ token: "t" }), "/api/project"],
+    [makeApp(), "/api/project?evil"],
+  ] as const) {
+    const response = await app.request(path);
+    expect(response.headers.get("Referrer-Policy"), path).toBe("no-referrer");
+  }
+  const refused = await makeApp().request("/", { headers: { Host: "evil.example" } });
+  expect(refused.headers.get("Referrer-Policy")).toBe("no-referrer");
 });
 
 test("errors from unexpected failures are fixed text", async () => {

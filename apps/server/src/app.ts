@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   ASSETS_DIR,
   AssetCache,
+  type AssetResolver,
   computeTimeline,
   defaultResolvers,
   type GeneratedItemResolver,
@@ -58,6 +59,7 @@ import type {
   VerifyLibraryEntryResponse,
 } from "./api.js";
 import { relativeUrlPath, serveFile } from "./files.js";
+import { hostCheck } from "./hosts.js";
 import { documentData, sceneIndex, updateSceneBgm } from "./scene-edit.js";
 import { tokenCheck } from "./token.js";
 import type { ProjectEvents } from "./watcher.js";
@@ -75,6 +77,13 @@ export type AppOptions = {
   webDir?: string;
   /** When set, every request needs this token (see `tokenCheck`). */
   token?: string;
+  /**
+   * Without a token, host names accepted in the `Host` header besides the loopback names and
+   * `.ts.net` names (see `hostCheck`), as `vd serve --allow-host` gives them.
+   */
+  allowedHosts?: readonly string[];
+  /** Resolvers tried before the generated-item resolver, such as one for library items. */
+  resolvers?: readonly AssetResolver[];
   /** Source of `GET /api/events`. Without it, the stream only sends keep-alives. */
   events?: ProjectEvents;
   /** Aborting it ends every open event stream, so that the server can close. */
@@ -91,6 +100,9 @@ const MESSAGES: Record<ApiErrorCode, string> = {
   "confirm-required": "A paid provider needs confirm: true to generate",
   "server-error": "The server could not complete the request",
 };
+
+/** Path prefixes that the built UI never serves. */
+const NOT_WEB = ["/api/", "/assets/", "/library-files/"];
 
 const PROJECT_UNREADABLE = "scenario.yaml cannot be read";
 const LIBRARY_UNREADABLE = "The library cannot be read; run vd library check";
@@ -115,7 +127,7 @@ const notFound = () => new HttpError(404, "not-found");
 /** Creates the app. It reads and writes only the project folder and the library. */
 export function createApp(options: AppOptions): Hono {
   const { projectDir, provider, library } = options;
-  const resolvers = defaultResolvers(provider);
+  const resolvers = [...(options.resolvers ?? []), ...defaultResolvers(provider)];
   const providerInfo: ProviderInfo = {
     id: provider.tts.id,
     paid: provider.tts.paid || provider.sfx.paid || provider.music.paid,
@@ -139,7 +151,17 @@ export function createApp(options: AppOptions): Hono {
   });
   app.notFound((c) => c.json(apiError("not-found"), 404));
 
-  if (options.token !== undefined) app.use("*", tokenCheck(options.token));
+  // Pages and files must not leak their URL, which may hold the token, to other sites.
+  app.use("*", async (c, next) => {
+    await next();
+    c.res.headers.set("Referrer-Policy", "no-referrer");
+  });
+  // With a token, the token protects every route. Without one, the Host check does, against
+  // DNS rebinding.
+  app.use(
+    "*",
+    options.token !== undefined ? tokenCheck(options.token) : hostCheck(options.allowedHosts),
+  );
 
   // Requests that change something must be JSON and must not come from another site, so a
   // page on another site cannot post a form or a simple request to this server.
@@ -269,31 +291,39 @@ export function createApp(options: AppOptions): Hono {
 
   app.post("/api/generate", async (c) => {
     const body = generateRequest(await jsonBody(c));
-    const { scenario, issues } = await loadScenario(projectDir).catch(() => {
-      throw new HttpError(500, "server-error", PROJECT_UNREADABLE);
-    });
-    if (!scenario) throw new ScenarioValidationError(issues);
-    if (body.ids) {
-      const known = new Set(scenarioItems(scenario).map((item) => item.id));
-      if (body.ids.some((id) => !known.has(id))) throw badRequest("An item ID is unknown");
-    }
     const only = body.ids ? { only: body.ids } : {};
-    const plan = async (): Promise<GeneratePlanResponse> => ({
-      kind: "plan",
-      provider: providerInfo,
-      plan: await planGeneration(scenario, await AssetCache.load(projectDir), resolvers, only),
-    });
-    if (body.dryRun === true) return c.json(await plan());
-    if (providerInfo.paid && body.confirm !== true) {
+    // The valid scenario, with every requested ID in it.
+    const scenarioFor = async (): Promise<Scenario> => {
+      const { scenario, issues } = await loadScenario(projectDir).catch(() => {
+        throw new HttpError(500, "server-error", PROJECT_UNREADABLE);
+      });
+      if (!scenario) throw new ScenarioValidationError(issues);
+      if (body.ids) {
+        const known = new Set(scenarioItems(scenario).map((item) => item.id));
+        if (body.ids.some((id) => !known.has(id))) throw badRequest("An item ID is unknown");
+      }
+      return scenario;
+    };
+    const runs = body.dryRun !== true && (!providerInfo.paid || body.confirm === true);
+    if (!runs) {
+      // Only reads, so it need not wait for the queue.
+      const scenario = await scenarioFor();
+      const plan: GeneratePlanResponse = {
+        kind: "plan",
+        provider: providerInfo,
+        plan: await planGeneration(scenario, await AssetCache.load(projectDir), resolvers, only),
+      };
+      if (body.dryRun === true) return c.json(plan);
       const refused: ConfirmRequiredError = {
         ...apiError("confirm-required"),
         error: "confirm-required",
-        plan: await plan(),
+        plan,
       };
       return c.json(refused, 409);
     }
+    // Loaded in the queue, so that a run waiting behind an edit generates the edited text.
     const result = await exclusive(async () =>
-      runGeneration(scenario, await AssetCache.load(projectDir), resolvers, only),
+      runGeneration(await scenarioFor(), await AssetCache.load(projectDir), resolvers, only),
     );
     const response: GenerateRunResponse = {
       kind: "run",
@@ -390,10 +420,14 @@ export function createApp(options: AppOptions): Hono {
     return response;
   });
 
+  // The built UI: every other path. Its own files are under ui/, apart from the project's
+  // /assets/.
   app.get("/*", async (c) => {
     const webDir = options.webDir;
     const pathname = new URL(c.req.url).pathname;
-    if (webDir === undefined || pathname.startsWith("/api/")) throw notFound();
+    if (webDir === undefined || NOT_WEB.some((prefix) => pathname.startsWith(prefix))) {
+      throw notFound();
+    }
     const rel = pathname === "/" ? "index.html" : relativeUrlPath(pathname.slice(1));
     if (rel === undefined) throw notFound();
     const response = await serveFile(webDir, rel);

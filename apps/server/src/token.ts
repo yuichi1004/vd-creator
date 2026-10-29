@@ -31,9 +31,22 @@ const UNAUTHORIZED: ApiError = {
 };
 
 /**
+ * The relative URL of the same page without the token query: the last path segment, or `./`,
+ * and the other query parameters. Relative, so that it works under a path prefix.
+ */
+export function withoutToken(url: URL): string {
+  const page = url.pathname.slice(url.pathname.lastIndexOf("/") + 1);
+  const params = new URLSearchParams(url.search);
+  params.delete(TOKEN_QUERY);
+  const query = params.toString();
+  return `./${page}${query ? `?${query}` : ""}`;
+}
+
+/**
  * Checks the token on every request. A valid `?token=` query sets an `HttpOnly`,
- * `SameSite=Strict` cookie with no `Path`, so that it works under a path prefix; later
- * requests use the cookie. Anything else gets 401.
+ * `SameSite=Strict` cookie with no `Path`, so that it works under a path prefix. A GET then
+ * redirects (303) to the same page without the token, so that it leaves the address bar and
+ * history; later requests use the cookie. Anything else gets 401.
  */
 export function tokenCheck(token: string): MiddlewareHandler {
   return async (c, next) => {
@@ -44,6 +57,9 @@ export function tokenCheck(token: string): MiddlewareHandler {
       c.header("Set-Cookie", `${TOKEN_COOKIE}=${token}; HttpOnly; SameSite=Strict`, {
         append: true,
       });
+      if (c.req.method === "GET" || c.req.method === "HEAD") {
+        return c.redirect(withoutToken(new URL(c.req.url)), 303);
+      }
       await next();
       return;
     }

@@ -1,4 +1,5 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -46,6 +47,29 @@ test("listens on 127.0.0.1 without a token by default", async () => {
   expect(response.status).toBe(200);
 });
 
+test("without a host, refuses a Host header that is not allowed", async () => {
+  running = await startServer({
+    projectDir: dir,
+    provider: providers(),
+    port: 0,
+    allowedHosts: ["studio.example"],
+  });
+  const url = new URL("api/project", running.url);
+  expect((await fetch(url)).status).toBe(200);
+  // fetch does not let a page set Host, but node's http module does.
+  const status = (host: string) =>
+    new Promise<number | undefined>((resolve, reject) => {
+      const req = request(url, { headers: { Host: host } }, (res) => {
+        res.resume();
+        resolve(res.statusCode);
+      });
+      req.on("error", reject);
+      req.end();
+    });
+  expect(await status("evil.example")).toBe(403);
+  expect(await status(`studio.example:${running.port}`)).toBe(200);
+});
+
 test("needs the token when a host is given, and puts it in the URL", async () => {
   running = await startServer({
     projectDir: dir,
@@ -62,8 +86,9 @@ test("needs the token when a host is given, and puts it in the URL", async () =>
   expect(refused.status).toBe(401);
   expect(await refused.text()).not.toContain(token);
 
-  const first = await fetch(`${base}/api/project?token=${token}`);
-  expect(first.status).toBe(200);
+  const first = await fetch(`${base}/api/project?token=${token}`, { redirect: "manual" });
+  expect(first.status).toBe(303);
+  expect(first.headers.get("Location")).toBe("./project");
   expect(first.headers.get("Set-Cookie")).toContain(`${TOKEN_COOKIE}=${token}`);
   const later = await fetch(`${base}/api/project`, {
     headers: { Cookie: `${TOKEN_COOKIE}=${token}` },

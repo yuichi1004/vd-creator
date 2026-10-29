@@ -2,6 +2,7 @@
 
 import type { AddressInfo } from "node:net";
 import { createAdaptorServer } from "@hono/node-server";
+import type { AssetResolver } from "@vd-creator/core";
 import { type AppOptions, createApp, type ServerProviders } from "./app.js";
 import { createToken, TOKEN_QUERY } from "./token.js";
 import { ProjectWatcher } from "./watcher.js";
@@ -21,6 +22,13 @@ export type StartServerOptions = {
   host?: string;
   library?: string;
   webDir?: string;
+  /**
+   * Without `host`, host names accepted in the `Host` header besides `localhost`,
+   * `127.0.0.1`, `[::1]`, and `.ts.net` names (`vd serve --allow-host`).
+   */
+  allowedHosts?: string[];
+  /** Resolvers tried before the generated-item resolver, such as one for library items. */
+  resolvers?: AssetResolver[];
 };
 
 export type RunningServer = {
@@ -45,6 +53,8 @@ export async function startServer(options: StartServerOptions): Promise<RunningS
   };
   if (options.library !== undefined) appOptions.library = options.library;
   if (options.webDir !== undefined) appOptions.webDir = options.webDir;
+  if (options.allowedHosts !== undefined) appOptions.allowedHosts = options.allowedHosts;
+  if (options.resolvers !== undefined) appOptions.resolvers = options.resolvers;
   if (token !== undefined) appOptions.token = token;
   const app = createApp(appOptions);
   const server = createAdaptorServer({ fetch: app.fetch });

@@ -88,7 +88,10 @@ export type ScenarioErrorResponse = ScenarioErrorBody;
  *    nothing and returns 409 with a `ConfirmRequiredError`, which holds the plan.
  */
 export type GenerateRequest = {
-  /** Only these item IDs. A BGM uses its scene's ID. All items when absent. */
+  /**
+   * Only these item IDs. A BGM uses its scene's ID. All items when absent. An empty list, or
+   * an ID that is not in the scenario, is refused with 400 `bad-request`.
+   */
   ids?: string[];
   /** True returns the plan only and never generates, for any provider. */
   dryRun?: boolean;
@@ -188,8 +191,11 @@ export type ApiErrorCode =
 
 /**
  * Body of every error response other than 422: 400 `bad-request`, 401 `unauthorized`
- * (missing or wrong token with `--host`), 404 `not-found`, 409 `confirm-required` (see
- * `ConfirmRequiredError`), and 500 `server-error`. `message` is fixed text.
+ * (missing or wrong token with `--host`), 403 `unauthorized` (without `--host`, a `Host`
+ * header that names no allowed host: `localhost`, `127.0.0.1`, `[::1]`, a `.ts.net` name, or
+ * one of the server's `allowedHosts`, from `vd serve --allow-host`), 404 `not-found`, 409
+ * `confirm-required` (see `ConfirmRequiredError`), and 500 `server-error`. `message` is fixed
+ * text.
  */
 export type ApiError = {
   error: ApiErrorCode;
