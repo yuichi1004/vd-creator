@@ -20,7 +20,16 @@ You don't assemble the drama by hand from an empty timeline. You start from what
 
 ## Status
 
-Early development. The monorepo skeleton is in place, but there are no features yet. See [`docs/plans/`](docs/plans/) for design and implementation plans.
+Early development. Expect rough edges and breaking changes. These parts work now:
+
+- **Scenario format.** A drama is a `scenario.yaml` with speakers, scenes, lines, SFX, BGM, and still images. `vd validate` checks it. See the [scenario format guide](docs/scenario-format.md).
+- **Generation.** `vd generate` makes the voices, SFX, and BGM with the mock provider, which is free and makes placeholder tones, or with ElevenLabs.
+- **Review UI.** `vd serve` opens a web UI to listen to the drama, fix lines, and regenerate takes.
+- **Rendering.** `vd render` mixes the audio into one file, and can also write a video with the still images and subtitles.
+- **Sound library.** A shared folder of SFX and BGM with license records, managed with `vd library`. See [plan 0007](docs/plans/0007-sound-library.md).
+- **User directory.** Your own settings and notes, outside the repository. See [Your own settings](#your-own-settings).
+
+See [`docs/plans/`](docs/plans/) for design and implementation plans.
 
 ## Repository layout
 
@@ -51,7 +60,46 @@ Run the setup script from the repository root. It checks the prerequisites and i
 
 ```sh
 scripts/setup.sh
+npm run build
 ```
+
+## Using vd
+
+`vd` is the command-line tool. Run it with `npx vd` from the repository root. `npx vd --help` lists every command and option. A typical flow:
+
+1. Create a project folder with a minimal scenario:
+
+   ```sh
+   npx vd init my-drama
+   ```
+
+2. Write `my-drama/scenario.yaml`, or have an agent write it. Follow the [scenario format guide](docs/scenario-format.md).
+3. Check it:
+
+   ```sh
+   npx vd validate my-drama
+   ```
+
+4. Generate the audio. The mock provider is the default. ElevenLabs needs your API key in the `ELEVENLABS_API_KEY` environment variable. A paid provider such as ElevenLabs prints the plan and its estimated cost first, and runs only with `--yes`:
+
+   ```sh
+   npx vd generate my-drama
+   npx vd generate my-drama --provider elevenlabs --yes
+   ```
+
+5. Review and edit the drama in the UI. Open the URL it prints, and stop it with Ctrl+C:
+
+   ```sh
+   npx vd serve my-drama
+   ```
+
+6. Render the result into `my-drama/out/`. `--video` adds a video with the still images, and `--srt` adds subtitles:
+
+   ```sh
+   npx vd render my-drama --video --srt
+   ```
+
+To review from a phone, see [Using a phone](#using-a-phone). Before you generate an SFX or a BGM, search the sound library with `npx vd library search <words>`; [`AGENTS.md`](AGENTS.md#sound-library) and the [scenario format guide](docs/scenario-format.md#sound-library) explain how to use it.
 
 ## Commands
 
