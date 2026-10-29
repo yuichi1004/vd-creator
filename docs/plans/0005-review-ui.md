@@ -144,7 +144,7 @@ The server task is reviewed with `gpt-6-astra`, because it handles file access, 
   - Constraints: no dependency changes. Listen on `127.0.0.1` unless `host` is given. Compare tokens in constant time. Mock provider and a temporary library in tests. Can run in parallel with the web task.
   - Ownership: `apps/server/src/` except `api.ts`.
   - Acceptance: `npm test -w apps/server` passes, with tests using Hono's request helper for every endpoint, including: a PATCH keeps comments in `scenario.yaml`, a paid generate without `confirm` returns 409, `/assets/../scenario.yaml` and `/library-files/` paths outside the library are rejected, a request without the token returns 401 when a host is set, and the token is not needed on `127.0.0.1`.
-- [ ] Web UI
+- [x] Web UI
   - Target: `apps/web/`
   - Change: the page described above, including the PC and phone layouts and the library panel, built with Vite into `apps/web/dist/`. Pure logic, such as playback scheduling from a timeline, the audio unlock state, and the API client, sits in modules without React so it can be unit tested.
   - Constraints: no dependency changes, and no UI or CSS library; ask the coordinator if one is missing. Talks to the server only through the API types. Can run in parallel with the server task.
