@@ -13,9 +13,9 @@
     "packages/library",
     "packages/core",
     "packages/render",
-    "apps/cli",
     "apps/server",
-    "apps/web"
+    "apps/web",
+    "apps/cli"
   ],
   "scripts": {
     "build": "npm run build --workspaces",

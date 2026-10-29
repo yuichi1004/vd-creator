@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import {
   AssetCache,
@@ -13,6 +15,12 @@ import {
 } from "@vd-creator/core";
 import { providerIds } from "@vd-creator/providers";
 import { SCENARIO_FILE, type Scenario } from "@vd-creator/scenario";
+import {
+  DEFAULT_HOST,
+  type RunningServer,
+  type StartServerOptions,
+  startServer,
+} from "@vd-creator/server";
 import { CleanInterruptedError, CleanRefusedError, cleanProject } from "./clean.js";
 import {
   CONFIG_ENV_VARS,
@@ -40,6 +48,19 @@ import {
 } from "./generate.js";
 import { InitError, initProject } from "./init.js";
 import { LIBRARY_OPTIONS, LIBRARY_USAGE, libraryCommand, safeLibraryText } from "./library.js";
+import {
+  aborted,
+  DEFAULT_SERVE_PORT,
+  listenAddresses,
+  listenHost,
+  NETWORK_WARNING,
+  parsePort,
+  SERVE_USAGE,
+  stopSignal,
+  tokenUrls,
+  WEB_DIR,
+  webBuilt,
+} from "./serve.js";
 import { formatIssue, validateProject } from "./validate.js";
 
 /** Where the CLI writes its output. Each call writes one line. */
@@ -74,6 +95,19 @@ Commands:
   config show       Print each setting of config.yaml and where its value comes from
     --json            Print JSON
   library           Manage the shared sound library (vd library --help for commands)
+  serve [dir]       Serve the review UI for the project in <dir> (default: the current
+                    folder) and print its URL. Stop with Ctrl+C
+    --port <n>        Port (default: 5310; 0 picks a free one)
+    --provider <id>   mock (default) or elevenlabs. With a paid provider, the UI asks to
+                      confirm each generation with its estimated characters
+    --host <addr>     Listen on <addr>, such as 0.0.0.0, instead of 127.0.0.1. Every request
+                      then needs a token, printed in the URLs. Anyone on the network with a
+                      URL can edit the project; Tailscale is the recommended way instead
+    --allow-host <name>
+                      Also accept this Host header name, such as a reverse proxy's
+                      (repeatable). Not needed with --host, where the token is checked
+    --library <path>  Show the library panel for this library. Library items in the
+                      scenario are not resolved by vd serve yet
 
 Options:
   -h, --help        Show this help
@@ -106,6 +140,10 @@ function fsErrorCode(e: unknown): string | undefined {
 export type RunOptions = {
   /** The repository whose `local/` is a user directory candidate. Defaults to `REPO_ROOT`. */
   repoRoot?: string;
+  /** Stops a command that runs until stopped, such as vd serve. Defaults to SIGINT or SIGTERM. */
+  signal?: AbortSignal;
+  /** The built web UI that vd serve serves. Defaults to `WEB_DIR`. */
+  webDir?: string;
 };
 
 /** What a command needs besides its arguments. */
@@ -115,6 +153,8 @@ type Context = {
   env: Env;
   repoRoot: string;
   library?: string;
+  signal?: AbortSignal;
+  webDir: string;
 };
 
 /**
@@ -138,7 +178,14 @@ export async function run(
       error = error instanceof Error ? error.cause : undefined;
     }
   };
-  const context: Context = { output, debug, env, repoRoot: options.repoRoot ?? REPO_ROOT };
+  const context: Context = {
+    output,
+    debug,
+    env,
+    repoRoot: options.repoRoot ?? REPO_ROOT,
+    webDir: options.webDir ?? WEB_DIR,
+  };
+  if (options.signal !== undefined) context.signal = options.signal;
   try {
     return await dispatch(args, context);
   } catch (e) {
@@ -192,6 +239,8 @@ async function dispatch(args: string[], context: Context): Promise<number> {
       return config(rest, parsed.values, context);
     case "library":
       return libraryCommand(rest, parsed.values, context);
+    case "serve":
+      return serve(rest, parsed.values, context);
     case undefined:
       output.stderr(USAGE);
       return EXIT_USAGE;
@@ -226,6 +275,9 @@ function parse(args: string[]) {
       tags: { type: "string" },
       title: { type: "string" },
       "approve-commercial": { type: "boolean" },
+      port: { type: "string" },
+      host: { type: "string" },
+      "allow-host": { type: "string", multiple: true },
     },
   });
 }
@@ -241,6 +293,7 @@ const COMMAND_OPTIONS: Partial<Record<string, readonly string[]>> = {
   // Each subcommand checks which of these it takes.
   config: ["dir", "json"],
   library: LIBRARY_OPTIONS,
+  serve: ["port", "provider", "host", "allow-host"],
 };
 
 async function init(args: string[], context: Context): Promise<number> {
@@ -466,6 +519,89 @@ async function loadProject(
     }
     debug(e);
     return EXIT_FAILURE;
+  }
+}
+
+async function serve(args: string[], options: Options, context: Context): Promise<number> {
+  const { output, debug } = context;
+  const [dir = ".", ...extra] = args;
+  const providerId = options.provider ?? DEFAULT_PROVIDER;
+  const port = options.port === undefined ? DEFAULT_SERVE_PORT : parsePort(options.port);
+  const allowedHosts = options["allow-host"];
+  if (
+    extra.length > 0 ||
+    port === undefined ||
+    options.host === "" ||
+    allowedHosts?.some((name) => name === "")
+  ) {
+    output.stderr(SERVE_USAGE);
+    return EXIT_USAGE;
+  }
+  if (!providerIds().includes(providerId)) {
+    output.stderr(
+      `vd serve: unknown provider "${providerId}"; known providers: ${providerIds().join(", ")}`,
+    );
+    return EXIT_USAGE;
+  }
+  if (!existsSync(join(dir, SCENARIO_FILE))) {
+    output.stderr(`vd serve: no ${SCENARIO_FILE} in ${dir}`);
+    return EXIT_FAILURE;
+  }
+  const config = await loadUserConfig("serve", context);
+  if (typeof config === "number") return config;
+
+  // The server itself asks the UI to confirm every paid generation, so the provider is not
+  // gated here. A paid provider is only used when chosen with --provider.
+  const provider = providersFor(providerId, true);
+  const serverOptions: StartServerOptions = { projectDir: resolve(dir), provider, port };
+  const host = options.host === undefined ? undefined : listenHost(options.host);
+  if (host !== undefined) serverOptions.host = host;
+  if (allowedHosts !== undefined) serverOptions.allowedHosts = allowedHosts;
+  const library = config.settings.library.value;
+  if (library !== undefined) serverOptions.library = resolve(library);
+  if (webBuilt(context.webDir)) {
+    serverOptions.webDir = context.webDir;
+  } else {
+    output.stderr(
+      "vd serve: the web UI is not built, so only the API is served; run npm run build",
+    );
+  }
+
+  const stop = stopSignal(context.signal);
+  try {
+    let running: RunningServer;
+    try {
+      running = await startServer(serverOptions);
+    } catch (e) {
+      const code = errorCode(e);
+      if (code === undefined) throw e;
+      const shown = `${options.host ?? DEFAULT_HOST}:${port}`;
+      output.stderr(`vd serve: cannot listen on ${shown}: ${code}`);
+      debug(e);
+      return EXIT_FAILURE;
+    }
+    if (running.token === undefined) {
+      output.stdout(`Serving ${dir} at ${running.url}`);
+    } else {
+      output.stdout(`Serving ${dir}. Open one of these URLs:`);
+      const addresses = listenAddresses(host ?? DEFAULT_HOST);
+      for (const url of tokenUrls(addresses, running.port, running.token)) {
+        output.stdout(`  ${url}`);
+      }
+      for (const line of NETWORK_WARNING) output.stderr(line);
+    }
+    if (isPaid(provider)) {
+      output.stdout(
+        `Provider ${providerId} is paid: the UI shows the estimated characters and asks to confirm each generation.`,
+      );
+    }
+    output.stdout("Press Ctrl+C to stop.");
+    await aborted(stop.signal);
+    await running.close();
+    output.stdout("Stopped.");
+    return EXIT_OK;
+  } finally {
+    stop.dispose();
   }
 }
 
