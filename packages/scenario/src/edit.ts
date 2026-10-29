@@ -1,18 +1,7 @@
-import {
-  Composer,
-  CST,
-  type Document,
-  isMap,
-  isSeq,
-  type Node,
-  Parser,
-  parse,
-  type Scalar,
-  stringify,
-  type YAMLMap,
-} from "yaml";
-import type { ScenarioDocument } from "./document.js";
+import { Composer, CST, type Document, isMap, Parser, parse, type Scalar, stringify } from "yaml";
+import { ScenarioDocument } from "./document.js";
 import { ITEM_KINDS, type ItemPatch } from "./schema.js";
+import { formatPath, type Issue } from "./validate.js";
 
 // Edits work on the CST (concrete syntax tree) of the source, which keeps every space,
 // newline, and comment. Values are changed on the tokens in place and the tree is
@@ -21,15 +10,27 @@ import { ITEM_KINDS, type ItemPatch } from "./schema.js";
 type MapToken = CST.BlockMap | CST.FlowCollection;
 type Item = CST.CollectionItem;
 
+/** Thrown by `updateItem` when it refuses an edit. The document is left unchanged. */
+export class ScenarioEditError extends Error {
+  readonly issues: Issue[];
+
+  constructor(message: string, issues: Issue[] = [{ path: [], message, severity: "error" }]) {
+    super(message);
+    this.name = "ScenarioEditError";
+    this.issues = issues;
+  }
+}
+
 /**
  * Sets or removes fields of the scene item with the given ID, in place. A value of
  * `undefined` removes the key. The patch is applied all or nothing: if any field
  * cannot be applied, the document is left unchanged and an error is thrown.
  *
  * Throws if no item has the ID, if the patch removes the item's kind key or `id`, or
- * if it renames the item to an ID that another scene or item already uses. Field
- * values are not validated; call `doc.validate()` afterwards. `saveScenario` refuses
- * to write an invalid document.
+ * if it renames the item to an ID that another scene or item already uses. As a last
+ * check, the edited text is parsed and validated again. A `ScenarioEditError` is thrown
+ * if the item would not read back as patched, or if a valid scenario would become
+ * invalid, for example through an unknown speaker or an unresolved alias.
  */
 export function updateItem(doc: ScenarioDocument, id: string, patch: ItemPatch): void {
   for (const [key, value] of Object.entries(patch)) {
@@ -41,46 +42,112 @@ export function updateItem(doc: ScenarioDocument, id: string, patch: ItemPatch):
   const tokens = Array.from(new Parser().parse(doc.text));
   const composed = Array.from(new Composer({ keepSourceTokens: true }).compose(tokens));
   const document = composed[0];
-  if (!document || composed.some((d) => d.errors.length > 0)) {
-    throw new Error("Cannot edit a document with YAML errors");
-  }
-  const { item, otherIds } = findItem(document, id);
-  if (!item) throw new Error(`No item with id "${id}"`);
+  const before = document && composed.every((d) => d.errors.length === 0) && toData(document);
+  if (!before) throw new Error("Cannot edit a document with YAML errors");
+  // IDs are compared on the resolved data, so that aliased IDs count like any other.
+  const target = findItem(before, id);
+  if (!target) throw new Error(`No item with id "${id}"`);
+  const { path, current, otherIds } = target;
   if (typeof patch.id === "string" && patch.id !== id && otherIds.has(patch.id)) {
     throw new Error(`Cannot rename "${id}" to "${patch.id}": the id is already used`);
   }
-  const token = item.srcToken;
+  const item = document.getIn(path, true);
+  const token = isMap(item) ? item.srcToken : undefined;
   if (!isMapToken(token)) throw new Error(`Item "${id}" is not a mapping`);
 
+  const expected: Record<string, unknown> = { ...current };
   for (const [key, value] of Object.entries(patch)) {
-    const current = item.get(key, true) as Node | undefined;
-    if (value !== undefined && current && sameValue(current.toJSON(), value)) continue;
+    if (value === undefined) delete expected[key];
+    else expected[key] = value;
+    if (value !== undefined && sameValue(current[key], value)) continue;
     setField(token, key, value);
   }
 
   let text = tokens.map((t) => CST.stringify(t)).join("");
   if (usesCrlf(doc.text)) text = text.replace(/\r?\n/g, "\r\n");
+  checkEdit(doc, text, path, expected);
   doc.setText(text);
 }
 
+// Parses and validates the edited text again. Refuses text that does not parse, an item
+// that does not read back as patched, and new errors in a scenario that was valid.
+function checkEdit(
+  doc: ScenarioDocument,
+  text: string,
+  path: (string | number)[],
+  expected: Record<string, unknown>,
+): void {
+  const next = new ScenarioDocument(text);
+  const yamlErrors = next.yamlIssues().filter((i) => i.severity === "error");
+  if (yamlErrors.length > 0) {
+    throw new ScenarioEditError(`Refusing an edit that breaks the YAML: ${yamlErrors[0]?.message}`);
+  }
+  const data = toData(next.document);
+  const actual = data && getPath(data, path);
+  if (!actual || canonical(actual) !== canonical(expected)) {
+    const message =
+      "Refusing an edit that would not read back as requested, for example because an alias depends on the edited value";
+    throw new ScenarioEditError(message, [{ path, message, severity: "error" }]);
+  }
+  const errorsOf = (issues: Issue[]) => issues.filter((i) => i.severity === "error");
+  if (errorsOf(doc.validate().issues).length > 0) return;
+  const errors = errorsOf(next.validate().issues);
+  if (errors.length > 0) {
+    throw new ScenarioEditError(
+      `Refusing an edit that makes the scenario invalid: ${errors
+        .map((i) => `${formatPath(i.path)}: ${i.message}`)
+        .join("; ")}`,
+      errors,
+    );
+  }
+}
+
+// Plain data of the document with aliases resolved, or undefined if they do not resolve.
+function toData(document: Document): unknown {
+  try {
+    return document.toJS() ?? null;
+  } catch {
+    return undefined;
+  }
+}
+
 function findItem(
-  document: Document,
+  data: unknown,
   id: string,
-): { item: YAMLMap | undefined; otherIds: Set<unknown> } {
-  let item: YAMLMap | undefined;
+):
+  | { path: (string | number)[]; current: Record<string, unknown>; otherIds: Set<unknown> }
+  | undefined {
+  let found: { path: (string | number)[]; current: Record<string, unknown> } | undefined;
   const otherIds = new Set<unknown>();
-  const scenes = isMap(document.contents) ? document.contents.get("scenes", true) : undefined;
-  for (const scene of isSeq(scenes) ? scenes.items : []) {
-    if (!isMap(scene)) continue;
-    otherIds.add(scene.get("id"));
-    const items = scene.get("items", true);
-    for (const node of isSeq(items) ? items.items : []) {
-      if (!isMap(node)) continue;
-      if (!item && node.get("id") === id) item = node;
-      else otherIds.add(node.get("id"));
+  const scenes = isRecord(data) ? data.scenes : undefined;
+  for (const [i, scene] of (Array.isArray(scenes) ? scenes : []).entries()) {
+    if (!isRecord(scene)) continue;
+    otherIds.add(scene.id);
+    const items = scene.items;
+    for (const [j, node] of (Array.isArray(items) ? items : []).entries()) {
+      if (!isRecord(node)) continue;
+      if (!found && node.id === id) found = { path: ["scenes", i, "items", j], current: node };
+      else otherIds.add(node.id);
     }
   }
-  return { item, otherIds };
+  return found && { ...found, otherIds };
+}
+
+function getPath(data: unknown, path: (string | number)[]): Record<string, unknown> | undefined {
+  let value = data;
+  for (const key of path)
+    value =
+      isRecord(value) || Array.isArray(value)
+        ? (value as Record<string | number, unknown>)[key]
+        : undefined;
+  return isRecord(value) ? value : undefined;
+}
+
+// JSON with sorted keys, so that key order does not matter.
+function canonical(value: unknown): string {
+  return JSON.stringify(value, (_, v) =>
+    isRecord(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b))) : v,
+  );
 }
 
 function setField(map: MapToken, key: string, value: unknown): void {
@@ -112,14 +179,21 @@ function setValue(item: Item, value: unknown, inFlow: boolean): void {
       return;
     }
     const trailing = takeTrailing(token);
-    if (token.type === "block-seq") fixSeparator(item);
-    item.value = valueToken(value, 0, inFlow, trailing);
+    const comments = token.type === "block-seq" ? fixSeparator(item) : [];
+    item.value = valueToken(value, 0, inFlow, [...comments, ...trailing]);
     return;
   }
-  if (token.type === "block-map" || token.type === "block-seq") fixSeparator(item);
+  const comments =
+    token.type === "block-map" || token.type === "block-seq" ? fixSeparator(item) : [];
   const { source, type } = scalarSource(value, token, inFlow);
   CST.setScalarValue(token, source, { afterKey: !inFlow, inFlow, type });
   escapeDoubleQuoted(token, value);
+  if (comments.length > 0 && isFlowScalar(token)) {
+    const end = token.end ?? [];
+    const newline = end.findIndex((t) => t.type === "newline");
+    end.splice(newline === -1 ? end.length : newline, 0, ...comments);
+    token.end = end;
+  }
 }
 
 // The yaml stringifier folds line breaks in double-quoted strings over several lines.
@@ -143,10 +217,14 @@ function addItem(map: MapToken, key: string, value: unknown): void {
       value: valueToken(value, map.indent, false, [newlineToken()]),
     });
   } else {
-    // Move the whitespace and comments before the closing brace after the new pair.
-    const previous = map.items.at(-1);
-    const trailing = previous?.value ? takeTrailing(previous.value) : [];
-    map.items.push({
+    // A trailing comma, as in `{ a: 1, }`, is an item without key or value. The new pair
+    // goes before it. Otherwise, move the whitespace and comments before the closing
+    // brace after the new pair.
+    const last = map.items.at(-1);
+    const sentinel = last && !last.key && !last.sep && !last.value;
+    const previous = sentinel ? map.items.at(-2) : last;
+    const trailing = !sentinel && previous?.value ? takeTrailing(previous.value) : [];
+    map.items.splice(sentinel ? -1 : map.items.length, 0, {
       start: previous ? [comma(), space(1)] : [space(1)],
       key: keyToken,
       sep: [colon(), space(1)],
@@ -179,9 +257,20 @@ function removeItem(map: MapToken, index: number): void {
 }
 
 // After a block collection value turns into a flow value, the value follows the key on
-// the same line.
-function fixSeparator(item: Item): void {
-  item.sep = [colon(), space(1)];
+// the same line. An anchor stays before the value, and comments on the key line move
+// after it; they are returned to be put at the end of the new value. A tag cannot stay,
+// because it names the collection type, so the edit is refused.
+function fixSeparator(item: Item): CST.SourceToken[] {
+  const sep = item.sep ?? [];
+  const tag = sep.find((t) => t.type === "tag");
+  if (tag) {
+    throw new ScenarioEditError(
+      `Cannot replace a collection tagged ${tag.source} with a value of another type`,
+    );
+  }
+  const anchors = sep.filter((t) => t.type === "anchor");
+  item.sep = [colon(), space(1), ...anchors.flatMap((t) => [t, space(1)])];
+  return sep.filter((t) => t.type === "comment").flatMap((t) => [space(1), t]);
 }
 
 function valueToken(value: unknown, indent: number, inFlow: boolean, end: CST.SourceToken[]) {

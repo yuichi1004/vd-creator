@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { type ItemPatch, ScenarioDocument, updateItem } from "./index.js";
+import { type ItemPatch, ScenarioDocument, ScenarioEditError, updateItem } from "./index.js";
 
 // Edge-case inputs are raw strings, so that the formatter does not normalize them.
 const HEAD = [
@@ -213,5 +213,96 @@ describe("line endings", () => {
       line: "new\nlines",
       take: 2,
     });
+  });
+});
+
+describe("anchors, tags, and comments on the key line", () => {
+  const shared =
+    "      - sfx: &source # source\n          library: lib\n        id: x\n" +
+    "      - sfx: *source\n        id: y\n";
+
+  test("a block mapping replaced by a scalar keeps its anchor and comment", () => {
+    const { doc, items } = edit(shared, "x", { sfx: "wind" });
+    expect(doc.text).toBe(
+      `${HEAD}      - sfx: &source wind # source\n        id: x\n      - sfx: *source\n        id: y\n`,
+    );
+    expect(items[0]).toMatchObject({ sfx: "wind", id: "x" });
+    expect(items[1]).toMatchObject({ sfx: "wind", id: "y" });
+  });
+
+  test("a block mapping replaced by a scalar keeps its anchor", () => {
+    const { doc } = edit(shared.replace(" # source", ""), "x", { sfx: "wind" });
+    expect(doc.text).toContain("      - sfx: &source wind\n        id: x\n");
+  });
+
+  test("a block mapping replaced by a scalar keeps a comment on the key line", () => {
+    const { doc } = edit("      - sfx: # source\n          library: lib\n        id: x\n", "x", {
+      sfx: "wind",
+    });
+    expect(doc.text).toBe(`${HEAD}      - sfx: wind # source\n        id: x\n`);
+  });
+
+  test("refuses to drop a collection tag", () => {
+    const items = "      - sfx: !!map\n          library: lib\n        id: x\n";
+    const doc = scenario(items);
+    expect(() => updateItem(doc, "x", { sfx: "wind" })).toThrow(ScenarioEditError);
+    expect(doc.text).toBe(HEAD + items);
+  });
+
+  test("refuses to remove an anchored value that an alias uses", () => {
+    const items =
+      "      - line: hi\n        id: l\n        speaker: a\n        direction: &d soft\n" +
+      "      - line: ho\n        id: m\n        speaker: a\n        direction: *d\n";
+    const doc = scenario(items);
+    expect(() => updateItem(doc, "l", { direction: undefined })).toThrow(ScenarioEditError);
+    expect(doc.text).toBe(HEAD + items);
+  });
+});
+
+describe("aliased ids", () => {
+  const aliased = "      - line: &ident x\n        id: *ident\n        speaker: a\n";
+
+  test("an item with an aliased id can be found by its id", () => {
+    const { items } = edit(aliased, "x", { take: 1 });
+    expect(items[0]).toMatchObject({ line: "x", id: "x", take: 1 });
+  });
+
+  test("renaming to an aliased id of another item is refused", () => {
+    const items = `${aliased}      - line: two\n        id: second\n        speaker: a\n`;
+    const doc = scenario(items);
+    expect(() => updateItem(doc, "second", { id: "x" })).toThrow(/already used/);
+    expect(doc.text).toBe(HEAD + items);
+  });
+
+  test("an aliased scene id counts for collisions", () => {
+    const doc = new ScenarioDocument(
+      "version: 1\ntitle: &scene intro\nscenes:\n  - id: *scene\n    items:\n      - { pause: 1, id: p }\n",
+    );
+    expect(() => updateItem(doc, "p", { id: "intro" })).toThrow(/already used/);
+  });
+
+  test("refuses an edit that would change the id through its anchor", () => {
+    const doc = scenario(aliased);
+    expect(() => updateItem(doc, "x", { line: "changed" })).toThrow(ScenarioEditError);
+    expect(doc.text).toBe(HEAD + aliased);
+  });
+});
+
+describe("flow mappings with a trailing comma", () => {
+  test("adds and removes a key before the trailing comma", () => {
+    const items = "      - {pause: 1, id: p,}\n";
+    const { doc, items: parsed } = edit(items, "p", { gapBeforeSec: 0.5 });
+    expect(doc.text).toBe(`${HEAD}      - {pause: 1, id: p, gapBeforeSec: 0.5,}\n`);
+    expect(parsed[0]).toMatchObject({ pause: 1, id: "p", gapBeforeSec: 0.5 });
+    updateItem(doc, "p", { gapBeforeSec: undefined });
+    expect(doc.text).toBe(HEAD + items);
+  });
+
+  test("keeps a comment after the trailing comma", () => {
+    const items = "      - { pause: 1, id: p, # c\n        }\n";
+    const { doc } = edit(items, "p", { gapBeforeSec: 0.5 });
+    expect(doc.text).toBe(`${HEAD}      - { pause: 1, id: p, gapBeforeSec: 0.5, # c\n        }\n`);
+    updateItem(doc, "p", { gapBeforeSec: undefined });
+    expect(doc.text).toBe(HEAD + items);
   });
 });

@@ -7,6 +7,7 @@ import {
   parseScenario,
   SCENARIO_FILE,
   ScenarioDocument,
+  ScenarioEditError,
   ScenarioValidationError,
   saveScenario,
   updateItem,
@@ -56,7 +57,9 @@ describe("loadScenario and saveScenario", () => {
   test("save refuses an invalid scenario and keeps the file", async () => {
     const original = await readFile(join(dir, SCENARIO_FILE), "utf8");
     const { doc } = await loadScenario(dir);
-    updateItem(doc, "s1-l1", { speaker: undefined });
+    doc.setText(
+      doc.text.replace("        id: s1-l1\n        speaker: mira\n", "        id: s1-l1\n"),
+    );
     await expect(saveScenario(dir, doc)).rejects.toThrow(ScenarioValidationError);
     await expect(saveScenario(dir, doc)).rejects.toMatchObject({
       issues: [expect.objectContaining({ path: ["scenes", 0, "items", 3, "speaker"] })],
@@ -233,11 +236,27 @@ describe("updateItem", () => {
     expect(doc.text).toBe(before);
   });
 
-  test("the result can be validated after an invalid patch", async () => {
+  test("refuses a patch that makes a valid scenario invalid", async () => {
     const { doc } = await loadScenario(dir);
-    updateItem(doc, "s1-l1", { speaker: "nobody" });
-    expect(parseScenario(doc.text).issues).toContainEqual(
-      expect.objectContaining({ path: ["scenes", 0, "items", 3, "speaker"] }),
+    const before = doc.text;
+    for (const patch of [{ speaker: "nobody" }, { speaker: undefined }, { take: -1 }]) {
+      expect(() => updateItem(doc, "s1-l1", patch)).toThrow(ScenarioEditError);
+    }
+    try {
+      updateItem(doc, "s1-l1", { speaker: "nobody" });
+    } catch (e) {
+      expect((e as ScenarioEditError).issues).toContainEqual(
+        expect.objectContaining({ path: ["scenes", 0, "items", 3, "speaker"] }),
+      );
+    }
+    expect(doc.text).toBe(before);
+  });
+
+  test("allows edits to a scenario that is already invalid", () => {
+    const doc = new ScenarioDocument(
+      "version: 1\ntitle: T\nscenes:\n  - id: s\n    items:\n      - { line: hi, id: l, speaker: nobody }\n",
     );
+    updateItem(doc, "l", { line: "hello" });
+    expect(doc.text).toContain("line: hello");
   });
 });

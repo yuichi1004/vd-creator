@@ -7,7 +7,7 @@ export {
   ScenarioValidationError,
   saveScenario,
 } from "./document.js";
-export { updateItem } from "./edit.js";
+export { ScenarioEditError, updateItem } from "./edit.js";
 export { scenarioJsonSchema } from "./json-schema.js";
 export {
   AssetPathSchema,
