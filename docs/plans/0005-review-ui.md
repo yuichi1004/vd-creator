@@ -56,7 +56,7 @@ Without a token, the server accepts a request only if its `Host` header names an
 **Fallback without a VPN:** `vd serve --host <addr>`, for example `0.0.0.0` or the machine's Tailscale IP, listens on that address directly. Then:
 
 - The server creates a random token at start, and `vd serve` prints the URL with it for each address of the machine.
-- Every request needs the token: from the `?token=` query on the first visit, after which the server sets an `HttpOnly`, `SameSite=Strict` cookie and redirects to the same page without the query, using a relative `Location` so that it works under a path prefix. Every response carries `Referrer-Policy: no-referrer`. Requests without the token get 401. With the default `127.0.0.1` host no token is needed. (The redirect and the header were added during implementation.)
+- Every request needs the token: from the `?token=` query on the first visit, after which the server sets an `HttpOnly`, `SameSite=Lax` cookie (`Strict` would not be sent on the first navigation from a link, such as a tapped URL) and redirects to the same page without the query, using a relative `Location` so that it works under a path prefix. Every response carries `Referrer-Policy: no-referrer`. Requests without the token get 401. With the default `127.0.0.1` host no token is needed. (The redirect and the header were added during implementation.)
 - The server prints a warning that anyone on the network with the URL can edit the project and, with a paid provider, spend money, and that Tailscale is the recommended way. A paid provider still needs the confirm step for every generation.
 - Traffic is plain HTTP. vd adds no TLS.
 
@@ -158,7 +158,7 @@ The server task's first review uses `gpt-6-astra`, because the task handles file
   - Acceptance: `npm test -w apps/cli` passes, with a test that starts `serve` on a free port against an `init` project and gets `/api/project`, and a test that `--host` output contains a URL with a token. Before the plan is closed, the coordinator checks the UI in a browser at 1280 px and 375 px widths, and the human runs the phone checklist below on a real phone.
   - Review notes: `--library` is passed to the server, but library items are not resolved until the 0007 project integration task adds a resolver. Low-severity follow-ups: `--allow-host` accepts values with a port, which can never match, and is ignored with `--host` without a warning; a watcher error at startup is reported as "cannot listen on"; the network warning also prints for `--host 127.0.0.1`; an IPv6 zone in `--host` is not encoded in the printed URL; the built UI is found only from a repository checkout; no test sends SIGTERM or starts `--host 0.0.0.0` end to end.
 
-- [ ] Phone access guide
+- [x] Phone access guide
   - Target: `docs/phone-access.md` (new), `README.md`
   - Change: a guide that recommends Tailscale: install it on the PC and the phone, run `vd serve` and `tailscale serve --bg <port>`, open the printed URL, and stop with `tailscale serve --bg <port> off` (or the command current Tailscale documents). It says not to use `tailscale funnel`, then describes other VPNs or SSH tunnels and the `--host` fallback with its risks. Link it from the README.
   - Constraints: no code. No addresses, machine names, or tailnet names from a real setup. Check the Tailscale commands against Tailscale's current documentation. Depends on the `vd serve` task.
