@@ -56,7 +56,7 @@ It checks that ffmpeg is on `PATH`, that every item has an asset, and that the p
 
 ## Tasks
 
-- [ ] Audio mix and subtitles
+- [x] Audio mix and subtitles
   - Target: `packages/render/`
   - Change: `buildAudioMixArgs(timeline, options)`, `renderAudio(projectDir, options)`, `buildSrt(timeline, scenario)`, and a small `runFfmpeg` helper that reports ffmpeg's stderr on failure.
   - Constraints: no new dependencies. ffmpeg is the only external program.
