@@ -71,17 +71,19 @@ It calls the ElevenLabs REST API with the built-in `fetch`, not the SDK. This av
 
 The pipeline asks a list of resolvers for each item's asset. This plan ships one resolver, for generated items. An item that no resolver handles, such as `sfx: { library: ... }` before 0007 is done, is reported as `unresolved` in the plan and the timeline, not as an error and not as a generation request. 0007 adds the library resolver without changing the pipeline.
 
+An item whose request cannot be written as canonical JSON, such as provider `settings` holding `.inf` or a cyclic alias, is `invalid`: it has no cost, is never generated, fails alone in a run, and its reason names only its kind and ID. Every other item still plans, generates, and plays. (`invalid` was added during implementation.)
+
 ```ts
 interface AssetResolver {
   handles(item: ScenarioItem): boolean;
-  plan(item: ScenarioItem, ctx: ResolveContext): Promise<PlannedAsset>;   // cached | to-generate | unresolved, with cost
+  plan(item: ScenarioItem, ctx: ResolveContext): Promise<PlannedAsset>;   // cached | to-generate | unresolved | invalid, with cost
   resolve(item: ScenarioItem, ctx: ResolveContext): Promise<ResolvedAsset>;
 }
 ```
 
 ### Timeline
 
-`computeTimeline(scenario, cache, resolvers)` is async and returns, for each item, `{ id, kind, startSec, durationSec, assetFile? }`, plus image spans and BGM spans per scene. It finds assets through the same resolver list as `planGeneration`. Items play in order, separated by `gapBeforeSec`. An SFX with `overlap: true` does not push the next item. Items without an asset yet get an estimated duration and `missing: true`, so that the UI can still show a layout. A cache entry whose file is missing counts as no asset.
+`computeTimeline(scenario, cache, resolvers)` is async and returns, for each item, `{ id, kind, startSec, durationSec, assetFile? }`, plus image spans and BGM spans per scene. It finds assets through the same resolver list as `planGeneration`. Items play in order, separated by `gapBeforeSec`. An SFX with `overlap: true` does not push the next item. Items without an asset yet, including `unresolved` and `invalid` ones, get an estimated duration and `missing: true` (and `invalid: true` for an invalid item), so that the UI can still show a layout. A cache entry whose file is missing counts as no asset.
 
 An image takes no time and never moves the audio. Its span starts at its own position, but never before the previous image's start. A span of zero length is dropped. With a negative gap, the next audio item can start before the image appears.
 
@@ -94,7 +96,7 @@ vd generate [dir] [--provider mock|elevenlabs] [--only <id,...>] [--dry-run] [--
 ```
 
 - The provider defaults to `mock`, even if a speaker names another provider in the scenario. Real providers run only with `--provider`.
-- It first prints the plan: items to generate, items already cached, and the estimated characters and requests.
+- It first prints the plan: items to generate, items already cached, unresolved and invalid items, and the estimated characters and requests.
 - With a paid provider, it stops after the plan unless `--yes` is given. `--dry-run` always stops after the plan.
 - At most 4 requests run at once. Each asset is written as soon as it is ready, so an interrupted run keeps its progress.
 
@@ -116,7 +118,7 @@ The interfaces task is reviewed with `gpt-6-astra`, because it fixes a public in
   - Acceptance: `npm test -w packages/providers` passes, with tests for the request body, headers (key from the environment), and error handling, all against a stubbed `fetch`.
 - [ ] Cache, generation pipeline, and timeline
   - Target: `packages/core/`
-  - Change: the cache, the `AssetResolver` hook with the generated-item resolver, `planGeneration(scenario, cache, resolvers)` (items with cached, to-generate, or unresolved status and a cost total), `runGeneration` (concurrency 4, writes assets as they finish), and `computeTimeline`.
+  - Change: the cache, the `AssetResolver` hook with the generated-item resolver, `planGeneration(scenario, cache, resolvers)` (items with cached, to-generate, unresolved, or invalid status and a cost total), `runGeneration` (concurrency 4, writes assets as they finish), and `computeTimeline`.
   - Constraints: no new dependencies. Uses only the mock provider in tests. Depends on the interfaces task. Can run in parallel with the ElevenLabs task.
   - Ownership: `packages/core/`.
   - Acceptance: `npm test -w packages/core` passes, including: generating the 0003 sample twice makes no provider calls the second time, changing one line regenerates only that line, and timeline start times follow the gap and overlap rules.
