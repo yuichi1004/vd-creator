@@ -82,10 +82,11 @@ export async function initProject(dir: string): Promise<string> {
     throw new InitError(`${dir} is not empty`);
   }
 
+  // Build the content first, so a failure here does not leave an empty folder behind.
+  const text = scenarioTemplate(basename(projectDir) || "Untitled", scenarioSchemaUrl());
   await mkdir(projectDir, { recursive: true });
-  const title = basename(projectDir) || "Untitled";
   // "wx" fails instead of overwriting if another process created the file meanwhile.
-  await writeFile(join(projectDir, SCENARIO_FILE), scenarioTemplate(title, scenarioSchemaUrl()), {
+  await writeFile(join(projectDir, SCENARIO_FILE), text, {
     encoding: "utf8",
     flag: "wx",
   });

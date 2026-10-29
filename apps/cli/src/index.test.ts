@@ -106,12 +106,16 @@ describe("vd init", () => {
     expect((await vd("validate", tmp)).code).toBe(EXIT_OK);
   });
 
-  test("accepts .git and .gitignore", async () => {
+  test("accepts .git, .gitignore, .gitattributes, and .DS_Store", async () => {
     await mkdir(join(tmp, ".git"));
     await writeFile(join(tmp, ".gitignore"), "out/\n");
+    await writeFile(join(tmp, ".gitattributes"), "* text=auto\n");
+    await writeFile(join(tmp, ".DS_Store"), "");
     expect((await vd("init", tmp)).code).toBe(EXIT_OK);
     expect((await readdir(tmp)).sort()).toEqual([
+      ".DS_Store",
       ".git",
+      ".gitattributes",
       ".gitignore",
       "assets",
       "out",
@@ -166,6 +170,7 @@ describe("vd init", () => {
   test("requires exactly one folder", async () => {
     expect((await vd("init")).code).toBe(EXIT_USAGE);
     expect((await vd("init", "a", "b")).code).toBe(EXIT_USAGE);
+    expect((await vd("init", "")).code).toBe(EXIT_USAGE);
   });
 });
 
@@ -290,6 +295,27 @@ describe("bin/vd.js", () => {
     expect(result.status).toBe(EXIT_FAILURE);
     expect(result.stderr.trim().split("\n")).toHaveLength(1);
     expect(result.stderr).toContain("npm run build");
+  });
+
+  test("reports a build that fails to load in one line, without paths", async () => {
+    // A copy of the launcher next to a dist/ whose import fails, like a stale build.
+    const copy = join(tmp, "bin", "vd.js");
+    await mkdir(dirname(copy));
+    await mkdir(join(tmp, "dist"));
+    await cp(bin, copy);
+    await writeFile(join(tmp, "dist", "bin.js"), 'import "@vd-creator/no-such-package";\n');
+    const result = spawnSync(process.execPath, [copy], { encoding: "utf8", env: {} });
+    expect(result.status).toBe(EXIT_FAILURE);
+    expect(result.stderr).toBe(
+      "vd: cannot load the build (ERR_MODULE_NOT_FOUND); run npm run build\n",
+    );
+
+    const debug = spawnSync(process.execPath, [copy], {
+      encoding: "utf8",
+      env: { VD_DEBUG: "1" },
+    });
+    expect(debug.status).toBe(EXIT_FAILURE);
+    expect(debug.stderr).toContain(tmp);
   });
 
   test.skipIf(!built)("passes exit codes through", async () => {

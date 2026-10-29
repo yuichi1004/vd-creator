@@ -32,10 +32,16 @@ const consoleOutput: CliOutput = {
   stderr: (line) => process.stderr.write(`${line}\n`),
 };
 
-/** The Node error code, such as ENOENT or EACCES, of a file system error. */
+/** The Node error code of an error, such as ENOENT or ERR_MODULE_NOT_FOUND. */
 function errorCode(e: unknown): string | undefined {
   const code = (e as { code?: unknown } | null)?.code;
   return typeof code === "string" ? code : undefined;
+}
+
+/** The errno code, such as ENOENT or EACCES, of a file system error. */
+function fsErrorCode(e: unknown): string | undefined {
+  const code = errorCode(e);
+  return code !== undefined && /^E[A-Z]+$/.test(code) ? code : undefined;
 }
 
 /**
@@ -57,8 +63,8 @@ export async function run(
   } catch (e) {
     const code = errorCode(e);
     output.stderr(`vd: unexpected error${code ? ` (${code})` : ""}`);
-    if (env.VD_DEBUG === "1") debug(e);
-    else output.stderr("Set VD_DEBUG=1 for details.");
+    debug(e);
+    if (env.VD_DEBUG !== "1") output.stderr("Set VD_DEBUG=1 for details.");
     return EXIT_FAILURE;
   }
 }
@@ -110,7 +116,7 @@ async function init(
   debug: (e: unknown) => void,
 ): Promise<number> {
   const [dir, ...extra] = args;
-  if (dir === undefined || extra.length > 0) {
+  if (!dir || extra.length > 0) {
     output.stderr("Usage: vd init <dir>");
     return EXIT_USAGE;
   }
@@ -121,7 +127,7 @@ async function init(
       output.stderr(`vd init: ${e.message}`);
       return EXIT_FAILURE;
     }
-    const code = errorCode(e);
+    const code = fsErrorCode(e);
     if (code === undefined) throw e;
     output.stderr(`vd init: cannot create ${dir}: ${code}`);
     debug(e);
@@ -145,7 +151,7 @@ async function validate(
   try {
     result = await validateProject(dir);
   } catch (e) {
-    const code = errorCode(e);
+    const code = fsErrorCode(e);
     if (code === undefined) throw e;
     output.stderr(`vd validate: cannot read ${SCENARIO_FILE} in ${dir}: ${code}`);
     debug(e);
