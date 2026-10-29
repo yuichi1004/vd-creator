@@ -3,7 +3,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { copyFile, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, extname, join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import {
@@ -136,8 +136,9 @@ export function libraryAssetFile(entry: Entry): string {
 export type ProjectCopy = { credit: CreditEntry; durationSec: number };
 
 /**
- * The project's copy of an entry, if credits.json has the entry, its file exists, and its
- * duration is known. This is what plays; the library is not needed.
+ * The project's copy of an entry, if credits.json has the entry, its file exists and matches
+ * the credit's sha256, and its duration is known. This is what plays; the library is not
+ * needed. credits.json records no size, so the hash is the whole check.
  */
 export async function projectCopy(
   projectDir: string,
@@ -148,8 +149,42 @@ export async function projectCopy(
   const credit = findCredit(credits, ref);
   const durationSec = credit && durations[credit.sha256];
   if (!credit || durationSec === undefined) return undefined;
-  if (!(await isFile(join(projectDir, ASSETS_DIR, credit.file)))) return undefined;
+  const path = join(projectDir, ASSETS_DIR, credit.file);
+  if (!(await isFile(path)) || (await sha256(path)) !== credit.sha256) return undefined;
   return { credit, durationSec };
+}
+
+// Temporary copies being written by this process, which a cleanup must leave alone.
+const activeTemps = new Set<string>();
+// A temporary copy at least this old is left over from a run that stopped.
+const ORPHAN_AGE_MS = 60_000;
+const TEMP_COPY = new RegExp(
+  `^[0-9a-f]{${ASSET_KEY_PREFIX_LENGTH}}\\.[^.]+\\.[0-9a-f-]{36}\\.tmp$`,
+);
+
+/**
+ * Removes the temporary copies, `<sha256 prefix>.<ext>.<uuid>.tmp`, that a stopped run left
+ * in assets/library/. A copy still being written, by this process or by a recent one, stays.
+ */
+export async function removeOrphanCopies(projectDir: string): Promise<void> {
+  const folder = join(projectDir, ASSETS_DIR, LIBRARY_ASSET_DIR);
+  let names: string[];
+  try {
+    names = await readdir(folder);
+  } catch {
+    return;
+  }
+  const now = Date.now();
+  for (const name of names) {
+    const path = join(folder, name);
+    if (!TEMP_COPY.test(name) || activeTemps.has(path)) continue;
+    try {
+      const info = await lstat(path);
+      if (info.isFile() && now - info.mtimeMs >= ORPHAN_AGE_MS) await rm(path, { force: true });
+    } catch {
+      // Gone already, or not ours to remove.
+    }
+  }
 }
 
 /**
@@ -171,6 +206,7 @@ export async function copyLibraryEntry(
   if (!(await isFile(target)) || (await sha256(target)) !== entry.sha256) {
     await mkdir(dirname(target), { recursive: true });
     const temp = `${target}.${randomUUID()}.tmp`;
+    activeTemps.add(temp);
     try {
       try {
         await copyFile(join(library.root, item.dir, entry.file), temp);
@@ -183,6 +219,7 @@ export async function copyLibraryEntry(
       await rename(temp, target);
     } finally {
       await rm(temp, { force: true });
+      activeTemps.delete(temp);
     }
   }
   const durationSec = entry.durationSec ?? (await wavDuration(target));
@@ -240,8 +277,10 @@ export function updateProject(
     const credits = await readCredits(projectDir);
     const durations = await readDurations(projectDir);
     change(credits, durations);
+    // Sorted by kind, then ID, so that the file does not depend on the order of copies.
+    credits.entries.sort((a, b) => compareText(a.kind, b.kind) || compareText(a.id, b.id));
     const sorted = Object.fromEntries(
-      Object.entries(durations).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+      Object.entries(durations).sort(([a], [b]) => compareText(a, b)),
     );
     await writeAtomic(
       join(projectDir, ASSETS_DIR, LIBRARY_DURATIONS_FILE),
@@ -255,6 +294,10 @@ export function updateProject(
     if (updates.get(projectDir) === tail) updates.delete(projectDir);
   });
   return run;
+}
+
+function compareText(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 async function writeAtomic(target: string, data: string): Promise<void> {

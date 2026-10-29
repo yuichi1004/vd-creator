@@ -428,7 +428,8 @@ async function generate(args: string[], options: Options, context: Context): Pro
     return EXIT_FAILURE;
   }
   for (const line of formatPlan(plan, providerId)) output.stdout(line);
-  // Only library items can be unresolved, and library messages name no absolute path.
+  // An item is unresolved when the library resolver cannot copy it or no resolver handles it.
+  // Library reasons can quote user-written metadata, so they are made safe to print.
   const unresolved = plan.items.filter((item) => item.status === "unresolved");
   for (const item of unresolved) {
     if (item.status === "unresolved") {

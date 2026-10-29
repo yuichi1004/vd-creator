@@ -144,6 +144,37 @@ describe("library sounds in a project", () => {
     const ok = await vd("validate", dir);
     expect(ok.code).toBe(EXIT_OK);
     expect(ok.stderr).toMatch(/unverified.*\(warning\)$/);
+
+    // Verifying the entry later does not change the copy, so the message points to sync.
+    await editScenario((text) => text.replace("use: private", "use: commercial"));
+    await verifyEntry(lib, "door-01", { kind: "sfx" });
+    const stale = await vd("validate", dir);
+    expect(stale.code).toBe(EXIT_FAILURE);
+    expect(stale.stderr).toContain("run vd library status and vd library sync");
+    expect((await vd("library", "sync", dir)).code).toBe(EXIT_OK);
+    expect(await vd("validate", dir)).toMatchObject({ code: EXIT_OK, stderr: "" });
+  });
+
+  test("a broken credits.json fails validate and generate without a path", async () => {
+    await addDoor({ verify: true });
+    await useDoor("private");
+    for (const [text, message] of [
+      ["{ not json", "licenses: credits.json is not valid JSON"],
+      ['{ "version": 2 }', "licenses: credits.json is invalid at version"],
+    ] as const) {
+      await writeFile(join(dir, CREDITS_FILE), text);
+      const validated = await vd("validate", dir);
+      expect(validated.code).toBe(EXIT_FAILURE);
+      expect(validated.stderr).toContain(message);
+      expect(validated.stdout).toBe("");
+      const generated = await vd("generate", dir);
+      expect(generated.code).toBe(EXIT_FAILURE);
+      expect(generated.stderr).toContain(
+        `vd generate: unresolved sfx "door": ${message.replace("licenses: ", "")}`,
+      );
+      // Nothing was copied, and the broken file is left for the user to fix.
+      expect(await readFile(join(dir, CREDITS_FILE), "utf8")).toBe(text);
+    }
   });
 
   test("without a library, an uncopied entry fails validate and generate clearly", async () => {

@@ -53,11 +53,14 @@ export async function checkLibraryLicenses(
 
   let library: Promise<Library> | undefined;
   const entries: CreditEntry[] = [];
+  // Entries checked from their credit, whose record may be older than the library's.
+  const copied = new Set<string>();
   for (const ref of libraryRefs(scenario)) {
     const target = { type: "entry" as const, ...ref };
     const credit = findCredit(credits, ref);
     if (credit) {
       entries.push(credit);
+      copied.add(refLabel(ref));
       continue;
     }
     if (options.library === undefined) {
@@ -89,14 +92,25 @@ export async function checkLibraryLicenses(
     { version: 1, entries, providers: credits.providers },
     scenario.publish.use,
   )) {
+    const isCopied =
+      issue.target === "entry" &&
+      issue.kind !== undefined &&
+      copied.has(refLabel({ kind: issue.kind, id: issue.id }));
     issues.push({
       target:
         issue.target === "entry" && issue.kind
           ? { type: "entry", kind: issue.kind, id: issue.id }
           : { type: "provider", id: issue.id },
-      message: issue.message,
+      message: isCopied ? `${issue.message}; ${STALE_CREDIT_HINT}` : issue.message,
       severity: issue.severity,
     });
   }
   return issues;
 }
+
+/**
+ * Added to a license issue of a copied entry. The check uses the project's credit, which
+ * stays as it was copied, so a fix made in the library later shows only after a sync.
+ */
+export const STALE_CREDIT_HINT =
+  "the project's copy is checked as recorded in credits.json; if the library entry was fixed since, run vd library status and vd library sync";

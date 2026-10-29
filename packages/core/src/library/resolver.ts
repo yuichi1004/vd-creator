@@ -20,6 +20,7 @@ import {
   readCredits,
   readDurations,
   refLabel,
+  removeOrphanCopies,
 } from "./project.js";
 
 /** Reason of a library item when no library is set. */
@@ -33,7 +34,8 @@ export type LibraryItemResolverOptions = {
 
 /**
  * Resolves library SFX and BGM. An item whose entry the project already has in credits.json,
- * with its copy in assets/library/, is cached and needs no library. Otherwise the entry must
+ * with its copy in assets/library/ matching the credit's sha256, is cached and needs no
+ * library; a copy that does not match is made again. Otherwise the entry must
  * be in the library and pass its checks; resolving copies it into
  * `assets/library/<sha256 prefix>.<ext>` and records it in credits.json. A copy costs nothing.
  * The license check against publish.use is not done here but by `checkLibraryLicenses`, so
@@ -44,6 +46,8 @@ export class LibraryItemResolver implements AssetResolver {
   readonly root: string | undefined;
   // One read per plan or run, so that a long-running server sees library changes.
   #libraries = new WeakMap<ResolveContext, Promise<Library>>();
+  // Orphan temporary copies are removed once per plan or run.
+  #cleanups = new WeakMap<ResolveContext, Promise<void>>();
 
   constructor(options: LibraryItemResolverOptions = {}) {
     this.root = options.root;
@@ -55,6 +59,7 @@ export class LibraryItemResolver implements AssetResolver {
 
   async plan(item: ScenarioItem, ctx: ResolveContext): Promise<PlannedAsset> {
     const ref = this.#ref(item);
+    await this.#cleanup(ctx);
     try {
       const copy = await projectCopy(
         ctx.cache.projectDir,
@@ -83,9 +88,19 @@ export class LibraryItemResolver implements AssetResolver {
 
   async resolve(item: ScenarioItem, ctx: ResolveContext): Promise<ResolvedAsset> {
     const ref = this.#ref(item);
+    await this.#cleanup(ctx);
     const found = await this.#entry(ref, ctx);
     const copy = await copyLibraryEntry(ctx.cache.projectDir, found.library, found.item);
     return { file: copy.credit.file, durationSec: copy.durationSec, generated: true };
+  }
+
+  #cleanup(ctx: ResolveContext): Promise<void> {
+    let cleanup = this.#cleanups.get(ctx);
+    if (!cleanup) {
+      cleanup = removeOrphanCopies(ctx.cache.projectDir);
+      this.#cleanups.set(ctx, cleanup);
+    }
+    return cleanup;
   }
 
   #library(ctx: ResolveContext): Promise<Library> {
