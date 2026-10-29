@@ -203,13 +203,14 @@ The library package task fixes a file format and the license checks, so it is re
   - Constraints: no new dependencies. Depends on the library package task and on the 0003 CLI task. Must not run at the same time as another task that owns `apps/cli/`, such as `vd generate` in 0004.
   - Ownership: `apps/cli/`.
   - Acceptance: `npm test -w apps/cli` passes, with a test that runs `init`, `import` with a license and evidence, `search`, `verify`, and `check` in a temporary folder.
-- [ ] Project integration
+- [x] Project integration
   - Target: `packages/core/`, `apps/cli/`
   - Change: a library `AssetResolver` (the hook from 0004) that copies entries into `assets/library/` and writes `credits.json`, so the plan and the timeline use library durations; `vd validate` runs the project license check; `vd library promote`, `status`, and `sync`.
   - Constraints: no new dependencies. Do not change the pipeline itself; only add a resolver. Depends on the 0004 core and CLI tasks. `--library` is already accepted by `validate`, `generate`, and `clean` but ignored; this task makes it choose the library root for them.
   - Ownership: `packages/core/src/library/` (new), the line in `packages/core/src/index.ts` that registers default resolvers, the `dependencies` field of `packages/core/package.json`, the root `package-lock.json`, and `apps/cli/`.
   - Notes from implementation: `defaultResolvers` stays unchanged. The CLI puts the library resolver first when a library root is set, and `vd serve` passes it through the server's `resolvers` option. The duration of each project copy is kept in `assets/library/durations.json`, keyed by SHA-256, because a credits entry has no duration; a missing or broken entry means the copy is made again from the library.
   - Acceptance: `npm test -w packages/core && npm test -w apps/cli` pass, with tests that render-check a project using one verified CC-BY entry (ok, attribution in credits) and one unverified entry under `use: commercial` (error).
+  - Review notes: two fix rounds. A library entry not yet copied, with no library set, is treated like an unverified one in the license check. `promote` does not edit the scenario, and `sync` keeps old copies. Copies are checked by SHA-256, with the hash kept per process until the file changes. Follow-ups: provider records (the next task); the UI's license issues lack the CLI's hint to run `vd library status` and `sync`; copies are not fsynced.
 - [ ] Provider records in `credits.json`
   - Target: `packages/core/`
   - Change: after generation, `credits.json` records the provider of every generated asset in the project, as this plan's "Projects stay self-contained" section says, so that the provider rows of the project license check apply and `vd render` can list providers in `out/credits.txt`. The project integration task wrote only library entries. Until this is done, a project generated with a paid provider passes `vd validate` under `use: commercial` without the conditional-terms error.
