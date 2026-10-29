@@ -150,12 +150,13 @@ The server task's first review uses `gpt-6-astra`, because the task handles file
   - Constraints: no dependency changes, and no UI or CSS library; ask the coordinator if one is missing. Talks to the server only through the API types. Can run in parallel with the server task.
   - Ownership: `apps/web/src/`.
   - Acceptance: `npm run build -w apps/web && npm test -w apps/web` passes, with unit tests for playback scheduling, for the confirm step on paid providers, for the audio unlock state (no `AudioContext` start before a play gesture), for API URLs staying relative under a path prefix, and for the polling fallback when events fail.
-- [ ] `vd serve`
+- [x] `vd serve`
   - Target: `apps/cli/`
   - Change: `vd serve [dir] [--port 5310] [--provider mock|elevenlabs] [--host <addr>] [--allow-host <name>]... [--library <path>]` starts the server with the built UI and prints the URL. With `--host`, it prints the LAN URLs with the token and the network warning.
   - Constraints: no new dependencies. Depends on the server and web tasks. Must not run at the same time as another task that owns `apps/cli/`.
   - Ownership: `apps/cli/`.
   - Acceptance: `npm test -w apps/cli` passes, with a test that starts `serve` on a free port against an `init` project and gets `/api/project`, and a test that `--host` output contains a URL with a token. Before the plan is closed, the coordinator checks the UI in a browser at 1280 px and 375 px widths, and the human runs the phone checklist below on a real phone.
+  - Review notes: `--library` is passed to the server, but library items are not resolved until the 0007 project integration task adds a resolver. Low-severity follow-ups: `--allow-host` accepts values with a port, which can never match, and is ignored with `--host` without a warning; a watcher error at startup is reported as "cannot listen on"; the network warning also prints for `--host 127.0.0.1`; an IPv6 zone in `--host` is not encoded in the printed URL; the built UI is found only from a repository checkout; no test sends SIGTERM or starts `--host 0.0.0.0` end to end.
 
 - [ ] Phone access guide
   - Target: `docs/phone-access.md` (new), `README.md`
