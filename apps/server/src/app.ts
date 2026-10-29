@@ -6,10 +6,12 @@ import {
   ASSETS_DIR,
   AssetCache,
   type AssetResolver,
+  BudgetExceededError,
   computeTimeline,
   defaultResolvers,
   type GeneratedItemResolver,
   planGeneration,
+  type RunGenerationOptions,
   runGeneration,
   scenarioItems,
 } from "@vd-creator/core";
@@ -329,18 +331,25 @@ export function createApp(options: AppOptions): Hono {
       return body.dryRun === true ? c.json(plan) : refused(plan);
     }
     // Loaded in the queue, so that a run waiting behind an edit generates the edited text. A
-    // paid run is planned again there, and runs only within the cost the user approved.
+    // paid run is planned again there, and runs only within the cost the user approved. The
+    // approved cost is also the run's budget: the plan counts cached items as free and dedupes
+    // identical requests, but an asset removed after the check, or a request called again
+    // after a failed call, is billed again, so each paid call must fit in what is left.
     type Outcome =
       | { refused: GeneratePlanResponse }
       | { result: Awaited<ReturnType<typeof runGeneration>> };
     const outcome = await exclusive(async (): Promise<Outcome> => {
       const scenario = await scenarioFor();
       const cache = await AssetCache.load(projectDir);
+      const run: RunGenerationOptions = { ...only };
       if (providerInfo.paid) {
         const plan = await planFor(scenario, cache);
-        if (!withinApproved(plan.plan.cost, body.approved)) return { refused: plan };
+        if (!body.approved || !withinApproved(plan.plan.cost, body.approved)) {
+          return { refused: plan };
+        }
+        run.budget = body.approved;
       }
-      return { result: await runGeneration(scenario, cache, resolvers, only) };
+      return { result: await runGeneration(scenario, cache, resolvers, run) };
     });
     if ("refused" in outcome) return refused(outcome.refused);
     const { result } = outcome;
@@ -349,9 +358,14 @@ export function createApp(options: AppOptions): Hono {
       provider: providerInfo,
       items: result.items.map((item): GenerateItemResult => {
         if (item.status !== "failed") return item;
-        // GenerationError's message names only the item's kind and ID.
+        // GenerationError's message names only the item's kind and ID. A budget refusal adds
+        // its own fixed text, so the UI can tell it from a provider failure.
         const { error, ...rest } = item;
-        return { ...rest, message: error.message };
+        const message =
+          error.cause instanceof BudgetExceededError
+            ? `${error.message}: ${error.cause.message}`
+            : error.message;
+        return { ...rest, message };
       }),
       failed: result.failed,
     };

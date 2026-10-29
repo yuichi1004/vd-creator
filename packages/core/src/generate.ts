@@ -7,7 +7,12 @@ import type { AssetCache } from "./cache.js";
 import { isCanonicalJsonError } from "./canonical.js";
 import { itemLabel, type ScenarioItem, type ScenarioItemKind, scenarioItems } from "./items.js";
 import { playedProviders, recordProvider } from "./library/project.js";
-import type { AssetResolver, PlannedAsset, ResolveContext } from "./resolver.js";
+import {
+  type AssetResolver,
+  GenerationBudget,
+  type PlannedAsset,
+  type ResolveContext,
+} from "./resolver.js";
 
 /** At most this many requests run at once. */
 export const GENERATION_CONCURRENCY = 4;
@@ -126,6 +131,13 @@ export type RunGenerationOptions = GenerationOptions & {
   concurrency?: number;
   /** Called as each item finishes, in completion order. */
   onItem?: (result: ItemResult) => void;
+  /**
+   * The most the run may send to paid providers, by their estimates. Every paid call reserves
+   * its cost before it is sent, retries included (see `GenerationBudget`). An item whose call
+   * would exceed what is left fails with a `BudgetExceededError` as the cause, and no call is
+   * made. Calls to free providers are not counted. Without it, there is no limit.
+   */
+  budget?: Cost;
 };
 
 /**
@@ -135,7 +147,9 @@ export type RunGenerationOptions = GenerationOptions & {
  * credits.json as soon as the item is done, and at the end so is the provider of every
  * asset the scenario plays, with its license from the first resolver that has a license
  * registry (see `recordProvider`). A failed item does not stop the others: it is reported in
- * its result with a `GenerationError`. Throws only for invalid options.
+ * its result with a `GenerationError`. With a `budget`, paid calls stop at it: the run plans
+ * each item again as it goes, so the budget, not an earlier plan, is what limits the spending.
+ * Throws only for invalid options.
  */
 export async function runGeneration(
   scenario: Scenario,
@@ -144,6 +158,7 @@ export async function runGeneration(
   options: RunGenerationOptions = {},
 ): Promise<GenerationResult> {
   const ctx: ResolveContext = { scenario, cache, purpose: "generate" };
+  if (options.budget) ctx.budget = new GenerationBudget(options.budget);
   const targets = selectItems(scenario, options);
   const requested = Math.floor(options.concurrency ?? GENERATION_CONCURRENCY);
   const concurrency = Number.isNaN(requested)

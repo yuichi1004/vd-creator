@@ -14,7 +14,7 @@ import { type Scenario, ScenarioDocument, updateItem } from "@vd-creator/scenari
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AssetCache, CACHE_FILE } from "./cache.js";
 import { GenerationError, type ItemResult, planGeneration, runGeneration } from "./generate.js";
-import { defaultResolvers } from "./resolver.js";
+import { BudgetExceededError, defaultResolvers } from "./resolver.js";
 
 const SAMPLE = fileURLToPath(new URL("../../scenario/fixtures/sample.yaml", import.meta.url));
 
@@ -50,8 +50,9 @@ type Call = { kind: "tts" | "sfx" | "music"; request: TtsRequest | SfxRequest | 
  * and `maxActive` track how many calls run at once.
  */
 function recordingProviders(
-  options: { delayMs?: number; fail?: (call: Call) => Error | undefined } = {},
+  options: { delayMs?: number; fail?: (call: Call) => Error | undefined; paid?: boolean } = {},
 ) {
+  const paid = options.paid ?? false;
   const mock = createMockProviders();
   const state = { calls: [] as Call[], active: 0, maxActive: 0 };
   const wrap = async <T>(call: Call, run: () => Promise<T>): Promise<T> => {
@@ -70,19 +71,19 @@ function recordingProviders(
   const providers: ProviderSet = {
     tts: {
       id: mock.tts.id,
-      paid: false,
+      paid,
       estimate: (req) => mock.tts.estimate(req),
       synthesize: (req) => wrap({ kind: "tts", request: req }, () => mock.tts.synthesize(req)),
     },
     sfx: {
       id: mock.sfx.id,
-      paid: false,
+      paid,
       estimate: (req) => mock.sfx.estimate(req),
       generate: (req) => wrap({ kind: "sfx", request: req }, () => mock.sfx.generate(req)),
     },
     music: {
       id: mock.music.id,
-      paid: false,
+      paid,
       estimate: (req) => mock.music.estimate(req),
       generate: (req) => wrap({ kind: "music", request: req }, () => mock.music.generate(req)),
     },
@@ -345,5 +346,136 @@ describe("runGeneration", () => {
     const a = result["s2-l1"];
     const b = result["s2-l2"];
     expect(a && "file" in a ? a.file : "a").toBe(b && "file" in b ? b.file : "b");
+  });
+});
+
+describe("runGeneration with a budget", () => {
+  const SAME = ["x0", "x1", "x2", "x3", "x4"];
+
+  /** The sample with five identical 5-character lines, x0 to x4. */
+  async function fiveSameLines(): Promise<Scenario> {
+    const doc = await sampleDoc();
+    const lines = SAME.map(
+      (id) => `      - line: "Hello"\n        id: ${id}\n        speaker: keeper\n`,
+    ).join("");
+    doc.setText(doc.text.replace("      - pause: 0.8\n", `${lines}      - pause: 0.8\n`));
+    return scenarioOf(doc);
+  }
+
+  /** Paid providers whose first call fails. */
+  function failFirst(delayMs?: number) {
+    let first = true;
+    return recordingProviders({
+      paid: true,
+      ...(delayMs ? { delayMs } : {}),
+      fail: () => {
+        if (!first) return undefined;
+        first = false;
+        return new Error("first call fails");
+      },
+    });
+  }
+
+  function causeOf(result: ItemResult | undefined): unknown {
+    return result?.status === "failed" ? result.error.cause : undefined;
+  }
+
+  test("a request called again after a failed call cannot exceed the budget", async () => {
+    const scenario = await fiveSameLines();
+    for (const concurrency of [1, 4]) {
+      const { providers, state } = failFirst(5);
+      const resolvers = defaultResolvers(providers);
+      const cache = new AssetCache(await mkdtemp(join(dir, "run-")));
+      const plan = await planGeneration(scenario, cache, resolvers, { only: SAME });
+      expect(plan.cost).toEqual({ characters: 5, requests: 1 });
+      const result = await runGeneration(scenario, cache, resolvers, {
+        only: SAME,
+        concurrency,
+        budget: plan.cost,
+      });
+      expect(state.calls, `concurrency ${concurrency}`).toHaveLength(1);
+      expect(result.failed).toBe(SAME.length);
+      const refused = result.items.filter((r) => causeOf(r) instanceof BudgetExceededError);
+      expect(refused.length).toBeGreaterThan(0);
+    }
+  });
+
+  test("without a budget, a failed request is called again as before", async () => {
+    const scenario = await fiveSameLines();
+    const { providers, state } = failFirst();
+    const result = await runGeneration(scenario, new AssetCache(dir), defaultResolvers(providers), {
+      only: SAME,
+      concurrency: 1,
+    });
+    expect(state.calls).toHaveLength(2);
+    expect(statuses(result.items)).toEqual({
+      x0: "failed",
+      x1: "generated",
+      x2: "cached",
+      x3: "cached",
+      x4: "cached",
+    });
+  });
+
+  test("a cached asset removed after planning is not generated beyond the budget", async () => {
+    const scenario = scenarioOf(await sampleDoc());
+    const { providers, state } = recordingProviders({ paid: true });
+    const resolvers = defaultResolvers(providers);
+    const cache = await AssetCache.load(dir);
+    await runGeneration(scenario, cache, resolvers);
+    const plan = await planGeneration(scenario, cache, resolvers);
+    expect(plan.cost).toEqual({ characters: 0, requests: 0 });
+
+    const waves = byId((await runGeneration(scenario, cache, resolvers)).items)["s1-waves"];
+    await rm(join(dir, "assets", waves && "file" in waves ? waves.file : ""));
+    state.calls.length = 0;
+    const result = byId(
+      (await runGeneration(scenario, cache, resolvers, { budget: plan.cost })).items,
+    );
+    expect(state.calls).toEqual([]);
+    const refused = result["s1-waves"];
+    expect(refused?.status).toBe("failed");
+    expect(causeOf(refused)).toBeInstanceOf(BudgetExceededError);
+    if (refused?.status === "failed") {
+      expect(refused.error.message).toBe('Failed to generate sfx "s1-waves"');
+    }
+    for (const id of GENERATED.filter((i) => i !== "s1-waves")) {
+      expect(result[id]?.status).toBe("cached");
+    }
+  });
+
+  test("a run within its budget generates everything", async () => {
+    const scenario = scenarioOf(await sampleDoc());
+    const { providers, state } = recordingProviders({ paid: true, delayMs: 5 });
+    const resolvers = defaultResolvers(providers);
+    const plan = await planGeneration(scenario, new AssetCache(dir), resolvers);
+    const result = await runGeneration(scenario, new AssetCache(dir), resolvers, {
+      budget: plan.cost,
+    });
+    expect(result.failed).toBe(0);
+    expect(state.calls).toHaveLength(GENERATED.length);
+  });
+
+  test("free providers are not counted against the budget", async () => {
+    const scenario = scenarioOf(await sampleDoc());
+    const { providers, state } = recordingProviders();
+    const result = await runGeneration(scenario, new AssetCache(dir), defaultResolvers(providers), {
+      budget: { characters: 0, requests: 0 },
+    });
+    expect(result.failed).toBe(0);
+    expect(state.calls).toHaveLength(GENERATED.length);
+  });
+
+  test("an invalid budget is refused", async () => {
+    const scenario = scenarioOf(await sampleDoc());
+    const resolvers = defaultResolvers(recordingProviders({ paid: true }).providers);
+    for (const budget of [
+      { characters: -1, requests: 1 },
+      { characters: 1, requests: Number.NaN },
+    ]) {
+      await expect(
+        runGeneration(scenario, new AssetCache(dir), resolvers, { budget }),
+      ).rejects.toThrow(/budget/);
+    }
   });
 });

@@ -20,7 +20,48 @@ export type ResolveContext = {
    * such as a library resolver, can ignore it.
    */
   purpose?: "generate" | "playback";
+  /**
+   * What the run may still spend on paid providers, if it has a limit. A resolver must
+   * `reserve` the cost of each call to a paid provider just before it sends the call, and send
+   * nothing if that throws. Calls to free providers reserve nothing.
+   */
+  budget?: GenerationBudget;
 };
+
+/** Thrown by `GenerationBudget.reserve` when a call would go over the budget. */
+export class BudgetExceededError extends Error {
+  constructor() {
+    super("The call would exceed the approved cost, so it was not sent");
+    this.name = "BudgetExceededError";
+  }
+}
+
+/**
+ * The characters and requests a generation run may still spend on paid providers. Every call
+ * reserves its estimated cost before it is sent, including a second call for a request whose
+ * first call failed, so that the run never sends more than the budget allows. Reserving is
+ * synchronous, so calls that run at once cannot both take the last of the budget.
+ */
+export class GenerationBudget {
+  #left: Cost;
+
+  constructor(budget: Cost) {
+    const count = (n: number) => Number.isFinite(n) && n >= 0;
+    if (!count(budget.characters) || !count(budget.requests)) {
+      throw new Error("A generation budget must be two numbers, 0 or more");
+    }
+    this.#left = { characters: budget.characters, requests: budget.requests };
+  }
+
+  /** Takes `cost` from the budget, or throws a `BudgetExceededError` and takes nothing. */
+  reserve(cost: Cost): void {
+    if (cost.characters > this.#left.characters || cost.requests > this.#left.requests) {
+      throw new BudgetExceededError();
+    }
+    this.#left.characters -= cost.characters;
+    this.#left.requests -= cost.requests;
+  }
+}
 
 export type PlannedAsset =
   | { status: "cached"; key?: string; file: string; durationSec: number }
@@ -57,7 +98,9 @@ export interface AssetResolver {
 
 /**
  * Resolves lines, prompt SFX, and prompt BGM by generating them with one provider set, and
- * caches them by content. Identical requests that run at the same time share one call.
+ * caches them by content. Identical requests that run at the same time share one call. A
+ * request whose call failed is called again by the next item that asks for it, and with a
+ * budget in the context that call reserves its cost again.
  */
 export class GeneratedItemResolver implements AssetResolver {
   readonly id = "generated";
@@ -120,6 +163,9 @@ export class GeneratedItemResolver implements AssetResolver {
     if (existing) {
       return { key, file: existing.file, durationSec: existing.durationSec, generated: false };
     }
+    // Reserved after the cache check and right before the call, so that a call is never sent
+    // without its cost taken from the budget.
+    if (this.#provider(gen).paid) ctx.budget?.reserve(this.#estimate(gen));
     const audio = await this.#call(gen);
     const file = assetFileFor(gen.kind, key, audio.format);
     await ctx.cache.writeAsset(file, audio.data);

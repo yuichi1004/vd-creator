@@ -91,7 +91,10 @@ export type ScenarioErrorResponse = ScenarioErrorBody;
  *    when the run's turn comes, after any edit sent before it, and runs only if that plan
  *    needs no more characters and no more requests than `approved`. Otherwise, or with
  *    `confirm` absent or false, or `approved` absent or not valid, it generates nothing and
- *    returns 409 with a `ConfirmRequiredError`, which holds the new plan.
+ *    returns 409 with a `ConfirmRequiredError`, which holds the new plan. During the run,
+ *    `approved` is also the budget: every paid provider call, including a second call after
+ *    a failed one, takes its cost from it before it is sent, and an item whose call would go
+ *    past it fails without a call.
  */
 export type GenerateRequest = {
   /**
@@ -140,7 +143,10 @@ export type GenerateItemResult = {
 } & (
   | { status: "cached" | "generated"; file: string; durationSec: number }
   | { status: "unresolved"; reason: string }
-  /** `message` names only the item's kind and ID, never its text or prompt. */
+  /**
+   * `message` names only the item's kind and ID, never its text or prompt. For an item
+   * refused because its call would go past the approved cost, it adds fixed text that says so.
+   */
   | { status: "failed"; message: string }
 );
 

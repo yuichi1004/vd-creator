@@ -1,8 +1,9 @@
+import { rmSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ASSETS_DIR } from "@vd-creator/core";
+import { ASSETS_DIR, type AssetResolver } from "@vd-creator/core";
 import { importEntry, initLibrary } from "@vd-creator/library";
 import { SCENARIO_FILE } from "@vd-creator/scenario";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -44,13 +45,15 @@ afterEach(async () => {
 
 /**
  * Fake providers that count their calls and record the TTS texts, optionally waiting before
- * each call. A line's estimate is one character per character of its text. Never a real API.
+ * each call, and optionally failing the first call. A line's estimate is one character per
+ * character of its text. Never a real API.
  */
-function fakeProviders(paid = false, options: { delayMs?: number } = {}) {
+function fakeProviders(paid = false, options: { delayMs?: number; failFirst?: boolean } = {}) {
   const calls = { count: 0, texts: [] as string[] };
   const audio = async () => {
     calls.count++;
     if (options.delayMs) await new Promise((r) => setTimeout(r, options.delayMs));
+    if (options.failFirst && calls.count === 1) throw new Error("the first call fails");
     return { data: new Uint8Array([1, 2, 3]), format: "wav" as const, durationSec: 1, meta: {} };
   };
   const cost = () => ({ characters: 1, requests: 1 });
@@ -540,6 +543,80 @@ describe("POST /api/generate", () => {
     const error = (await response.json()) as ConfirmRequiredError;
     expect(error.plan.plan.cost.characters).toBe("Edited while busy".length);
     expect(calls.texts).toEqual(["Is anyone up there?"]);
+  });
+
+  test("a paid confirm never calls again past the approved cost after a failed call", async () => {
+    const same = ["x0", "x1", "x2", "x3", "x4"];
+    const lines = same
+      .map((id) => `      - line: "Hello"\n        id: ${id}\n        speaker: keeper\n`)
+      .join("");
+    const text = await scenarioText();
+    await writeFile(
+      join(project, SCENARIO_FILE),
+      text.replace("      - pause: 0.8\n", `${lines}      - pause: 0.8\n`),
+    );
+    const { providers, calls } = fakeProviders(true, { delayMs: 5, failFirst: true });
+    const app = makeApp({ provider: providers });
+    const approved = await planCost(app, same);
+    expect(approved).toEqual({ characters: 5, requests: 1 });
+    const response = await send(app, "POST", "/api/generate", {
+      ids: same,
+      confirm: true,
+      approved,
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as GenerateRunResponse;
+    expect(body.failed).toBe(same.length);
+    expect(calls.count).toBe(1);
+  });
+
+  test("a cached asset removed after the approval check is not generated past it", async () => {
+    const { providers, calls } = fakeProviders(true);
+    // Once armed, the item s1-l1 is looked at by the dry run, then by the server's check of the
+    // approved cost, then by the run. Its asset is removed at the third look.
+    const armed = { file: "", looks: 0 };
+    const remover: AssetResolver = {
+      id: "remover",
+      handles: (item) => {
+        if (armed.file && item.id === "s1-l1" && ++armed.looks === 3) rmSync(armed.file);
+        return false;
+      },
+      plan: () => Promise.reject(new Error("never")),
+      resolve: () => Promise.reject(new Error("never")),
+    };
+    const app = makeApp({ provider: providers, resolvers: [remover] });
+    const first = await send(app, "POST", "/api/generate", {
+      ids: ["s1-l1"],
+      confirm: true,
+      approved: await planCost(app, ["s1-l1"]),
+    });
+    expect(first.status).toBe(200);
+    const generated = (await first.json()) as GenerateRunResponse;
+    const item = generated.items[0];
+    armed.file = join(project, ASSETS_DIR, item && "file" in item ? item.file : "");
+    calls.texts.length = 0;
+
+    // Only s1-l2 costs anything in the approved plan; s1-l1 is cached and free.
+    const approved = await planCost(app, ["s1-l1", "s1-l2"]);
+    expect(approved.requests).toBe(1);
+    const response = await send(app, "POST", "/api/generate", {
+      ids: ["s1-l1", "s1-l2"],
+      confirm: true,
+      approved,
+    });
+    expect(armed.looks).toBe(3);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as GenerateRunResponse;
+    expect(calls.texts).not.toContain("Is anyone up there?");
+    expect(calls.texts).toHaveLength(1);
+    expect(body.failed).toBe(1);
+    expect(body.items.find((i) => i.id === "s1-l1")).toMatchObject({
+      status: "failed",
+      message: expect.stringMatching(
+        /^Failed to generate line "s1-l1": .*exceed the approved cost/,
+      ),
+    });
+    expect(body.items.find((i) => i.id === "s1-l2")?.status).toBe("generated");
   });
 
   test("a free provider generates and ignores confirm and approved", async () => {
