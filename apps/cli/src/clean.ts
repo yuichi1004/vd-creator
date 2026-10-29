@@ -1,7 +1,8 @@
 // vd clean: remove generated assets that the scenario no longer uses.
 // See "Cache and assets" in docs/plans/0004-providers-and-generation.md.
 
-import { lstat, readdir, realpath, unlink } from "node:fs/promises";
+import type { BigIntStats } from "node:fs";
+import { lstat, readdir, realpath, stat, unlink } from "node:fs/promises";
 import { join, sep } from "node:path";
 import {
   ASSET_DIRS,
@@ -34,6 +35,10 @@ export type CleanResult = {
  * removed: symbolic links and subfolders are left alone. Throws a `CleanRefusedError`, before
  * removing anything, if assets/ or one of those folders is a symbolic link or not a folder.
  * With `dryRun`, nothing changes and the result lists what would be removed.
+ *
+ * The folders are checked and every file to remove is listed before anything is removed, so a
+ * refusal never follows a removal. Before each removal, the folders and the file must still be
+ * the ones that were listed; otherwise it stops and throws a `CleanInterruptedError`.
  */
 export async function cleanProject(
   scenario: Scenario,
@@ -59,42 +64,79 @@ export async function cleanProject(
     else keys.push(key);
   }
 
-  // Every folder is checked before anything is removed, so a refusal removes nothing.
-  const folders = await assetFolders(cache);
-  const files: string[] = [];
-  for (const dir of folders) {
-    for (const name of await listRegularFiles(cache.assetPath(dir))) {
+  // Phase 1: check the folders and list every file to remove. Every refusal happens here.
+  const folders = await snapshotFolders(cache);
+  const targets: Target[] = [];
+  for (const [dir, identity] of folders.kinds) {
+    const folder = cache.assetPath(dir);
+    const names = await readdir(folder);
+    // If the folder was swapped before readdir, refuse before looking at any entry.
+    await checkFolders(cache, folders);
+    for (const name of names) {
       const file = `${dir}/${name}`;
-      if (!keptFiles.has(file)) files.push(file);
+      if (keptFiles.has(file)) continue;
+      const stats = await lstatOrUndefined(join(folder, name));
+      if (stats?.isFile()) targets.push({ file, dir, folder: identity, identity: idOf(stats) });
     }
   }
-  files.sort();
+  // Also covers a dry run: the listing is only reported if no folder changed during it.
+  await checkFolders(cache, folders);
+  targets.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
+  const files = targets.map((target) => target.file);
+  if (options.dryRun) return { files, keys };
 
-  if (!options.dryRun) {
-    const project = await realpath(cache.projectDir);
-    for (const file of files) {
-      const path = cache.assetPath(file);
-      // Defense in depth: the file must still be a regular file inside the project.
-      const stats = await lstatOrUndefined(path);
-      if (!stats?.isFile()) continue;
-      if (!(await realpath(path)).startsWith(project + sep)) {
-        throw new CleanRefusedError(`assets/${file} is outside the project folder`);
-      }
-      await unlink(path);
+  // Phase 2: remove the listed files, checking each one and its folders right before.
+  // Residual risk: Node has no unlinkat, so a folder swapped for a symbolic link in the instant
+  // between the last check and unlink can still redirect it. That needs write access to the
+  // project folder, and these checks keep the window to a few system calls.
+  const project = await realpath(cache.projectDir);
+  let removed = 0;
+  for (const target of targets) {
+    const path = cache.assetPath(target.file);
+    if (!(await realpath(path).catch(() => path)).startsWith(project + sep)) {
+      throw new CleanInterruptedError(removed);
     }
-    if (keys.length > 0) {
-      const { entries } = cache.toJSON();
-      for (const key of keys) delete entries[key];
-      // AssetCache has no delete, so a cache without those entries replaces cache.json.
-      await new AssetCache(cache.projectDir, { version: CACHE_VERSION, entries }).save();
+    // A target exists only if assets/ did, so folders.assets is set here.
+    const unchanged =
+      folders.assets !== undefined &&
+      (await isSame(join(cache.projectDir, ASSETS_DIR), folders.assets)) &&
+      (await isSame(cache.assetPath(target.dir), target.folder));
+    if (!unchanged) throw new CleanInterruptedError(removed);
+    const stats = await lstatOrUndefined(path);
+    // A file that is already gone is not a threat, so it is skipped.
+    if (!stats) continue;
+    if (!stats.isFile() || !sameId(stats, target.identity)) {
+      throw new CleanInterruptedError(removed);
     }
+    await unlink(path);
+    removed++;
+  }
+  if (keys.length > 0) {
+    const { entries } = cache.toJSON();
+    for (const key of keys) delete entries[key];
+    // AssetCache has no delete, so a cache without those entries replaces cache.json.
+    await new AssetCache(cache.projectDir, { version: CACHE_VERSION, entries }).save();
   }
   return { files, keys };
 }
 
+/** A device and inode number pair, which identifies a file or folder while it exists. */
+type Identity = { dev: bigint; ino: bigint };
+
+/** A file to remove, with the identities it and its folder had when it was listed. */
+type Target = { file: string; dir: string; folder: Identity; identity: Identity };
+
+/** The checked folders. `assets` is undefined if the project has no assets/ folder. */
+type FolderSnapshot = {
+  project: Identity;
+  assets: Identity | undefined;
+  kinds: Map<string, Identity>;
+};
+
 /**
  * Thrown when clean refuses to touch the assets, such as when assets/ or one of its generated
- * folders is a symbolic link. The message is fixed text with a path relative to the project.
+ * folders is a symbolic link. Nothing has been removed. The message is fixed text with a path
+ * relative to the project.
  */
 export class CleanRefusedError extends Error {
   constructor(message: string) {
@@ -104,26 +146,72 @@ export class CleanRefusedError extends Error {
 }
 
 /**
- * The generated folders that exist. Throws a `CleanRefusedError` if assets/ or one of them is
- * a symbolic link or not a folder, because removing files through it could reach outside the
- * project.
+ * Thrown when a folder or file changed between the listing and its removal. Clean stops at
+ * once, and `removed` files were already removed. The message is fixed text.
  */
-async function assetFolders(cache: AssetCache): Promise<string[]> {
+export class CleanInterruptedError extends Error {
+  constructor(readonly removed: number) {
+    super(
+      `a folder or file under ${ASSETS_DIR} changed while cleaning; stopped after removing ${removed} ${removed === 1 ? "file" : "files"}`,
+    );
+    this.name = "CleanInterruptedError";
+  }
+}
+
+/**
+ * The identities of the project folder, assets/, and each generated folder that exists.
+ * Throws a `CleanRefusedError` if assets/ or one of those folders is a symbolic link or not a
+ * folder, because removing files through it could reach outside the project. A project with no
+ * assets/ folder has no generated folders.
+ */
+async function snapshotFolders(cache: AssetCache): Promise<FolderSnapshot> {
+  // The project folder itself may be reached through a link the user chose, so stat follows it.
+  const project = idOf(await stat(cache.projectDir, { bigint: true }));
+  const kinds = new Map<string, Identity>();
   const assets = await lstatOrUndefined(join(cache.projectDir, ASSETS_DIR));
-  if (!assets) return [];
+  if (!assets) return { project, assets: undefined, kinds };
   if (!assets.isDirectory()) {
     throw new CleanRefusedError(`${ASSETS_DIR} is a symbolic link or not a folder`);
   }
-  const folders: string[] = [];
   for (const dir of GENERATED_ASSET_DIRS) {
     const stats = await lstatOrUndefined(cache.assetPath(dir));
     if (!stats) continue;
     if (!stats.isDirectory()) {
       throw new CleanRefusedError(`${ASSETS_DIR}/${dir} is a symbolic link or not a folder`);
     }
-    folders.push(dir);
+    kinds.set(dir, idOf(stats));
   }
-  return folders;
+  return { project, assets: idOf(assets), kinds };
+}
+
+/** Throws a `CleanRefusedError` if a folder of the snapshot is no longer the same folder. */
+async function checkFolders(cache: AssetCache, folders: FolderSnapshot): Promise<void> {
+  const project = await stat(cache.projectDir, { bigint: true });
+  const same =
+    sameId(project, folders.project) &&
+    (folders.assets === undefined ||
+      (await isSame(join(cache.projectDir, ASSETS_DIR), folders.assets)));
+  if (!same) throw new CleanRefusedError(`${ASSETS_DIR} changed while it was being listed`);
+  for (const [dir, identity] of folders.kinds) {
+    if (!(await isSame(cache.assetPath(dir), identity))) {
+      throw new CleanRefusedError(`${ASSETS_DIR}/${dir} changed while it was being listed`);
+    }
+  }
+}
+
+/** True if `path` is still the folder with that identity, and not a link to one. */
+async function isSame(path: string, identity: Identity): Promise<boolean> {
+  const stats = await lstatOrUndefined(path);
+  if (!stats) return false;
+  return stats.isDirectory() && sameId(stats, identity);
+}
+
+function idOf(stats: BigIntStats): Identity {
+  return { dev: stats.dev, ino: stats.ino };
+}
+
+function sameId(stats: BigIntStats, identity: Identity): boolean {
+  return stats.dev === identity.dev && stats.ino === identity.ino;
 }
 
 function requestId(kind: AssetKind, canonicalRequest: string): string {
@@ -139,19 +227,10 @@ function canonicalOrUndefined(value: unknown): string | undefined {
   }
 }
 
-/** The names of the regular files directly in `dir`. Symbolic links and subfolders are skipped. */
-async function listRegularFiles(dir: string): Promise<string[]> {
-  const names: string[] = [];
-  for (const name of await readdir(dir)) {
-    if ((await lstatOrUndefined(join(dir, name)))?.isFile()) names.push(name);
-  }
-  return names;
-}
-
 /** The lstat of a path, or undefined if it does not exist. */
-async function lstatOrUndefined(path: string) {
+async function lstatOrUndefined(path: string): Promise<BigIntStats | undefined> {
   try {
-    return await lstat(path);
+    return await lstat(path, { bigint: true });
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw e;

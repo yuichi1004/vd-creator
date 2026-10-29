@@ -1,6 +1,7 @@
 // The vd command: init, validate, generate, render, serve.
 
 export {
+  CleanInterruptedError,
   CleanRefusedError,
   type CleanResult,
   cleanProject,

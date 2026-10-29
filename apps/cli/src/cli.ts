@@ -13,7 +13,7 @@ import {
 } from "@vd-creator/core";
 import { providerIds } from "@vd-creator/providers";
 import { SCENARIO_FILE, type Scenario } from "@vd-creator/scenario";
-import { CleanRefusedError, cleanProject } from "./clean.js";
+import { CleanInterruptedError, CleanRefusedError, cleanProject } from "./clean.js";
 import {
   DEFAULT_PROVIDER,
   failureReason,
@@ -340,6 +340,10 @@ async function clean(
   try {
     result = await cleanProject(project.scenario, project.cache, { dryRun });
   } catch (e) {
+    if (e instanceof CleanInterruptedError) {
+      output.stderr(`vd clean: stopped cleaning ${dir}: ${e.message}`);
+      return EXIT_FAILURE;
+    }
     if (e instanceof CleanRefusedError) {
       output.stderr(`vd clean: refusing to clean ${dir}: ${e.message}`);
       return EXIT_FAILURE;

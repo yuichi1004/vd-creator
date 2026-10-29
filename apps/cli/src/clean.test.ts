@@ -1,0 +1,159 @@
+// vd clean when assets/voice is swapped for a symbolic link while clean runs. node:fs/promises
+// is wrapped so a test can swap the folder at a chosen step, and see every path clean touches.
+
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  renameSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { EXIT_FAILURE, EXIT_OK, run } from "./index.js";
+
+const fsHook = vi.hoisted(() => ({
+  /** Called with the function name and first argument before each call. */
+  before: undefined as ((name: string, path: string) => void) | undefined,
+  /** Called with the function name and first argument after each call returns. */
+  after: undefined as ((name: string, path: string) => void) | undefined,
+  paths: [] as string[],
+}));
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  const wrapped: Record<string, unknown> = {};
+  for (const [name, value] of Object.entries(actual)) {
+    if (typeof value !== "function" || name === "default") {
+      wrapped[name] = value;
+      continue;
+    }
+    const fn = value as (...args: unknown[]) => Promise<unknown>;
+    wrapped[name] = async (...args: unknown[]) => {
+      const path = String(args[0]);
+      fsHook.paths.push(path);
+      fsHook.before?.(name, path);
+      const result = await fn(...args);
+      fsHook.after?.(name, path);
+      return result;
+    };
+  }
+  return { ...wrapped, default: wrapped };
+});
+
+let tmp: string;
+let dir: string;
+let voice: string;
+let outside: string;
+
+beforeEach(async () => {
+  tmp = await mkdtemp(join(tmpdir(), "vd-cli-clean-"));
+  dir = join(tmp, "drama");
+  voice = join(dir, "assets", "voice");
+  outside = join(tmp, "outside");
+  expect((await vd("init", dir)).code).toBe(EXIT_OK);
+  expect((await vd("generate", dir)).code).toBe(EXIT_OK);
+  writeFileSync(join(voice, "stray1.wav"), "stray");
+  writeFileSync(join(voice, "stray2.wav"), "stray");
+  // The folder a swapped assets/voice points to. Its files share names with the strays.
+  mkdirSync(outside);
+  writeFileSync(join(outside, "stray1.wav"), "outside");
+  writeFileSync(join(outside, "stray2.wav"), "outside");
+  fsHook.paths = [];
+});
+
+afterEach(async () => {
+  fsHook.before = undefined;
+  fsHook.after = undefined;
+  await rm(tmp, { recursive: true, force: true });
+});
+
+async function vd(...args: string[]) {
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const code = await run(
+    args,
+    { stdout: (line) => stdout.push(line), stderr: (line) => stderr.push(line) },
+    {},
+  );
+  return { code, stdout: stdout.join("\n"), stderr: stderr.join("\n") };
+}
+
+/** Returns a function that replaces assets/voice with a link to the outside folder, once. */
+function swapVoiceOnce(): () => void {
+  let swapped = false;
+  return () => {
+    if (swapped) return;
+    swapped = true;
+    renameSync(voice, join(tmp, "voice-moved"));
+    symlinkSync(outside, voice);
+  };
+}
+
+const outsideFiles = () => readdirSync(outside).sort();
+const movedStrays = () =>
+  readdirSync(join(tmp, "voice-moved"))
+    .filter((file) => file.startsWith("stray"))
+    .sort();
+
+describe("vd clean when a folder is swapped while it runs", () => {
+  test("a swap after the listing but before the first removal removes nothing", async () => {
+    const swap = swapVoiceOnce();
+    // The removal phase starts by resolving the project folder: swap right before it.
+    fsHook.before = (name, path) => {
+      if (name === "realpath" && path === dir) swap();
+    };
+    const result = await vd("clean", dir);
+    expect(result.code).toBe(EXIT_FAILURE);
+    expect(result.stderr).toBe(
+      `vd clean: stopped cleaning ${dir}: a folder or file under assets changed while cleaning; stopped after removing 0 files`,
+    );
+    expect(outsideFiles()).toEqual(["stray1.wav", "stray2.wav"]);
+    expect(movedStrays()).toEqual(["stray1.wav", "stray2.wav"]);
+  });
+
+  test("a swap after one removal stops and reports the count", async () => {
+    const swap = swapVoiceOnce();
+    fsHook.after = (name) => {
+      if (name === "unlink") swap();
+    };
+    const result = await vd("clean", dir);
+    expect(result.code).toBe(EXIT_FAILURE);
+    expect(result.stderr).toBe(
+      `vd clean: stopped cleaning ${dir}: a folder or file under assets changed while cleaning; stopped after removing 1 file`,
+    );
+    expect(outsideFiles()).toEqual(["stray1.wav", "stray2.wav"]);
+    // The first stray was removed from the real folder, and the second was left.
+    expect(movedStrays()).toEqual(["stray2.wav"]);
+  });
+
+  test("a dry run refuses a folder swapped during the listing and reads nothing outside", async () => {
+    const swap = swapVoiceOnce();
+    // The template only has assets/voice. Swap it once both strays have been looked at, so
+    // the final check of the listing has to catch it.
+    let strays = 0;
+    fsHook.after = (name, path) => {
+      if (name === "lstat" && path.startsWith(join(voice, "stray")) && ++strays === 2) swap();
+    };
+    const result = await vd("clean", dir, "--dry-run");
+    expect(result.code).toBe(EXIT_FAILURE);
+    expect(result.stderr).toBe(
+      `vd clean: refusing to clean ${dir}: assets/voice changed while it was being listed`,
+    );
+    expect(result.stdout).toBe("");
+    expect(fsHook.paths.filter((path) => path.startsWith(outside))).toEqual([]);
+    expect(fsHook.paths.filter((path) => path.startsWith(`${voice}/`))).not.toEqual([]);
+    expect(existsSync(join(outside, "stray1.wav"))).toBe(true);
+  });
+
+  test("without a swap, clean removes the strays", async () => {
+    const result = await vd("clean", dir);
+    expect(result.code).toBe(EXIT_OK);
+    expect(result.stdout).toBe(
+      "Removed assets/voice/stray1.wav\nRemoved assets/voice/stray2.wav\nRemoved 2 files and 0 cache entries",
+    );
+  });
+});
