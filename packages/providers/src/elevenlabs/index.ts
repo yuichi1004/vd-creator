@@ -41,15 +41,42 @@ export type ElevenLabsOptions = {
 const MAX_DETAIL_LENGTH = 300;
 const MAX_LABEL_TEXT_LENGTH = 40;
 
+export type ElevenLabsKind = "tts" | "sfx" | "music";
+
+/**
+ * A failed ElevenLabs call. It carries only safe data: the message names the item and the
+ * reason with the API key redacted, and there is no cause, so the original error, Request,
+ * or Response (and their headers) never travel with it.
+ */
+export class ElevenLabsError extends Error {
+  override readonly name = "ElevenLabsError";
+
+  constructor(
+    message: string,
+    readonly kind: ElevenLabsKind,
+    readonly status?: number,
+    readonly requestId?: string,
+  ) {
+    super(message);
+  }
+}
+
 class ElevenLabsClient {
   constructor(private readonly options: ElevenLabsOptions) {}
 
   /** Sends a call and returns the MP3 result. Errors start with `label`, which names the item. */
-  async request(label: string, call: ApiCall, meta: Record<string, unknown>): Promise<AudioResult> {
+  async request(
+    kind: ElevenLabsKind,
+    label: string,
+    call: ApiCall,
+    meta: Record<string, unknown>,
+  ): Promise<AudioResult> {
     const env = this.options.env ?? process.env;
     const apiKey = env[ELEVENLABS_API_KEY_ENV];
+    const fail = (reason: string, status?: number, requestId?: string) =>
+      new ElevenLabsError(redactSecrets(`${label}: ${reason}`, apiKey), kind, status, requestId);
     if (!apiKey) {
-      throw new Error(`${label}: ${ELEVENLABS_API_KEY_ENV} is not set`);
+      throw fail(`${ELEVENLABS_API_KEY_ENV} is not set`);
     }
     const url = new URL(call.path, this.options.baseUrl ?? ELEVENLABS_BASE_URL);
     for (const [key, value] of Object.entries(call.query)) url.searchParams.set(key, value);
@@ -67,33 +94,43 @@ class ElevenLabsClient {
         body: JSON.stringify(call.body),
       });
     } catch (error) {
-      throw new Error(`${label}: network error: ${errorMessage(error)}`, { cause: error });
+      throw fail(`network error: ${errorMessage(error)}`);
     }
 
+    const requestId = response.headers.get(ELEVENLABS_REQUEST_ID_HEADER) ?? undefined;
+    const requestIdNote = requestId ? ` (request ${requestId})` : "";
     if (!response.ok) {
       const body = await response.text().catch(() => "");
-      const detail = truncate(errorDetail(body).trim(), MAX_DETAIL_LENGTH);
+      // Redact before truncating, so that a key cut in half cannot slip through.
+      const detail = truncate(redactSecrets(errorDetail(body), apiKey).trim(), MAX_DETAIL_LENGTH);
       const status = `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`;
-      throw new Error(`${label}: ${status}${detail ? `: ${detail}` : ""}`);
+      throw fail(
+        `${status}${requestIdNote}${detail ? `: ${detail}` : ""}`,
+        response.status,
+        requestId,
+      );
     }
 
     let data: Uint8Array;
     try {
       data = new Uint8Array(await response.arrayBuffer());
     } catch (error) {
-      throw new Error(`${label}: network error while reading the audio: ${errorMessage(error)}`, {
-        cause: error,
-      });
+      throw fail(
+        `network error while reading the audio${requestIdNote}: ${errorMessage(error)}`,
+        response.status,
+        requestId,
+      );
     }
     let durationSec: number;
     try {
       durationSec = mp3DurationSec(data);
     } catch (error) {
-      throw new Error(
-        `${label}: bad audio in the response (${data.length} bytes): ${errorMessage(error)}`,
+      throw fail(
+        `bad audio in the response${requestIdNote} (${data.length} bytes): ${errorMessage(error)}`,
+        response.status,
+        requestId,
       );
     }
-    const requestId = response.headers.get(ELEVENLABS_REQUEST_ID_HEADER);
     return {
       data,
       format: "mp3",
@@ -114,13 +151,14 @@ export class ElevenLabsTtsProvider implements TtsProvider {
 
   synthesize(req: TtsRequest): Promise<AudioResult> {
     const label = `ElevenLabs TTS failed for voice "${req.voiceId}", take ${req.take}, text ${quote(req.text)}`;
-    return this.client.request(label, ttsCall(req), {
+    return this.client.request("tts", label, ttsCall(req), {
       voiceId: req.voiceId,
       modelId: ttsModelId(req),
       take: req.take,
     });
   }
 
+  /** ElevenLabs bills TTS by the characters sent, including a direction tag. */
   estimate(req: TtsRequest): Cost {
     return { characters: [...ttsText(req)].length, requests: 1 };
   }
@@ -137,11 +175,12 @@ export class ElevenLabsSfxProvider implements SfxProvider {
 
   generate(req: SfxRequest): Promise<AudioResult> {
     const label = `ElevenLabs SFX failed for take ${req.take}, prompt ${quote(req.prompt)}`;
-    return this.client.request(label, sfxCall(req), { take: req.take });
+    return this.client.request("sfx", label, sfxCall(req), { take: req.take });
   }
 
-  estimate(req: SfxRequest): Cost {
-    return { characters: [...req.prompt].length, requests: 1 };
+  /** ElevenLabs bills SFX by duration or generation, not by prompt characters, so only the request counts. */
+  estimate(_req: SfxRequest): Cost {
+    return { characters: 0, requests: 1 };
   }
 }
 
@@ -156,11 +195,12 @@ export class ElevenLabsMusicProvider implements MusicProvider {
 
   generate(req: MusicRequest): Promise<AudioResult> {
     const label = `ElevenLabs music failed for take ${req.take}, prompt ${quote(req.prompt)}`;
-    return this.client.request(label, musicCall(req), { take: req.take });
+    return this.client.request("music", label, musicCall(req), { take: req.take });
   }
 
-  estimate(req: MusicRequest): Cost {
-    return { characters: [...req.prompt].length, requests: 1 };
+  /** ElevenLabs bills music by duration or generation, not by prompt characters, so only the request counts. */
+  estimate(_req: MusicRequest): Cost {
+    return { characters: 0, requests: 1 };
   }
 }
 
@@ -181,6 +221,20 @@ function quote(text: string): string {
 function truncate(text: string, max: number): string {
   const chars = [...text];
   return chars.length > max ? `${chars.slice(0, max).join("")}…` : text;
+}
+
+const REDACTED = "[redacted]";
+/** An xi-api-key header or field and its value, as it may appear in a message or echoed body. */
+const API_KEY_VALUE = new RegExp(
+  // The lookahead skips a value that is already redacted, so that redacting twice is harmless.
+  `(${ELEVENLABS_API_KEY_HEADER}["']?\\s*[:=]\\s*["']?)(?!\\[redacted\\])[^\\s"',;}\\]]+`,
+  "gi",
+);
+
+/** Removes the API key, and any value that follows an xi-api-key name, from a text. */
+function redactSecrets(text: string, apiKey: string | undefined): string {
+  const withoutKey = apiKey ? text.split(apiKey).join(REDACTED) : text;
+  return withoutKey.replace(API_KEY_VALUE, `$1${REDACTED}`);
 }
 
 function errorMessage(error: unknown): string {

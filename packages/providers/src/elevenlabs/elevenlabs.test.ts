@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { createProviders } from "../index.js";
 import {
   createElevenLabsProviders,
+  ElevenLabsError,
   ElevenLabsMusicProvider,
   type ElevenLabsOptions,
   ElevenLabsSfxProvider,
@@ -132,11 +133,21 @@ test("SFX and music send their prompt and duration", async () => {
     music_length_ms: 30000,
     model_id: "music_v1",
   });
-  expect(set.sfx.estimate({ prompt: "thunder", take: 0 })).toEqual({ characters: 7, requests: 1 });
-  expect(set.music.estimate({ prompt: "calm piano", durationSec: 30, take: 0 })).toEqual({
-    characters: 10,
-    requests: 1,
-  });
+});
+
+test("SFX and music estimates count requests only, not prompt characters", () => {
+  const set = createElevenLabsProviders({ env: {} });
+  for (const durationSec of [3, 30]) {
+    expect(set.sfx.estimate({ prompt: "thunder", durationSec, take: 0 })).toEqual({
+      characters: 0,
+      requests: 1,
+    });
+    expect(set.music.estimate({ prompt: "calm piano", durationSec, take: 0 })).toEqual({
+      characters: 0,
+      requests: 1,
+    });
+  }
+  expect(set.sfx.estimate({ prompt: "thunder", take: 0 })).toEqual({ characters: 0, requests: 1 });
 });
 
 test("the API key header comes from the environment", async () => {
@@ -239,16 +250,90 @@ test("a long text is shortened in the error message", async () => {
   ).rejects.toThrow(`text "${"a".repeat(40)}…": HTTP 500`);
 });
 
-test("a network error names the item and keeps the cause", async () => {
-  const cause = new TypeError("fetch failed");
-  const stub = stubFetch(() => Promise.reject(cause));
+test("a network error names the item and carries no cause", async () => {
+  const stub = stubFetch(() => Promise.reject(new TypeError("fetch failed")));
   const error = await new ElevenLabsSfxProvider(options(stub.fetch))
     .generate({ prompt: "rain", take: 0 })
     .catch((e: unknown) => e);
-  expect((error as Error).message).toBe(
+  expect(error).toBeInstanceOf(ElevenLabsError);
+  expect((error as ElevenLabsError).message).toBe(
     'ElevenLabs SFX failed for take 0, prompt "rain": network error: fetch failed',
   );
-  expect((error as Error).cause).toBe(cause);
+  expect((error as ElevenLabsError).kind).toBe("sfx");
+  expect((error as Error).cause).toBeUndefined();
+});
+
+/** Asserts that the fake key appears nowhere in the error: message, cause, stack, or JSON. */
+function expectNoKey(error: unknown): void {
+  expect(error).toBeInstanceOf(ElevenLabsError);
+  const e = error as ElevenLabsError;
+  expect(e.message).not.toContain(FAKE_KEY);
+  expect(String(e.stack)).not.toContain(FAKE_KEY);
+  expect(e.cause).toBeUndefined();
+  expect(JSON.stringify(e)).not.toContain(FAKE_KEY);
+  expect(JSON.stringify(Object.getOwnPropertyDescriptors(e))).not.toContain(FAKE_KEY);
+  expect(String(e)).not.toContain(FAKE_KEY);
+}
+
+test("a fetch rejection that contains the key is redacted", async () => {
+  const stub = stubFetch(() =>
+    Promise.reject(
+      Object.assign(new TypeError(`fetch failed with xi-api-key: ${FAKE_KEY}`), {
+        cause: { headers: { "xi-api-key": FAKE_KEY } },
+      }),
+    ),
+  );
+  const error = await new ElevenLabsTtsProvider(options(stub.fetch))
+    .synthesize({ text: "Hi.", voiceId: "v", take: 0 })
+    .catch((e: unknown) => e);
+  expectNoKey(error);
+  expect((error as Error).message).toContain(
+    "network error: fetch failed with xi-api-key: [redacted]",
+  );
+});
+
+test("an HTTP error body that echoes the key is redacted", async () => {
+  const stub = stubFetch(
+    () =>
+      new Response(
+        JSON.stringify({
+          detail: { message: `Bad key ${FAKE_KEY}; header "xi-api-key":"other-secret"` },
+        }),
+        { status: 401, headers: { "request-id": "req-401" } },
+      ),
+  );
+  const error = await new ElevenLabsMusicProvider(options(stub.fetch))
+    .generate({ prompt: "x", durationSec: 10, take: 0 })
+    .catch((e: unknown) => e);
+  expectNoKey(error);
+  const e = error as ElevenLabsError;
+  expect(e.message).not.toContain("other-secret");
+  expect(e.message).toBe(
+    'ElevenLabs music failed for take 0, prompt "x": HTTP 401 (request req-401): Bad key [redacted]; header "xi-api-key":"[redacted]"',
+  );
+  expect({ kind: e.kind, status: e.status, requestId: e.requestId }).toEqual({
+    kind: "music",
+    status: 401,
+    requestId: "req-401",
+  });
+});
+
+test("a body read failure that contains the key is redacted", async () => {
+  const body = new ReadableStream({
+    start(controller) {
+      controller.error(new Error(`stream broke, key ${FAKE_KEY}`));
+    },
+  });
+  const stub = stubFetch(
+    () => new Response(body, { status: 200, headers: { "request-id": "req-123" } }),
+  );
+  const error = await new ElevenLabsSfxProvider(options(stub.fetch))
+    .generate({ prompt: "x", take: 0 })
+    .catch((e: unknown) => e);
+  expectNoKey(error);
+  expect((error as Error).message).toBe(
+    'ElevenLabs SFX failed for take 0, prompt "x": network error while reading the audio (request req-123): stream broke, key [redacted]',
+  );
 });
 
 test("bad audio in a successful response names the item", async () => {
