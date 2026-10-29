@@ -1,6 +1,6 @@
 # 0007: Shared sound library and licenses
 
-- Status: Accepted
+- Status: In progress
 - Date: 2026-10-29
 - Depends on: [0003](0003-scenario-format.md). The project integration task also needs [0004](0004-providers-and-generation.md).
 
@@ -191,7 +191,7 @@ A new package, `packages/library`, sits between `scenario` and `core`: it depend
 
 The library package task fixes a file format and the license checks, so it is reviewed with `gpt-6-astra`. The others use the default reviewer.
 
-- [ ] Library package
+- [x] Library package
   - Target: `packages/library/` (new), root `package.json` workspaces list
   - Change: Zod schemas for `library.yaml`, `licenses.yaml`, and `entry.yaml`; reading the library; `importEntry`, `promoteEntry` (from a file plus a generation record), `verifyEntry`, `searchEntries`, `checkLibrary`, `buildCreditsText(credits, template)` (used by `vd render` in 0006); the standard Creative Commons registry written by `initLibrary`; and `checkProjectLicenses(credits, use)` implementing the table above.
   - Constraints: runtime dependencies `zod` and `yaml` only, which 0003 already adds. Depends on `packages/scenario` from 0003. No network access.
