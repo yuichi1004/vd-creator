@@ -1,6 +1,6 @@
 # 0006: Rendering
 
-- Status: In progress
+- Status: Done
 - Date: 2026-10-29
 - Depends on: [0003](0003-scenario-format.md), [0004](0004-providers-and-generation.md)
 
@@ -70,12 +70,13 @@ It checks that ffmpeg is on `PATH`, that every item has an asset, and that the p
   - Ownership: `packages/render/src/video.ts`, `packages/render/src/video.test.ts`, and the export line in `packages/render/src/index.ts`.
   - Acceptance: `npm test -w packages/render` passes, including an integration test that renders a mock project with two images and checks with `ffprobe` that the video is 1920x1080 and as long as the audio.
   - Review notes: EXIF rotation of phone JPEGs is not applied. Low-severity follow-ups: pass `-safe 1` to the concat demuxer explicitly, although the list holds only generated names; libx264 uses the `medium` preset, so 1080p encodes at about real time, and a faster preset may be worth it.
-- [ ] `vd render`
+- [x] `vd render`
   - Target: `apps/cli/`
   - Change: the command described above. The video step uses the `{ stills, concatList, args }` shape from `buildVideoArgs`.
   - Constraints: no new dependencies. Depends on the video task and on the 0007 project integration task. Must not run at the same time as another task that owns `apps/cli/`, such as `vd serve` in 0005.
   - Ownership: `apps/cli/`.
   - Acceptance: `npm test -w apps/cli` passes, with a test that runs `init`, `generate` with the mock, and `render --video --srt`, then checks that the output files, including `credits.txt`, exist. A test checks that a missing asset fails with the item IDs listed, and that a license error stops the render.
+  - Review notes: the worker's own Claude review, then one independent Claude review and one fix round. `--print-command` starts with a quoted `cd` into the project, keeps scenario text out of its here-documents, and quotes every argument. `credits.txt` and `drama.srt` are written through a temporary file renamed over the target, so a symbolic link there is replaced, not followed. Follow-ups: a symbolic link at `out/` itself is still followed; `renderAudio` and `renderVideo` load the scenario again, so an edit during a render is rendered unchecked; when the video encode fails, the new audio sits next to the old video; stale outputs from earlier renders with other flags are not removed; README does not describe the `vd` commands yet.
 
 ## Open questions
 
