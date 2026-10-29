@@ -130,7 +130,7 @@ New runtime dependencies, named here: `hono`, `@hono/node-server`, `react`, `rea
 
 ## Tasks
 
-The server task is reviewed with `gpt-6-astra`, because it handles file access, the access token, and the paid-generation gate. The others use the default reviewer.
+The server task's first review uses `gpt-6-astra`, because the task handles file access, the access token, and the paid-generation gate. Later fix rounds use a Claude reviewer with a checklist of the earlier findings. The other tasks use the default reviewer.
 
 - [x] Dependencies, Vite setup, and API types
   - Target: `apps/server/package.json`, `apps/web/package.json`, `apps/web` build config, root `package-lock.json`, `apps/server/src/api.ts`
