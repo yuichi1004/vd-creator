@@ -1,8 +1,12 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "rootDir": "src",
-    "outDir": "dist"
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": ["node", "vite/client"],
+    "jsx": "react-jsx",
+    "noEmit": true
   },
-  "include": ["src"]
+  "include": ["src", "vite.config.ts"]
 }

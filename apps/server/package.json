@@ -18,7 +18,11 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@hono/node-server": "^2.1.5",
     "@vd-creator/core": "*",
-    "@vd-creator/render": "*"
+    "@vd-creator/library": "*",
+    "@vd-creator/render": "*",
+    "@vd-creator/scenario": "*",
+    "hono": "^4.13.14"
   }
 }

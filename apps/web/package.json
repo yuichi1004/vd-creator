@@ -4,20 +4,21 @@
   "private": true,
   "description": "Review UI. Talks to the server only and imports types from scenario.",
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "default": "./dist/index.js"
-    }
-  },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "vite build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
-    "@vd-creator/scenario": "*"
+    "@vd-creator/scenario": "*",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vd-creator/server": "*",
+    "@vitejs/plugin-react": "^6.1.2",
+    "vite": "^8.3.5"
   }
 }
