@@ -9,12 +9,18 @@ import {
   AssetCache,
   type AssetResolver,
   type BgmSpan,
+  CACHE_FILE,
+  CacheFormatError,
   computeTimeline,
+  GenerationError,
   type Timeline,
   type TimelineItem,
 } from "@vd-creator/core";
-import { formatPath, loadScenario, SCENARIO_FILE, type Scenario } from "@vd-creator/scenario";
+import { IdSchema, loadScenario, SCENARIO_FILE, type Scenario } from "@vd-creator/scenario";
+import { RenderError, stepError } from "./errors.js";
 import { runFfmpeg } from "./ffmpeg.js";
+
+export { RenderError } from "./errors.js";
 
 export type RenderFormat = "mp3" | "wav";
 
@@ -31,14 +37,6 @@ export const MP3_BITRATE = "192k";
 export const BGM_FADE_SEC = 1;
 /** Gain applied to the BGM while a line plays. */
 export const BGM_DUCK_GAIN = 0.5;
-
-/** Thrown when a project cannot be rendered, for a reason other than ffmpeg failing. */
-export class RenderError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "RenderError";
-  }
-}
 
 export type AudioMixOptions = {
   /** The output file, as ffmpeg sees it. */
@@ -196,23 +194,46 @@ export type RenderAudioResult = {
  * Mixes a project's assets into `out/drama.mp3` or `out/drama.wav`. ffmpeg runs in the project
  * folder with relative paths and writes a temporary file that replaces the output only when
  * ffmpeg succeeds. Items without an asset are left out of the mix: callers that need every
- * asset, such as `vd render`, check the timeline first. Throws a `RenderError` if scenario.yaml
- * has errors or there is nothing to render, and an `FfmpegError` if ffmpeg fails.
+ * asset, such as `vd render`, check the timeline first.
+ *
+ * Every failure is a `RenderError`, or its subclass `FfmpegError` when ffmpeg fails, with a
+ * fixed message that holds at most a project-relative path and a Node error code, never an
+ * absolute path. The original error is its `cause`.
  */
 export async function renderAudio(
   projectDir: string,
   options: RenderAudioOptions,
 ): Promise<RenderAudioResult> {
+  try {
+    return await renderAudioSteps(projectDir, options);
+  } catch (e) {
+    // Each step wraps its own errors; this keeps anything unexpected from escaping raw.
+    throw stepError("Could not render the audio", e);
+  }
+}
+
+async function renderAudioSteps(
+  projectDir: string,
+  options: RenderAudioOptions,
+): Promise<RenderAudioResult> {
   const format = options.format ?? "mp3";
-  const { scenario, issues } = await loadScenario(projectDir);
+  const { scenario, issues } = await loadScenario(projectDir).catch((e: unknown) => {
+    throw stepError(`Could not read ${SCENARIO_FILE}`, e);
+  });
   if (!scenario) {
-    const errors = issues.filter((i) => i.severity === "error");
+    const count = issues.filter((i) => i.severity === "error").length;
     throw new RenderError(
-      `${SCENARIO_FILE} has errors: ${errors.map((i) => `${formatPath(i.path)}: ${i.message}`).join("; ")}`,
+      `${SCENARIO_FILE} has ${count} ${count === 1 ? "error" : "errors"}; run vd validate to see them`,
     );
   }
-  const cache = await AssetCache.load(projectDir);
-  const timeline = await computeTimeline(scenario, cache, options.resolvers);
+  const cache = await AssetCache.load(projectDir).catch((e: unknown) => {
+    throw e instanceof CacheFormatError
+      ? new RenderError(`${CACHE_FILE} is not a valid cache`, { cause: e })
+      : stepError(`Could not read ${CACHE_FILE}`, e);
+  });
+  const timeline = await computeTimeline(scenario, cache, options.resolvers).catch((e: unknown) => {
+    throw stepError(timelineFailure(e), e);
+  });
 
   const file = `${OUT_DIR}/${OUT_BASENAME}.${format}`;
   const temp = `${file}.${randomUUID()}.tmp`;
@@ -222,16 +243,35 @@ export async function renderAudio(
   const at = args.indexOf("-filter_complex");
   const graphText = args[at + 1] as string;
   args.splice(at, 2, "-filter_complex_script", graph);
-  await mkdir(join(projectDir, OUT_DIR), { recursive: true });
+  const inProject = (path: string) => join(projectDir, path);
+  // Cleanup is best effort: its failure must not hide the error that caused it.
+  const remove = (path: string) => rm(inProject(path), { force: true }).catch(() => {});
+
+  await mkdir(inProject(OUT_DIR), { recursive: true }).catch((e: unknown) => {
+    throw stepError(`Could not create ${OUT_DIR}/`, e);
+  });
   try {
-    await writeFile(join(projectDir, graph), graphText);
+    await writeFile(inProject(graph), graphText).catch((e: unknown) => {
+      throw stepError(`Could not write the ffmpeg filter graph in ${OUT_DIR}/`, e);
+    });
     await runFfmpeg(args, { cwd: projectDir });
-    await rename(join(projectDir, temp), join(projectDir, file));
+    await rename(inProject(temp), inProject(file)).catch((e: unknown) => {
+      throw stepError(`Could not write ${file}`, e);
+    });
   } catch (e) {
-    await rm(join(projectDir, temp), { force: true });
+    await remove(temp);
     throw e;
   } finally {
-    await rm(join(projectDir, graph), { force: true });
+    await remove(graph);
   }
   return { file, format, scenario, timeline };
+}
+
+/** The message for a failed timeline, naming the item when it is known. */
+function timelineFailure(error: unknown): string {
+  // IDs are validated, but the check keeps any other text out of the message.
+  if (error instanceof GenerationError && IdSchema.safeParse(error.itemId).success) {
+    return `Could not plan ${error.kind} "${error.itemId}" for the timeline`;
+  }
+  return "Could not plan the timeline";
 }

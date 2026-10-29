@@ -1,14 +1,14 @@
 // Integration test: renders a mock-generated project with the real ffmpeg.
 
 import { execFile } from "node:child_process";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { AssetCache, defaultResolvers, runGeneration } from "@vd-creator/core";
 import { createMockProviders } from "@vd-creator/providers";
 import { loadScenario } from "@vd-creator/scenario";
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import { LOUDNESS_TARGET_LUFS, RenderError, renderAudio } from "./audio.js";
 import { FfmpegError } from "./ffmpeg.js";
 
@@ -137,14 +137,71 @@ describe("renderAudio", { timeout: 60_000 }, () => {
       await rm(broken, { recursive: true, force: true });
     }
   });
+});
 
-  test("refuses a scenario with errors", async () => {
-    const invalid = await mkdtemp(join(tmpdir(), "vd-render-invalid-"));
-    try {
-      await writeFile(join(invalid, "scenario.yaml"), "version: 1\ntitle: Bad\nscenes: 5\n");
-      await expect(renderAudio(invalid, { resolvers })).rejects.toThrow(RenderError);
-    } finally {
-      await rm(invalid, { recursive: true, force: true });
-    }
+describe("renderAudio errors", { timeout: 60_000 }, () => {
+  let project: string;
+
+  beforeEach(async () => {
+    project = await mkdtemp(join(tmpdir(), "vd-render-errors-"));
+    await writeFile(join(project, "scenario.yaml"), YAML);
+  });
+
+  afterEach(async () => {
+    await rm(project, { recursive: true, force: true });
+  });
+
+  /** Renders the project, expecting a RenderError with no absolute path in its message. */
+  async function renderError(): Promise<RenderError> {
+    const error = await renderAudio(project, { resolvers }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(RenderError);
+    const message = (error as Error).message;
+    expect(message).not.toContain(project);
+    expect(message).not.toContain(await realpath(project));
+    expect(message).not.toContain(tmpdir());
+    return error as RenderError;
+  }
+
+  test("reports an output path that is a folder by its relative path and code", async () => {
+    await mkdir(join(project, "out", "drama.mp3"), { recursive: true });
+    const error = await renderError();
+    expect(error.message).toBe("Could not write out/drama.mp3 (EISDIR)");
+    expect(error.code).toBe("EISDIR");
+    expect(error.cause).toBeInstanceOf(Error);
+    // The temporary files are removed.
+    expect(await readdir(join(project, "out"))).toEqual(["drama.mp3"]);
+  });
+
+  test("reports an out/ that is a file", async () => {
+    await writeFile(join(project, "out"), "");
+    const error = await renderError();
+    expect(error.message).toMatch(/^Could not create out\/ \(E[A-Z]+\)$/);
+    expect(error.cause).toBeInstanceOf(Error);
+  });
+
+  test("reports a missing scenario.yaml", async () => {
+    await rm(join(project, "scenario.yaml"));
+    const error = await renderError();
+    expect(error.message).toBe("Could not read scenario.yaml (ENOENT)");
+    expect(error.code).toBe("ENOENT");
+  });
+
+  test("reports a scenario with errors by their count", async () => {
+    await writeFile(join(project, "scenario.yaml"), "version: 1\ntitle: Bad\nscenes: 5\n");
+    const error = await renderError();
+    expect(error.message).toBe("scenario.yaml has 1 error; run vd validate to see them");
+  });
+
+  test("reports a cache.json that cannot be read", async () => {
+    await mkdir(join(project, "cache.json"));
+    const error = await renderError();
+    expect(error.message).toBe("Could not read cache.json (EISDIR)");
+  });
+
+  test("reports a cache.json that is not a cache", async () => {
+    await writeFile(join(project, "cache.json"), "{");
+    const error = await renderError();
+    expect(error.message).toBe("cache.json is not a valid cache");
+    expect(error.cause).toBeInstanceOf(Error);
   });
 });
