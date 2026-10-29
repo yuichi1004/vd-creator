@@ -22,14 +22,24 @@ Each user can keep a user directory with their own config and private notes, out
    2. `local/` at the root of this repository. It is gitignored, and it may be a symbolic link to another folder.
    3. `$XDG_CONFIG_HOME/vd-creator/`, or `~/.config/vd-creator/` when `XDG_CONFIG_HOME` is not set.
 
-   `vd config path` will print the result, but that command does not exist yet. Until it does, check by hand from the repository root:
+   `vd config path` will print the result, but that command does not exist yet. Until it does, run this POSIX shell snippet from the repository root. It checks the three locations in order and prints the first one that is an existing folder, or `no user directory`. If `VD_USER_DIR` is set to a folder that does not exist, it prints a note and skips it.
 
    ```sh
-   echo "${VD_USER_DIR:-}"
-   ls -d local/ "${XDG_CONFIG_HOME:-$HOME/.config}/vd-creator/"
+   (
+     if [ -n "${VD_USER_DIR:-}" ] && [ ! -d "$VD_USER_DIR" ]; then
+       echo "note: VD_USER_DIR is set, but $VD_USER_DIR is not a directory; skipping it"
+     fi
+     for dir in "${VD_USER_DIR:-}" local "${XDG_CONFIG_HOME:-$HOME/.config}/vd-creator"; do
+       if [ -n "$dir" ] && [ -d "$dir" ]; then
+         echo "user directory: $dir"
+         exit 0
+       fi
+     done
+     echo "no user directory"
+   )
    ```
 
-   If none of them exists, there is no user directory. Carry on without one.
+   If it prints `no user directory`, carry on without one.
 2. If the user directory has an `AGENTS.md`, read it and follow it.
 3. Consult its `docs/` folder when it is relevant to the work.
 
