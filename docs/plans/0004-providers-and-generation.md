@@ -98,7 +98,7 @@ vd generate [dir] [--provider mock|elevenlabs] [--only <id,...>] [--dry-run] [--
 
 The interfaces task is reviewed with `gpt-6-astra`, because it fixes a public interface. The others use the default reviewer.
 
-- [ ] Provider interfaces and mock
+- [x] Provider interfaces and mock
   - Target: `packages/providers/`
   - Change: the interfaces above, the mock TTS, SFX, and music providers, a WAV encoder, and `createProviders(id)` that returns the three providers for an ID (only `mock` in this task).
   - Constraints: no new dependencies. No network access.
