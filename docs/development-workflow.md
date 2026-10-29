@@ -93,10 +93,7 @@ A timeout means "nothing yet", not failure. After three empty waits in a row, in
 
 ## 5. Review
 
-When a worker reports `--outcome succeeded`:
-
-- For small or mechanical changes, review the branch yourself (`git diff main...task/NNNN-<short-name>`).
-- Otherwise, start a reviewer on the same worktree, preferably with a different model:
+When a worker reports `--outcome succeeded`, start a Codex reviewer on the same worktree. Every change is reviewed this way, including small documentation changes. The coordinator still reads the diff (`git diff main...<task branch>`), but that does not replace the Codex review:
 
 ```sh
 orca orchestration worker-start --worktree <implementer_worktree_selector> --agent codex \
