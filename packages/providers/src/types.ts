@@ -1,4 +1,5 @@
 // Provider interfaces from plan 0004. Changing them needs a decision gate.
+// Plan 0009 added the optional TtsProvider.dropsDirection, approved at a decision gate.
 
 export type AudioFormat = "mp3" | "wav";
 
@@ -34,6 +35,12 @@ export type MusicRequest = { prompt: string; durationSec: number; take: number }
 export interface TtsProvider extends Provider {
   synthesize(req: TtsRequest): Promise<AudioResult>;
   estimate(req: TtsRequest): Cost;
+  /**
+   * True if the request has a direction that the provider does not send, such as with a model
+   * that does not read audio tags. Used only for the plan's notes. Optional: a provider without
+   * it counts as sending every direction.
+   */
+  dropsDirection?(req: TtsRequest): boolean;
 }
 
 export interface SfxProvider extends Provider {

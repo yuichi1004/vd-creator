@@ -5,10 +5,17 @@ import type { Cost } from "@vd-creator/providers";
 import type { Scenario } from "@vd-creator/scenario";
 import { AssetCache } from "./cache.js";
 import { isCanonicalJsonError } from "./canonical.js";
-import { itemLabel, type ScenarioItem, type ScenarioItemKind, scenarioItems } from "./items.js";
+import {
+  generationRequest,
+  itemLabel,
+  type ScenarioItem,
+  type ScenarioItemKind,
+  scenarioItems,
+} from "./items.js";
 import { type ProviderUse, playedProviders, recordProvider } from "./library/project.js";
 import {
   type AssetResolver,
+  GeneratedItemResolver,
   GenerationBudget,
   type PlannedAsset,
   type ResolveContext,
@@ -49,6 +56,12 @@ export type GenerationPlan = {
   items: PlannedItem[];
   /** Total estimated cost of the to-generate items. Identical requests count once. */
   cost: Cost;
+  /**
+   * Notes for whoever reads the plan, each to be shown once, such as the speakers whose
+   * directions are not sent. They name only speaker IDs, never voice IDs or settings.
+   * `planGeneration` always sets it. It is optional for plans made elsewhere, such as in tests.
+   */
+  notes?: string[];
 };
 
 export type GenerationOptions = {
@@ -67,7 +80,8 @@ function invalidReason(item: ScenarioItem): string {
  * Plans the generation of a scenario: which items are cached, which would be generated, and
  * which no resolver can supply, with the total cost. Makes no provider calls. An item whose
  * request is not plain JSON is `invalid`, with no cost, and the other items still plan.
- * Throws a `GenerationError` if planning an item fails in any other way.
+ * The notes name the speakers of to-generate lines whose directions the TTS provider does not
+ * send. Throws a `GenerationError` if planning an item fails in any other way.
  */
 export async function planGeneration(
   scenario: Scenario,
@@ -79,6 +93,7 @@ export async function planGeneration(
   const items: PlannedItem[] = [];
   const cost: Cost = { characters: 0, requests: 0 };
   const counted = new Set<string>();
+  const undirected = new Set<string>();
   for (const item of selectItems(scenario, options)) {
     const planned = await planItem(item, ctx, resolvers);
     if (planned.status === "to-generate" && !(planned.key && counted.has(planned.key))) {
@@ -86,9 +101,33 @@ export async function planGeneration(
       cost.characters += planned.cost.characters;
       cost.requests += planned.cost.requests;
     }
+    if (planned.status === "to-generate" && item.kind === "line") {
+      if (dropsDirection(scenario, item, resolvers)) undirected.add(item.item.speaker);
+    }
     items.push(planned);
   }
-  return { items, cost };
+  const notes: string[] = [];
+  if (undirected.size > 0) {
+    const ids = [...undirected].map((id) => `"${id}"`).join(", ");
+    const speakers = undirected.size === 1 ? `speaker ${ids}` : `speakers ${ids}`;
+    notes.push(`Directions are not sent for ${speakers}: the TTS model does not read audio tags`);
+  }
+  return { items, cost, notes };
+}
+
+/**
+ * True if the generated-item resolver plans the line and its TTS provider does not send the
+ * line's direction. Other resolvers, and providers without `dropsDirection`, send every one.
+ */
+function dropsDirection(
+  scenario: Scenario,
+  item: ScenarioItem,
+  resolvers: readonly AssetResolver[],
+): boolean {
+  const resolver = resolvers.find((r) => r.handles(item));
+  if (!(resolver instanceof GeneratedItemResolver)) return false;
+  const gen = generationRequest(scenario, item);
+  return gen?.kind === "tts" && resolver.providers.tts.dropsDirection?.(gen.request) === true;
 }
 
 /**

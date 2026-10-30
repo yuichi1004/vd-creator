@@ -143,6 +143,31 @@ test("TTS sends the text only to a model that does not read audio tags", async (
   });
 });
 
+test("dropsDirection is true only for a direction that the model does not read", () => {
+  const tts = new ElevenLabsTtsProvider({ env: {} });
+  const line = (modelId?: string, direction?: string): TtsRequest => ({
+    text: "Hi.",
+    voiceId: "v",
+    take: 0,
+    ...(direction === undefined ? {} : { direction }),
+    ...(modelId === undefined ? {} : { settings: { modelId } }),
+  });
+  expect(tts.dropsDirection(line("eleven_multilingual_v2", "whispers"))).toBe(true);
+  expect(tts.dropsDirection(line(undefined, "whispers"))).toBe(true);
+  expect(tts.dropsDirection(line("eleven_v3", "whispers"))).toBe(false);
+  expect(tts.dropsDirection(line("eleven_v4", "whispers"))).toBe(false);
+  expect(tts.dropsDirection(line("eleven_multilingual_v2"))).toBe(false);
+  expect(tts.dropsDirection(line("eleven_multilingual_v2", "  "))).toBe(false);
+  // A request that throws as it is read gives false, not the error.
+  const throwing = {
+    ...line("eleven_multilingual_v2"),
+    get direction(): string {
+      throw new Error("boom");
+    },
+  };
+  expect(tts.dropsDirection(throwing)).toBe(false);
+});
+
 test("SFX and music send their prompt and duration", async () => {
   const stub = stubFetch(() => audioResponse());
   const set = createElevenLabsProviders(options(stub.fetch));

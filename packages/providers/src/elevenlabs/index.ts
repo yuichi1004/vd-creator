@@ -19,6 +19,7 @@ import type {
 } from "../types.js";
 import {
   type ApiCall,
+  dropsDirection,
   ELEVENLABS_API_ERRORS,
   ELEVENLABS_API_KEY_ENV,
   ELEVENLABS_API_KEY_HEADER,
@@ -242,6 +243,16 @@ export class ElevenLabsTtsProvider implements TtsProvider {
   /** ElevenLabs bills TTS by the characters sent, including a direction tag. */
   estimate(req: TtsRequest): Cost {
     return estimated("tts", "TTS", () => ({ characters: [...ttsText(req)].length, requests: 1 }));
+  }
+
+  /** True if the line has a direction and its model does not read audio tags. */
+  dropsDirection(req: TtsRequest): boolean {
+    // Only a note depends on it, so a request that cannot be read gives no note.
+    try {
+      return dropsDirection(req);
+    } catch {
+      return false;
+    }
   }
 }
 

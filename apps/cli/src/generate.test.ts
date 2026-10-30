@@ -443,6 +443,47 @@ describe("vd generate with a paid provider", () => {
     expect((await gated.sfx.generate({ prompt: "x", take: 0 })).format).toBe("wav");
     expect(gated.tts.estimate({ text: "abc", voiceId: "v", take: 0 }).requests).toBe(1);
     expect(gateProviders({ ...mock, tts: paidTts }, true).tts).toBe(paidTts);
+    // A provider without dropsDirection stays without it.
+    expect(gated.tts.dropsDirection).toBeUndefined();
+  });
+
+  test("gateProviders passes dropsDirection through", () => {
+    const mock = createMockProviders();
+    const paidTts = { ...mock.tts, id: "paid", paid: true, dropsDirection: () => true };
+    const gated = gateProviders({ ...mock, tts: paidTts }, false);
+    expect(gated.tts.dropsDirection?.({ text: "x", voiceId: "v", take: 0 })).toBe(true);
+  });
+
+  test("the plan says once which speakers' directions are not sent", async () => {
+    await editScenario((text) =>
+      text
+        .replace("      voiceId: narrator\n", "      voiceId: voice-n1\n")
+        .concat(
+          '      - line: "Hush."\n        id: s1-l2\n        speaker: narrator\n        direction: whispers\n',
+          '      - line: "Quiet."\n        id: s1-l3\n        speaker: narrator\n        direction: softly\n',
+        ),
+    );
+    const result = await vd("generate", dir, "--provider", "elevenlabs");
+    expect(result.code).toBe(EXIT_OK);
+    const notes = result.stdout.split("\n").filter((line) => line.startsWith("Note:"));
+    expect(notes).toEqual([
+      'Note: Directions are not sent for speaker "narrator": the TTS model does not read audio tags',
+    ]);
+    expect(result.stdout).not.toContain("voice-n1");
+    expect(result.stdout).not.toContain(API_KEY);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("the plan has no note on directions with the mock provider", async () => {
+    await editScenario((text) =>
+      text.concat(
+        '      - line: "Hush."\n        id: s1-l2\n        speaker: narrator\n        direction: whispers\n',
+      ),
+    );
+    const result = await vd("generate", dir, "--dry-run");
+    expect(result.code).toBe(EXIT_OK);
+    expect(result.stdout).toContain("Plan with provider mock:");
+    expect(result.stdout).not.toContain("Note:");
   });
 });
 

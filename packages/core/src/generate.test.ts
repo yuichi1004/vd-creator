@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  createElevenLabsProviders,
   createMockProviders,
   type MusicRequest,
   type ProviderSet,
@@ -141,6 +142,70 @@ describe("planGeneration", () => {
     await expect(
       planGeneration(scenario, new AssetCache(dir), resolvers, { only: ["nope"] }),
     ).rejects.toThrow(/"nope"/);
+  });
+
+  describe("notes on directions", () => {
+    /** One speaker per model, each with a line, and a line without a direction for "plain". */
+    const DIRECTED = new ScenarioDocument(`version: 1
+title: Directions
+speakers:
+  - { id: v2, name: V2, voice: { provider: elevenlabs, voiceId: voice-two, settings: { modelId: eleven_multilingual_v2 } } }
+  - { id: v3, name: V3, voice: { provider: elevenlabs, voiceId: voice-three, settings: { modelId: eleven_v3 } } }
+  - { id: v4, name: V4, voice: { provider: elevenlabs, voiceId: voice-four, settings: { modelId: eleven_v4 } } }
+  - { id: plain, name: Plain, voice: { provider: elevenlabs, voiceId: voice-plain } }
+scenes:
+  - id: s1
+    items:
+      - { line: "One.", id: l1, speaker: v2, direction: whispers }
+      - { line: "Two.", id: l2, speaker: v2, direction: shouts }
+      - { line: "Three.", id: l3, speaker: v3, direction: whispers }
+      - { line: "Four.", id: l4, speaker: v4, direction: whispers }
+      - { line: "Five.", id: l5, speaker: plain }
+`);
+
+    async function notesOf(providers: ProviderSet, only?: string[]): Promise<string[] | undefined> {
+      const scenario = scenarioOf(DIRECTED);
+      const resolvers = defaultResolvers(providers);
+      return (await planGeneration(scenario, new AssetCache(dir), resolvers, { only })).notes;
+    }
+
+    test("name once the speakers whose model does not read audio tags", async () => {
+      const notes = await notesOf(createElevenLabsProviders({ env: {} }));
+      expect(notes).toEqual([
+        'Directions are not sent for speaker "v2": the TTS model does not read audio tags',
+      ]);
+      expect(notes?.join("\n")).not.toContain("voice-two");
+    });
+
+    test("are empty for eleven_v3, eleven_v4, and a line without a direction", async () => {
+      const providers = createElevenLabsProviders({ env: {} });
+      expect(await notesOf(providers, ["l3", "l4", "l5"])).toEqual([]);
+    });
+
+    test("are empty with the mock provider", async () => {
+      expect(await notesOf(createMockProviders())).toEqual([]);
+    });
+
+    test("leave out cached lines", async () => {
+      const providers = createElevenLabsProviders({ env: {} });
+      const scenario = scenarioOf(DIRECTED);
+      const cache = new AssetCache(dir);
+      const resolvers = defaultResolvers(providers);
+      for (const item of (await planGeneration(scenario, cache, resolvers)).items) {
+        if (item.status !== "to-generate" || !item.key) continue;
+        const file = `voice/${item.key.slice(0, 16)}.mp3`;
+        await cache.writeAsset(file, new Uint8Array([0]));
+        cache.set(item.key, {
+          kind: "tts",
+          file,
+          providerId: "elevenlabs",
+          request: {},
+          durationSec: 1,
+          createdAt: new Date(0).toISOString(),
+        });
+      }
+      expect((await planGeneration(scenario, cache, resolvers)).notes).toEqual([]);
+    });
   });
 });
 

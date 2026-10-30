@@ -25,8 +25,9 @@ const STATUS_LABELS = {
 } as const;
 
 /**
- * The plan as lines of text: one line per item with its status, kind, and ID, then the counts
- * and the estimated cost. It never contains an item's text or prompt.
+ * The plan as lines of text: one line per item with its status, kind, and ID, then the counts,
+ * the estimated cost, and each of the plan's notes once. It never contains an item's text or
+ * prompt.
  */
 export function formatPlan(plan: GenerationPlan, providerId: string): string[] {
   const width = Math.max(...Object.values(STATUS_LABELS).map((s) => s.length));
@@ -48,6 +49,7 @@ export function formatPlan(plan: GenerationPlan, providerId: string): string[] {
   lines.push(
     `Estimated cost: ${plural(plan.cost.characters, "character")}, ${plural(plan.cost.requests, "request")}`,
   );
+  for (const note of new Set(plan.notes ?? [])) lines.push(`Note: ${note}`);
   return lines;
 }
 
@@ -96,6 +98,8 @@ export function gateProviders(providers: ProviderSet, authorized: boolean): Prov
     estimate: (req) => tts.estimate(req),
     synthesize: (req) => (tts.paid ? refuse() : tts.synthesize(req)),
   };
+  // Like an estimate, it only reads the request, so it always passes through.
+  if (tts.dropsDirection) gatedTts.dropsDirection = (req) => tts.dropsDirection?.(req) === true;
   const gatedSfx: SfxProvider = {
     id: sfx.id,
     paid: sfx.paid,
