@@ -92,6 +92,25 @@ async function exists(path: string): Promise<boolean> {
   );
 }
 
+/**
+ * Generates every item with the mock, then adds a newer ElevenLabs entry for each request, as
+ * if an earlier run had used it. Planning with the mock finds every item cached, and playback
+ * picks the ElevenLabs assets. No credits.json is written, since the mock is never recorded.
+ */
+async function cacheElevenLabsCopies() {
+  expect((await vd("generate", dir)).code).toBe(EXIT_OK);
+  const cache = await readCache();
+  for (const entry of Object.values(cache.entries)) {
+    cache.entries[cacheKey(entry.kind, "elevenlabs", entry.request)] = {
+      ...entry,
+      providerId: "elevenlabs",
+      createdAt: new Date(Date.parse(entry.createdAt) + 1000).toISOString(),
+    };
+  }
+  await writeFile(join(dir, "cache.json"), JSON.stringify(cache));
+  expect(await exists(join(dir, "credits.json"))).toBe(false);
+}
+
 /** Spies on every mock provider call. */
 function spyOnMock() {
   return [
@@ -164,6 +183,39 @@ describe("vd generate", () => {
     expect(callCount(spies)).toBe(0);
     expect(await exists(join(dir, "cache.json"))).toBe(false);
     expect(await readdir(join(dir, "assets"))).toEqual([]);
+  });
+
+  test("records the providers of a fully cached project in credits.json", async () => {
+    await cacheElevenLabsCopies();
+    const spies = spyOnMock();
+    const result = await vd("generate", dir);
+    expect(result).toMatchObject({ code: EXIT_OK, stderr: "" });
+    expect(result.stdout).toContain("0 to generate, 3 cached");
+    expect(result.stdout).toContain("Nothing to generate.");
+    expect(callCount(spies)).toBe(0);
+    const credits = JSON.parse(await readFile(join(dir, "credits.json"), "utf8"));
+    expect(credits.providers).toEqual([
+      expect.objectContaining({ id: "elevenlabs", kinds: ["voice", "sfx", "bgm"] }),
+    ]);
+  });
+
+  test("--dry-run of a fully cached project writes no credits.json", async () => {
+    await cacheElevenLabsCopies();
+    const result = await vd("generate", dir, "--dry-run");
+    expect(result.code).toBe(EXIT_OK);
+    expect(result.stdout).toContain("0 to generate, 3 cached");
+    expect(await exists(join(dir, "credits.json"))).toBe(false);
+  });
+
+  test("a broken credits.json in a fully cached project fails without a path", async () => {
+    await cacheElevenLabsCopies();
+    await writeFile(join(dir, "credits.json"), "{ not json");
+    const result = await vd("generate", dir);
+    expect(result.code).toBe(EXIT_FAILURE);
+    expect(result.stdout).toContain("Nothing to generate.");
+    expect(result.stderr).toMatch(/^vd generate: credits\.json is not valid JSON; fix /);
+    expect(result.stderr).not.toContain(tmp);
+    expect(await readFile(join(dir, "credits.json"), "utf8")).toBe("{ not json");
   });
 
   test("--only generates only the named items", async () => {

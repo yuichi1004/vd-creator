@@ -665,13 +665,15 @@ describe("recordCachedProviders", () => {
   test("keeps credits.json sorted, with library entries kept", async () => {
     await addDoor();
     const s = generatedScenario("private");
-    await generateWith(s, fakePaidProviders("zeta"));
+    await generateWith(s, fakePaidProviders("alpha"));
+    // Start without the record runGeneration wrote, so that alpha is added after zeta.
+    await rm(join(project, CREDITS_FILE));
     await copyLibraryEntry(
       project,
       await readLibrary(root),
       findEntry(await readLibrary(root), "door-01", "sfx"),
     );
-    await recordProvider(project, "alpha", "music");
+    await recordProvider(project, "zeta", "music");
     await recordCachedProviders(project, { scenario: s });
     const credits = await readCredits(project);
     expect(credits.entries.map((e) => e.id)).toEqual(["door-01"]);

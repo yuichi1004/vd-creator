@@ -16,6 +16,7 @@ import {
   type ProjectLicenseIssue,
   planGeneration,
   readCredits,
+  recordCachedProviders,
   runGeneration,
   scenarioItems,
   type Timeline,
@@ -503,8 +504,24 @@ async function generate(args: string[], options: Options, context: Context): Pro
   const planned = plan.items.filter((item) => item.status === "to-generate").map((i) => i.id);
   const invalid = plan.items.filter((item) => item.status === "invalid");
   let failed: Extract<ItemResult, { status: "failed" }>[] = [];
+  let creditsFailed = false;
   if (planned.length === 0) {
     output.stdout("Nothing to generate.");
+    // A run records the providers of every asset the scenario plays, so a fully cached
+    // project gets them too, such as one generated before providers were recorded.
+    try {
+      await recordCachedProviders(dir, { scenario, cache, resolvers });
+    } catch (e) {
+      if (e instanceof ProjectCreditsError) {
+        output.stderr(`vd generate: ${safeLibraryText(e.message)}`);
+      } else {
+        const code = fsErrorCode(e);
+        if (code === undefined) throw e;
+        output.stderr(`vd generate: cannot record the providers in credits.json: ${code}`);
+      }
+      debug(e);
+      creditsFailed = true;
+    }
   } else {
     const result = await runGeneration(scenario, cache, resolvers, {
       only: planned,
@@ -528,7 +545,9 @@ async function generate(args: string[], options: Options, context: Context): Pro
     );
     debug(item.error);
   }
-  return invalid.length + failed.length + unresolved.length > 0 ? EXIT_FAILURE : EXIT_OK;
+  return creditsFailed || invalid.length + failed.length + unresolved.length > 0
+    ? EXIT_FAILURE
+    : EXIT_OK;
 }
 
 async function render(args: string[], options: Options, context: Context): Promise<number> {
