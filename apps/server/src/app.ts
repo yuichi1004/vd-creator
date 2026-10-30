@@ -61,7 +61,7 @@ import type {
 } from "./api.js";
 import { relativeUrlPath, serveFile } from "./files.js";
 import { hostCheck } from "./hosts.js";
-import { type MessageRoot, sanitizeMessage } from "./sanitize.js";
+import { type MessageRoot, sanitizeMessage, sanitizeTarget } from "./sanitize.js";
 import { documentData, sceneIndex, updateSceneBgm } from "./scene-edit.js";
 import { tokenCheck } from "./token.js";
 import type { ProjectEvents } from "./watcher.js";
@@ -207,7 +207,11 @@ export function createApp(options: AppOptions): Hono {
   async function licenseIssues(scenario: Scenario): Promise<ProjectLicenseIssue[]> {
     try {
       const issues = await checkLibraryLicenses(projectDir, scenario, { library });
-      return issues.map((i) => ({ ...i, message: sanitizeMessage(i.message, messageRoots) }));
+      return issues.map(({ target, message, ...rest }) => ({
+        ...rest,
+        ...(target !== undefined && { target: sanitizeTarget(target, messageRoots) }),
+        message: sanitizeMessage(message, messageRoots),
+      }));
     } catch {
       return [{ message: LICENSES_UNCHECKED, severity: "error" }];
     }

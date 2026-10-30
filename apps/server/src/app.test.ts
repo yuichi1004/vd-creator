@@ -288,6 +288,19 @@ describe("license issues of GET /api/project", () => {
     expect(issue?.message).toContain('"assets/secret.wav"');
   });
 
+  test("hides an absolute path in the target of an issue", async () => {
+    await writeScenario("commercial");
+    const credits = { version: 1, providers: [{ id: "/private/secret/x.wav" }] };
+    await writeFile(join(project, CREDITS_FILE), JSON.stringify(credits));
+
+    const response = await makeApp().request("/api/project");
+    const text = await response.text();
+    expect(response.status).toBe(200);
+    expect(text).not.toContain("/private/");
+    const issues = (JSON.parse(text) as ProjectResponse).licenseIssues;
+    expect(issues.map((i) => i.target)).toContainEqual({ type: "provider", id: "<path>" });
+  });
+
   test("an unexpected failure of the check gives a generic issue", async () => {
     const failure = new Error(`EACCES: permission denied, open '${join(project, "secret")}'`);
     vi.mocked(checkLibraryLicenses).mockRejectedValueOnce(failure);

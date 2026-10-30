@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { HIDDEN_PATH, type MessageRoot, sanitizeMessage } from "./sanitize.js";
+import { HIDDEN_PATH, type MessageRoot, sanitizeMessage, sanitizeTarget } from "./sanitize.js";
 
 const roots: MessageRoot[] = [
   { dir: "/work/drama", name: "the project folder" },
@@ -46,5 +46,47 @@ describe("sanitizeMessage", () => {
   test("leaves relative paths alone", () => {
     const message = "sfx/door/entry.yaml: license.id: Required";
     expect(sanitizeMessage(message, roots)).toBe(message);
+  });
+
+  test("hides a path after a character that does not belong to a path", () => {
+    expect(sanitizeMessage("license generated-/private/secret/x.wav", roots)).toBe(
+      `license generated-${HIDDEN_PATH}`,
+    );
+    expect(sanitizeMessage("file=/private/x.wav at:/private/y.wav", roots)).toBe(
+      `file=${HIDDEN_PATH} at:${HIDDEN_PATH}`,
+    );
+  });
+
+  test("keeps a regular expression of a schema message", () => {
+    const message = "sha256: must match pattern /^[0-9a-f]{64}$/";
+    expect(sanitizeMessage(message, roots)).toBe(message);
+    expect(sanitizeMessage('id: must match pattern "/^(a|b)\\/c$/i".', roots)).toBe(
+      'id: must match pattern "/^(a|b)\\/c$/i".',
+    );
+    expect(sanitizeMessage("Cannot read /private/a$b/x.wav", roots)).toBe(
+      `Cannot read ${HIDDEN_PATH}`,
+    );
+  });
+
+  test("replaces a root only where a path starts", () => {
+    const tmp: MessageRoot[] = [{ dir: "/tmp/p", name: "the project folder" }];
+    expect(sanitizeMessage("elevenlabs/tmp/p/a.wav", tmp)).toBe("elevenlabs/tmp/p/a.wav");
+    expect(sanitizeMessage("Cannot read /tmp/p/a.wav", tmp)).toBe("Cannot read a.wav");
+  });
+});
+
+describe("sanitizeTarget", () => {
+  test("sanitizes every string field and keeps a plain id", () => {
+    expect(sanitizeTarget({ type: "provider", id: "/private/secret/x.wav" }, roots)).toEqual({
+      type: "provider",
+      id: HIDDEN_PATH,
+    });
+    expect(sanitizeTarget({ type: "entry", kind: "sfx", id: "/work/drama/lib/x" }, roots)).toEqual({
+      type: "entry",
+      kind: "sfx",
+      id: "x",
+    });
+    const entry = { type: "entry", kind: "sfx", id: "door-creak-01" };
+    expect(sanitizeTarget(entry, roots)).toEqual(entry);
   });
 });
