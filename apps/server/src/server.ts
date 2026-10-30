@@ -5,7 +5,7 @@ import { createAdaptorServer } from "@hono/node-server";
 import type { AssetResolver } from "@vd-creator/core";
 import { type AppOptions, createApp, type ServerProviders } from "./app.js";
 import { createToken, TOKEN_QUERY } from "./token.js";
-import { ProjectWatcher } from "./watcher.js";
+import { ProjectWatcher, WatchError } from "./watcher.js";
 
 export const DEFAULT_HOST = "127.0.0.1";
 export const DEFAULT_PORT = 4173;
@@ -39,11 +39,27 @@ export type RunningServer = {
   close(): Promise<void>;
 };
 
-/** Starts the server and resolves once it listens. */
+/**
+ * `addr` as the host part of a URL: an IPv6 address in brackets, with the `%` of a zone, as in
+ * `fe80::1%eth0`, encoded as `%25`.
+ */
+export function urlHost(addr: string): string {
+  return addr.includes(":") ? `[${addr.replaceAll("%", "%25")}]` : addr;
+}
+
+/**
+ * Starts the server and resolves once it listens. Rejects with a `WatchError` if the project
+ * folder cannot be watched, and with the listen error if it cannot listen.
+ */
 export async function startServer(options: StartServerOptions): Promise<RunningServer> {
   const host = options.host ?? DEFAULT_HOST;
   const token = options.host !== undefined ? createToken() : undefined;
-  const watcher = new ProjectWatcher(options.projectDir);
+  let watcher: ProjectWatcher;
+  try {
+    watcher = new ProjectWatcher(options.projectDir);
+  } catch (e) {
+    throw new WatchError(e);
+  }
   const ending = new AbortController();
   const appOptions: AppOptions = {
     projectDir: options.projectDir,
@@ -73,10 +89,9 @@ export async function startServer(options: StartServerOptions): Promise<RunningS
   }
 
   const port = (server.address() as AddressInfo).port;
-  const shown = host.includes(":") ? `[${host}]` : host;
   const query = token !== undefined ? `?${TOKEN_QUERY}=${token}` : "";
   const running: RunningServer = {
-    url: `http://${shown}:${port}/${query}`,
+    url: `http://${urlHost(host)}:${port}/${query}`,
     port,
     close: () =>
       new Promise<void>((resolve, reject) => {

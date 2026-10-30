@@ -6,8 +6,9 @@ import { fileURLToPath } from "node:url";
 import { SCENARIO_FILE } from "@vd-creator/scenario";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import type { ServerProviders } from "./app.js";
-import { type RunningServer, startServer } from "./server.js";
+import { type RunningServer, startServer, urlHost } from "./server.js";
 import { TOKEN_COOKIE } from "./token.js";
+import { WatchError } from "./watcher.js";
 
 const SAMPLE = fileURLToPath(
   new URL("../../../packages/scenario/fixtures/sample.yaml", import.meta.url),
@@ -139,7 +140,21 @@ test("sends project-changed when scenario.yaml changes, and close ends the strea
 
 test("rejects when the port is taken", async () => {
   running = await startServer({ projectDir: dir, provider: providers(), port: 0 });
-  await expect(
-    startServer({ projectDir: dir, provider: providers(), port: running.port }),
-  ).rejects.toThrow();
+  const taken = startServer({ projectDir: dir, provider: providers(), port: running.port });
+  await expect(taken).rejects.toMatchObject({ code: "EADDRINUSE" });
+  await expect(taken).rejects.not.toBeInstanceOf(WatchError);
+});
+
+test("rejects with a WatchError, before listening, when the folder cannot be watched", async () => {
+  const missing = join(dir, "missing");
+  const started = startServer({ projectDir: missing, provider: providers(), port: 0 });
+  await expect(started).rejects.toBeInstanceOf(WatchError);
+  await expect(started).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test("urlHost brackets IPv6 addresses and encodes a zone", () => {
+  expect(urlHost("127.0.0.1")).toBe("127.0.0.1");
+  expect(urlHost("vd.example")).toBe("vd.example");
+  expect(urlHost("fd00::20")).toBe("[fd00::20]");
+  expect(urlHost("fe80::1%eth0")).toBe("[fe80::1%25eth0]");
 });

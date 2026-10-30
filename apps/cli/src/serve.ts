@@ -5,7 +5,7 @@ import { existsSync } from "node:fs";
 import { isIP } from "node:net";
 import { networkInterfaces } from "node:os";
 import { join } from "node:path";
-import { TOKEN_QUERY } from "@vd-creator/server";
+import { hostName, TOKEN_QUERY, urlHost } from "@vd-creator/server";
 import { REPO_ROOT } from "./config/index.js";
 
 export const DEFAULT_SERVE_PORT = 5310;
@@ -29,9 +29,12 @@ export function parsePort(value: string): number | undefined {
   return port <= 65535 ? port : undefined;
 }
 
-/** `addr` as the host part of a URL, with an IPv6 address in brackets. */
-function urlHost(addr: string): string {
-  return addr.includes(":") ? `[${addr}]` : addr;
+/**
+ * True if `name`, given with --allow-host, can match a `Host` header: a host name, IPv4
+ * address, or bracketed IPv6 address, without a port.
+ */
+export function allowHostValid(name: string): boolean {
+  return hostName(name) === name.toLowerCase();
 }
 
 /** `host` as given with --host, without the brackets of an IPv6 address such as `[::]`. */
@@ -39,10 +42,27 @@ export function listenHost(host: string): string {
   return host.replace(/^\[(.*)\]$/, "$1");
 }
 
+/** `host` as a URL normalizes it, such as `[::]` for `0:0:0:0:0:0:0:0`, if it is IPv6. */
+function ipv6Normal(host: string): string | undefined {
+  // URL does not take a zone, as in fe80::1%eth0, and the zone does not matter here.
+  const address = host.replace(/%.*$/, "");
+  return isIP(address) === 6 ? new URL(`http://[${address}]/`).hostname : undefined;
+}
+
 /** True if `host` is the IPv6 wildcard in any spelling, such as `::` or `0:0:0:0:0:0:0:0`. */
 function ipv6Any(host: string): boolean {
-  if (isIP(host) !== 6) return false;
-  return new URL(`http://[${host}]/`).hostname === "[::]";
+  return ipv6Normal(host) === "[::]";
+}
+
+/**
+ * True if a server listening on `host` is reachable only from this machine: `localhost`, an
+ * address in 127.0.0.0/8, `::1`, or an IPv4-mapped 127.x address.
+ */
+export function loopbackHost(host: string): boolean {
+  if (host.toLowerCase() === "localhost") return true;
+  if (isIP(host) === 4) return host.startsWith("127.");
+  const normal = ipv6Normal(host);
+  return normal === "[::1]" || /^\[::ffff:7f[0-9a-f]{2}:/.test(normal ?? "");
 }
 
 /**

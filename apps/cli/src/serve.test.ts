@@ -1,10 +1,25 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { EXIT_FAILURE, EXIT_OK, EXIT_USAGE, run } from "./index.js";
-import { listenAddresses, listenHost, parsePort, stopSignal, tokenUrls } from "./serve.js";
+import {
+  allowHostValid,
+  listenAddresses,
+  listenHost,
+  loopbackHost,
+  parsePort,
+  stopSignal,
+  tokenUrls,
+} from "./serve.js";
+
+const cliRoot = fileURLToPath(new URL("..", import.meta.url));
+const bin = join(cliRoot, "bin", "vd.js");
+const built = existsSync(join(cliRoot, "dist", "bin.js"));
 
 let tmp: string;
 let dir: string;
@@ -60,6 +75,20 @@ function serveCommand(args: string[], options: { webDir?: string } = {}) {
     ready: ready.then(() => ({ stdout: stdout.join("\n"), stderr: stderr.join("\n") })),
     stop: () => stopping.abort(),
   };
+}
+
+/**
+ * The port and token of the first token URL in `stdout`. Requests go to 127.0.0.1 on that
+ * port, whichever address the URL names.
+ */
+function tokenUrl(stdout: string): { port: string; token: string } | undefined {
+  const match = /^ {2}http:\/\/\S+:(\d+)\/\?token=([\w-]{20,})$/m.exec(stdout);
+  return match ? { port: match[1] as string, token: match[2] as string } : undefined;
+}
+
+/** `text` without `token`, so that a failed assertion does not print the token. */
+function redact(text: string, token: string): string {
+  return token === "" ? text : text.replaceAll(token, "<token>");
 }
 
 /** A GET to 127.0.0.1:`port` with node:http, which, unlike fetch, can set the Host header. */
@@ -139,7 +168,7 @@ describe("vd serve", () => {
     expect((await server.done).code).toBe(EXIT_OK);
   });
 
-  test("with --host, prints URLs with the token and the network warning", async () => {
+  test("with a loopback --host, prints the URL with the token and no network warning", async () => {
     const server = serveCommand(["serve", dir, "--port", "0", "--host", "127.0.0.1"]);
     let token = "";
     try {
@@ -147,11 +176,10 @@ describe("vd serve", () => {
       const url = /^ {2}(http:\/\/127\.0\.0\.1:\d+\/\?token=([\w-]{20,}))$/m.exec(stdout);
       expect(url).not.toBeNull();
       token = url?.[2] as string;
-      expect(stderr).toContain("Anyone on the network");
-      expect(stderr).toContain("Tailscale");
-      // The token is printed only inside the URLs.
+      expect(redact(stderr, token)).not.toContain("Anyone on the network");
+      // The token is printed only inside the URL.
       expect(stdout.split(token).length - 1).toBe(1);
-      expect(stderr).not.toContain(token);
+      expect(stderr.includes(token)).toBe(false);
 
       const base = new URL(url?.[1] as string);
       const without = await fetch(new URL("/api/project", base));
@@ -165,6 +193,113 @@ describe("vd serve", () => {
     expect(result.code).toBe(EXIT_OK);
     expect(result.stdout.split(token).length - 1).toBe(1);
   });
+
+  test("with --host 0.0.0.0, needs the token and prints the network warning", async () => {
+    const server = serveCommand(["serve", dir, "--port", "0", "--host", "0.0.0.0"]);
+    let token = "";
+    try {
+      const { stdout, stderr } = await server.ready;
+      const found = tokenUrl(stdout);
+      expect(found).toBeDefined();
+      token = found?.token as string;
+      const port = found?.port as string;
+      expect(redact(stderr, token)).toContain("Anyone on the network");
+      expect(redact(stderr, token)).toContain("Tailscale");
+      expect(stderr.includes(token)).toBe(false);
+
+      expect((await get(port, "/api/project")).status).toBe(401);
+      expect((await get(port, `/api/project?token=${token}`)).status).toBe(303);
+      expect((await get(port, "/api/project?token=wrong")).status).toBe(401);
+    } finally {
+      server.stop();
+    }
+    const result = await server.done;
+    expect(result.code).toBe(EXIT_OK);
+    expect(redact(result.stdout, token)).toContain("Stopped.");
+  });
+
+  // Starts the built bin in its own process, so that SIGTERM goes to vd serve's own handler.
+  test.skipIf(!built)("stops on SIGTERM", { timeout: 30_000 }, async () => {
+    const userDir = join(tmp, "user");
+    await mkdir(userDir);
+    // An empty user directory comes first, so no real config is read.
+    const child = spawn(bin, ["serve", dir, "--port", "0", "--host", "0.0.0.0"], {
+      env: { PATH: process.env.PATH, VD_USER_DIR: userDir },
+    });
+    let stdout = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.resume();
+    const exited = new Promise<{ code: number | null; signal: string | null }>((resolve) =>
+      child.once("exit", (code, signal) => resolve({ code, signal })),
+    );
+    let token = "";
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.stdout.on("data", (chunk: string) => {
+          stdout += chunk;
+          if (stdout.includes("Press Ctrl+C")) resolve();
+        });
+        void exited.then(() => reject(new Error("vd serve ended before it was ready")));
+      });
+      const found = tokenUrl(stdout);
+      expect(found).toBeDefined();
+      token = found?.token as string;
+      const port = found?.port as string;
+      expect((await get(port, `/api/project?token=${token}`)).status).toBe(303);
+
+      child.kill("SIGTERM");
+      expect(await exited).toEqual({ code: EXIT_OK, signal: null });
+      expect(redact(stdout, token)).toMatch(/Stopped\.\n$/);
+      await expect(get(port, "/api/project")).rejects.toMatchObject({ code: "ECONNREFUSED" });
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await exited;
+    }
+  });
+
+  test("rejects --allow-host with a port, and warns that it has no effect with --host", async () => {
+    for (const name of ["vd.example:5310", "[fd00::20]:80", "fd00::20", "vd.example/"]) {
+      const result = await vd("serve", dir, "--port", "0", "--allow-host", name);
+      expect(result.code).toBe(EXIT_USAGE);
+      expect(result.stderr).toContain("--allow-host takes a host name without a port");
+    }
+
+    const server = serveCommand([
+      "serve",
+      dir,
+      "--port",
+      "0",
+      "--host",
+      "127.0.0.1",
+      "--allow-host",
+      "vd.example",
+    ]);
+    let token = "";
+    try {
+      const { stdout, stderr } = await server.ready;
+      token = tokenUrl(stdout)?.token ?? "";
+      expect(redact(stderr, token)).toContain("--allow-host has no effect with --host");
+    } finally {
+      server.stop();
+    }
+    expect((await server.done).code).toBe(EXIT_OK);
+  });
+
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "reports a folder it cannot watch as a watch error, not a listen error",
+    async () => {
+      // Without read access, scenario.yaml is still found, but the folder cannot be watched.
+      await chmod(dir, 0o300);
+      try {
+        const result = await vd("serve", dir, "--port", "0");
+        expect(result.code).toBe(EXIT_FAILURE);
+        expect(result.stderr).toContain(`vd serve: cannot watch ${dir} for changes: EACCES`);
+        expect(result.stderr).not.toContain("cannot listen");
+      } finally {
+        await chmod(dir, 0o755);
+      }
+    },
+  );
 
   test("accepts the names given with --allow-host", async () => {
     const server = serveCommand([
@@ -294,6 +429,27 @@ describe("serve helpers", () => {
     expect(listenAddresses("0:0:0:0:0:0:0:0", interfaces)).toEqual(all);
     expect(listenAddresses("100.64.0.5", interfaces)).toEqual(["100.64.0.5"]);
     expect(listenAddresses("fd00::20", interfaces)).toEqual(["fd00::20"]);
+    expect(listenAddresses("fe80::1%eth0", interfaces)).toEqual(["fe80::1%eth0"]);
+  });
+
+  test("loopbackHost", () => {
+    for (const host of ["127.0.0.1", "127.1.2.3", "localhost", "LocalHost", "::1", "0:0::1"]) {
+      expect(loopbackHost(host)).toBe(true);
+    }
+    expect(loopbackHost("::ffff:127.0.0.1")).toBe(true);
+    for (const host of ["0.0.0.0", "::", "192.168.1.20", "fd00::20", "fe80::1%lo", "vd.example"]) {
+      expect(loopbackHost(host)).toBe(false);
+    }
+    expect(loopbackHost("::ffff:10.0.0.1")).toBe(false);
+  });
+
+  test("allowHostValid takes names and addresses without a port", () => {
+    for (const name of ["vd.example", "VD.Example", "10.0.0.2", "[fd00::20]", "localhost"]) {
+      expect(allowHostValid(name)).toBe(true);
+    }
+    for (const name of ["vd.example:5310", "[fd00::20]:80", "10.0.0.2:80", "fd00::20", ""]) {
+      expect(allowHostValid(name)).toBe(false);
+    }
   });
 
   test("listenHost drops the brackets of an IPv6 address", () => {
@@ -316,10 +472,11 @@ describe("serve helpers", () => {
     expect(stopSignal(given).signal).toBe(given);
   });
 
-  test("tokenUrls brackets IPv6 addresses", () => {
-    expect(tokenUrls(["10.0.0.2", "fd00::20"], 5310, "abc")).toEqual([
+  test("tokenUrls brackets IPv6 addresses and encodes a zone", () => {
+    expect(tokenUrls(["10.0.0.2", "fd00::20", "fe80::1%eth0"], 5310, "abc")).toEqual([
       "http://10.0.0.2:5310/?token=abc",
       "http://[fd00::20]:5310/?token=abc",
+      "http://[fe80::1%25eth0]:5310/?token=abc",
     ]);
   });
 });

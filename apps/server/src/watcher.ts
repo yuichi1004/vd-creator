@@ -12,6 +12,19 @@ const WATCHED = new Set<string>([SCENARIO_FILE, CACHE_FILE]);
 
 export type ProjectListener = (event: ProjectChangedEvent) => void;
 
+/** The project folder cannot be watched, such as without read access or past a watch limit. */
+export class WatchError extends Error {
+  /** The Node error code of the cause, such as EACCES or ENOSPC. */
+  readonly code: string | undefined;
+
+  constructor(cause: unknown) {
+    super("cannot watch the project folder", { cause });
+    this.name = "WatchError";
+    const code = (cause as { code?: unknown } | null)?.code;
+    this.code = typeof code === "string" ? code : undefined;
+  }
+}
+
 /** A source of `project-changed` events. */
 export interface ProjectEvents {
   /** Calls `listener` on each change. Returns a function that stops it. */

@@ -35,6 +35,7 @@ import {
   type RunningServer,
   type StartServerOptions,
   startServer,
+  WatchError,
 } from "@vd-creator/server";
 import { CleanInterruptedError, CleanRefusedError, cleanProject } from "./clean.js";
 import {
@@ -82,9 +83,11 @@ import {
 } from "./render.js";
 import {
   aborted,
+  allowHostValid,
   DEFAULT_SERVE_PORT,
   listenAddresses,
   listenHost,
+  loopbackHost,
   NETWORK_WARNING,
   parsePort,
   SERVE_USAGE,
@@ -148,7 +151,8 @@ Commands:
                       URL can edit the project; Tailscale is the recommended way instead
     --allow-host <name>
                       Also accept this Host header name, such as a reverse proxy's
-                      (repeatable). Not needed with --host, where the token is checked
+                      (repeatable), without a port. No effect with --host, where the
+                      token is checked
     --library <path>  Show the library panel for this library, and copy library sounds
                       the project has not copied yet when they are generated
 
@@ -809,6 +813,13 @@ async function serve(args: string[], options: Options, context: Context): Promis
     output.stderr(SERVE_USAGE);
     return EXIT_USAGE;
   }
+  const badAllowHost = allowedHosts?.find((name) => !allowHostValid(name));
+  if (badAllowHost !== undefined) {
+    output.stderr(
+      `vd serve: --allow-host takes a host name without a port, such as vd.example or [fd00::20], not "${badAllowHost}"`,
+    );
+    return EXIT_USAGE;
+  }
   if (!providerIds().includes(providerId)) {
     output.stderr(
       `vd serve: unknown provider "${providerId}"; known providers: ${providerIds().join(", ")}`,
@@ -818,6 +829,11 @@ async function serve(args: string[], options: Options, context: Context): Promis
   if (!existsSync(join(dir, SCENARIO_FILE))) {
     output.stderr(`vd serve: no ${SCENARIO_FILE} in ${dir}`);
     return EXIT_FAILURE;
+  }
+  if (options.host !== undefined && allowedHosts !== undefined) {
+    output.stderr(
+      "vd serve: --allow-host has no effect with --host, where every request needs the token",
+    );
   }
   const config = await loadUserConfig("serve", context);
   if (typeof config === "number") return config;
@@ -847,6 +863,11 @@ async function serve(args: string[], options: Options, context: Context): Promis
     try {
       running = await startServer(serverOptions);
     } catch (e) {
+      if (e instanceof WatchError) {
+        output.stderr(`vd serve: cannot watch ${dir} for changes: ${e.code ?? "unknown error"}`);
+        debug(e);
+        return EXIT_FAILURE;
+      }
       const code = errorCode(e);
       if (code === undefined) throw e;
       const shown = `${options.host ?? DEFAULT_HOST}:${port}`;
@@ -862,7 +883,9 @@ async function serve(args: string[], options: Options, context: Context): Promis
       for (const url of tokenUrls(addresses, running.port, running.token)) {
         output.stdout(`  ${url}`);
       }
-      for (const line of NETWORK_WARNING) output.stderr(line);
+      if (!loopbackHost(host ?? DEFAULT_HOST)) {
+        for (const line of NETWORK_WARNING) output.stderr(line);
+      }
     }
     if (isPaid(provider)) {
       output.stdout(
