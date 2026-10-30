@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { type ChildProcess, type SpawnOptions, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { request } from "node:http";
@@ -32,8 +32,78 @@ beforeEach(async () => {
 
 afterEach(async () => {
   vi.unstubAllGlobals();
+  // A test that timed out may not have reached its own finally.
+  await Promise.all([...children].map((child) => child.reap()));
   await rm(tmp, { recursive: true, force: true });
 });
+
+/** Rejects with `message` if `promise` has not settled within `ms`. */
+async function within<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  try {
+    return await Promise.race([promise, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+type Exit = { code: number | null; signal: string | null };
+
+type Child = {
+  process: ChildProcess;
+  exited: Promise<Exit>;
+  stdout(): string;
+  /** Resolves once stdout includes `text`; rejects if the child ends first or after `ms`. */
+  printed(text: string, ms: number): Promise<void>;
+  /** Kills the child with SIGKILL if it still runs, and waits for it to exit. */
+  reap(): Promise<Exit>;
+};
+
+/** Children still to reap; afterEach reaps any that a test left. */
+const children = new Set<Child>();
+
+/** Spawns a child process that the test, or else afterEach, reaps. */
+function spawnChild(command: string, args: string[], options: SpawnOptions = {}): Child {
+  const child = spawn(command, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "";
+  child.stdout?.setEncoding("utf8");
+  child.stdout?.on("data", (chunk: string) => {
+    stdout += chunk;
+  });
+  child.stderr?.resume();
+  const exited = new Promise<Exit>((resolve) => {
+    child.once("exit", (code, signal) => resolve({ code, signal }));
+  });
+  const handle: Child = {
+    process: child,
+    exited,
+    stdout: () => stdout,
+    printed: (text, ms) =>
+      within(
+        new Promise<void>((resolve, reject) => {
+          const check = () => {
+            if (stdout.includes(text)) resolve();
+          };
+          child.stdout?.on("data", check);
+          check();
+          void exited.then(() => reject(new Error(`the child ended before it printed ${text}`)));
+        }),
+        ms,
+        `the child did not print ${text} within ${ms} ms`,
+      ),
+    reap: async () => {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      const exit = await within(exited, 5_000, "the child did not exit after SIGKILL");
+      children.delete(handle);
+      return exit;
+    },
+  };
+  children.add(handle);
+  return handle;
+}
 
 /** Runs a vd command that ends by itself. */
 async function vd(...args: string[]) {
@@ -219,41 +289,61 @@ describe("vd serve", () => {
   });
 
   // Starts the built bin in its own process, so that SIGTERM goes to vd serve's own handler.
+  // The deadlines are shorter than the test timeout, so that the finally always reaps it.
   test.skipIf(!built)("stops on SIGTERM", { timeout: 30_000 }, async () => {
     const userDir = join(tmp, "user");
     await mkdir(userDir);
     // An empty user directory comes first, so no real config is read.
-    const child = spawn(bin, ["serve", dir, "--port", "0", "--host", "0.0.0.0"], {
+    const child = spawnChild(bin, ["serve", dir, "--port", "0", "--host", "0.0.0.0"], {
       env: { PATH: process.env.PATH, VD_USER_DIR: userDir },
     });
-    let stdout = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.resume();
-    const exited = new Promise<{ code: number | null; signal: string | null }>((resolve) =>
-      child.once("exit", (code, signal) => resolve({ code, signal })),
-    );
     let token = "";
     try {
-      await new Promise<void>((resolve, reject) => {
-        child.stdout.on("data", (chunk: string) => {
-          stdout += chunk;
-          if (stdout.includes("Press Ctrl+C")) resolve();
-        });
-        void exited.then(() => reject(new Error("vd serve ended before it was ready")));
-      });
-      const found = tokenUrl(stdout);
+      await child.printed("Press Ctrl+C", 10_000);
+      const found = tokenUrl(child.stdout());
       expect(found).toBeDefined();
       token = found?.token as string;
       const port = found?.port as string;
       expect((await get(port, `/api/project?token=${token}`)).status).toBe(303);
 
-      child.kill("SIGTERM");
-      expect(await exited).toEqual({ code: EXIT_OK, signal: null });
-      expect(redact(stdout, token)).toMatch(/Stopped\.\n$/);
+      child.process.kill("SIGTERM");
+      const exit = await within(child.exited, 10_000, "vd serve did not stop on SIGTERM");
+      expect(exit).toEqual({ code: EXIT_OK, signal: null });
+      expect(redact(child.stdout(), token)).toMatch(/Stopped\.\n$/);
       await expect(get(port, "/api/project")).rejects.toMatchObject({ code: "ECONNREFUSED" });
     } finally {
-      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-      await exited;
+      await child.reap();
+    }
+  });
+
+  test("reaps a child that never gets ready and ignores SIGTERM", async () => {
+    const script =
+      "process.on('SIGTERM', () => {}); console.log('started'); setInterval(() => {}, 1000);";
+    const child = spawnChild(process.execPath, ["-e", script]);
+    try {
+      await child.printed("started", 10_000);
+      await expect(child.printed("Press Ctrl+C", 200)).rejects.toThrow("within 200 ms");
+      child.process.kill("SIGTERM");
+      await expect(within(child.exited, 200, "still running")).rejects.toThrow("still running");
+    } finally {
+      expect(await child.reap()).toEqual({ code: null, signal: "SIGKILL" });
+    }
+    expect(children.size).toBe(0);
+  });
+
+  test("prints no network warning for a loopback alias", async () => {
+    for (const host of ["127.1", "localhost."]) {
+      const server = serveCommand(["serve", dir, "--port", "0", "--host", host]);
+      let token = "";
+      try {
+        const { stdout, stderr } = await server.ready;
+        token = tokenUrl(stdout)?.token ?? "";
+        expect(token).not.toBe("");
+        expect(redact(stderr, token)).not.toContain("Anyone on the network");
+      } finally {
+        server.stop();
+      }
+      expect((await server.done).code).toBe(EXIT_OK);
     }
   });
 

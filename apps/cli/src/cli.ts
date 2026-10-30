@@ -883,7 +883,8 @@ async function serve(args: string[], options: Options, context: Context): Promis
       for (const url of tokenUrls(addresses, running.port, running.token)) {
         output.stdout(`  ${url}`);
       }
-      if (!loopbackHost(host ?? DEFAULT_HOST)) {
+      // The address bound, not the one given: 127.1 and localhost. resolve to loopback.
+      if (!loopbackHost(running.address)) {
         for (const line of NETWORK_WARNING) output.stderr(line);
       }
     }

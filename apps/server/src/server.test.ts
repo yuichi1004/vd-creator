@@ -44,8 +44,14 @@ test("listens on 127.0.0.1 without a token by default", async () => {
   running = await startServer({ projectDir: dir, provider: providers(), port: 0 });
   expect(running.url).toBe(`http://127.0.0.1:${running.port}/`);
   expect(running.token).toBeUndefined();
+  expect(running.address).toBe("127.0.0.1");
   const response = await fetch(new URL("api/project", running.url));
   expect(response.status).toBe(200);
+});
+
+test("reports the address a host name resolves to", async () => {
+  running = await startServer({ projectDir: dir, provider: providers(), port: 0, host: "127.1" });
+  expect(running.address).toBe("127.0.0.1");
 });
 
 test("without a host, refuses a Host header that is not allowed", async () => {
@@ -157,4 +163,7 @@ test("urlHost brackets IPv6 addresses and encodes a zone", () => {
   expect(urlHost("vd.example")).toBe("vd.example");
   expect(urlHost("fd00::20")).toBe("[fd00::20]");
   expect(urlHost("fe80::1%eth0")).toBe("[fe80::1%25eth0]");
+  // The zone is split at the first `%`, and reserved characters in it are encoded.
+  expect(urlHost("::1%a:b")).toBe("[::1%25a%3Ab]");
+  expect(urlHost("fe80::1%a%b/c")).toBe("[fe80::1%25a%25b%2Fc]");
 });

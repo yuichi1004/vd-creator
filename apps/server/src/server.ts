@@ -35,16 +35,22 @@ export type RunningServer = {
   /** The URL to open, with `?token=` when a token is needed. */
   url: string;
   port: number;
+  /** The address the server listens on, as resolved from `host`, such as 127.0.0.1 for 127.1. */
+  address: string;
   token?: string;
   close(): Promise<void>;
 };
 
 /**
  * `addr` as the host part of a URL: an IPv6 address in brackets, with the `%` of a zone, as in
- * `fe80::1%eth0`, encoded as `%25`.
+ * `fe80::1%eth0`, encoded as `%25` and the zone itself percent-encoded.
  */
 export function urlHost(addr: string): string {
-  return addr.includes(":") ? `[${addr.replaceAll("%", "%25")}]` : addr;
+  const at = addr.indexOf("%");
+  const address = at === -1 ? addr : addr.slice(0, at);
+  if (!address.includes(":")) return addr;
+  const zone = at === -1 ? "" : `%25${encodeURIComponent(addr.slice(at + 1))}`;
+  return `[${address}${zone}]`;
 }
 
 /**
@@ -88,11 +94,12 @@ export async function startServer(options: StartServerOptions): Promise<RunningS
     throw e;
   }
 
-  const port = (server.address() as AddressInfo).port;
+  const { port, address } = server.address() as AddressInfo;
   const query = token !== undefined ? `?${TOKEN_QUERY}=${token}` : "";
   const running: RunningServer = {
     url: `http://${urlHost(host)}:${port}/${query}`,
     port,
+    address,
     close: () =>
       new Promise<void>((resolve, reject) => {
         ending.abort();
