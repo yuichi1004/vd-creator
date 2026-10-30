@@ -13,7 +13,7 @@ The unit tests never call the real API. One extra test, `packages/providers/src/
 Two more are optional:
 
 - `VD_LIVE_ELEVENLABS_MODEL`: the TTS model. The default is `eleven_multilingual_v2`.
-- `VD_LIVE_ELEVENLABS_OUT`: a file path. The test saves the MP3 there so that you can listen to it. Its folder must exist and the file must not, so nothing is overwritten. The test checks both before the paid call. A relative path is resolved from `packages/providers`.
+- `VD_LIVE_ELEVENLABS_OUT`: a file path. The test saves the MP3 there so that you can listen to it. It must name a file, so it must not end in `/`. Its folder must exist and be writable, and nothing may be at the path yet, not even a symbolic link that points nowhere, so nothing is overwritten. The test checks all of this before the paid call. A relative path is resolved from `packages/providers`.
 
 ### What it calls
 
@@ -27,19 +27,27 @@ The same file has offline tests of those failure messages, which use a made-up k
 
 ### How to run it
 
-Run it by hand, from the repository root, after `scripts/setup.sh && npm run build`. Each example below stands alone. It reads the key with `read -rs`, so that the key is not echoed and does not land in your shell history, and it unsets the key at the end:
+Run it by hand, from the repository root, after `scripts/setup.sh && npm run build`. It takes two steps.
+
+First, enter the key. Run this line on its own, and wait for the prompt before you type or paste the key:
 
 ```sh
-read -rs ELEVENLABS_API_KEY && export ELEVENLABS_API_KEY
+read -rsp "ElevenLabs API key: " ELEVENLABS_API_KEY && echo && export ELEVENLABS_API_KEY
+```
+
+`read -rsp` shows the prompt and does not echo the key, so the key does not appear on the screen or land in your shell history. Do not paste this line together with the commands that follow it. If you do, `read` takes the next pasted line as the key, and the key you type afterwards runs as a command: it is echoed and saved in your shell history.
+
+Then run the test, and unset the key at the end:
+
+```sh
 VD_LIVE_ELEVENLABS=1 VD_LIVE_ELEVENLABS_VOICE=<voice-id> \
   npm test -w packages/providers -- src/elevenlabs/live.test.ts
 unset ELEVENLABS_API_KEY
 ```
 
-To check whether `eleven_v4` reads the audio tag, run it with that model, save the audio, and listen. The line should be whispered, and the word "whispers" should not be spoken. Pick a save path where no file exists yet:
+To check whether `eleven_v4` reads the audio tag, enter the key as in the first step, then run it with that model, save the audio, and listen. The line should be whispered, and the word "whispers" should not be spoken. Pick a save path in a writable folder where no file exists yet:
 
 ```sh
-read -rs ELEVENLABS_API_KEY && export ELEVENLABS_API_KEY
 VD_LIVE_ELEVENLABS=1 VD_LIVE_ELEVENLABS_VOICE=<voice-id> \
   VD_LIVE_ELEVENLABS_MODEL=eleven_v4 VD_LIVE_ELEVENLABS_OUT=/tmp/vd-live-v4.mp3 \
   npm test -w packages/providers -- src/elevenlabs/live.test.ts

@@ -9,9 +9,19 @@
 // at the end check that with a made-up key and voice ID.
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { lstatSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  accessSync,
+  chmodSync,
+  constants,
+  lstatSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { describe, expect, test } from "vitest";
 import type { AudioResult, TtsRequest } from "../types.js";
 import {
@@ -119,11 +129,20 @@ async function withSafeFailure(
   if (message !== undefined) throw new Error(message);
 }
 
-/** Fails, before any paid call, unless the folder exists and nothing is at the path yet. */
+/**
+ * Fails, before any paid call, unless the path names a file, its folder exists and is writable,
+ * and nothing is at the path yet.
+ */
 function checkSavePath(path: string): void {
-  if (!statSync(dirname(resolve(path))).isDirectory()) {
+  // resolve() drops a trailing slash, so check it first: "out/" names a folder, not a file.
+  if (path.endsWith("/") || path.endsWith(sep)) {
+    throw Object.assign(new Error("names a folder"), { code: "EISDIR" });
+  }
+  const folder = dirname(resolve(path));
+  if (!statSync(folder).isDirectory()) {
     throw Object.assign(new Error("not a folder"), { code: "ENOTDIR" });
   }
+  accessSync(folder, constants.W_OK);
   // lstat, so that a symbolic link counts as taken even when it points nowhere.
   if (lstatSync(path, { throwIfNoEntry: false }) !== undefined) {
     throw Object.assign(new Error("already exists"), { code: "EEXIST" });
@@ -255,10 +274,44 @@ describe("live test failure messages (offline)", () => {
       const exists = await failureOf(() => checkSavePath(taken), "check the save path");
       expect(exists.message).toBe("ElevenLabs live TTS failed at check the save path: EEXIST");
       expectNoSecrets(exists);
+
+      // A symbolic link that points nowhere still takes the path.
+      const dangling = join(dir, `${VOICE}-link.mp3`);
+      symlinkSync(join(dir, "nowhere", `${VOICE}.mp3`), dangling);
+      const linked = await failureOf(() => checkSavePath(dangling), "check the save path");
+      expect(linked.message).toBe("ElevenLabs live TTS failed at check the save path: EEXIST");
+      expectNoSecrets(linked);
+
+      const folder = await failureOf(
+        () => checkSavePath(`${dir}/${VOICE}/`),
+        "check the save path",
+      );
+      expect(folder.message).toBe("ElevenLabs live TTS failed at check the save path: EISDIR");
+      expectNoSecrets(folder);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // root can write to any folder, and Windows ignores these mode bits, so the check cannot fail.
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "rejects a save path in a folder that is not writable",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "vd-live-offline-"));
+      try {
+        chmodSync(dir, 0o500);
+        const error = await failureOf(
+          () => checkSavePath(join(dir, `${VOICE}.mp3`)),
+          "check the save path",
+        );
+        expect(error.message).toBe("ElevenLabs live TTS failed at check the save path: EACCES");
+        expectNoSecrets(error);
+      } finally {
+        chmodSync(dir, 0o700);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("drops the stderr, output, and arguments of a failed child process", async () => {
     const script = `process.stdout.write(${JSON.stringify(KEY)});process.stderr.write(${JSON.stringify(VOICE)});process.exit(3)`;
