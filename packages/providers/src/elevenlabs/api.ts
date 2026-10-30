@@ -92,18 +92,27 @@ export function readsAudioTags(modelId: string): boolean {
 }
 
 /**
+ * The words of a line's direction that go inside an audio tag. Square brackets would end the tag
+ * early or nest tags, so they are removed and the spaces around them collapsed. An empty string
+ * means there is no direction to send.
+ */
+export function audioTagWords(direction: string | undefined): string {
+  return (direction ?? "").replace(/[[\]]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+/**
  * The text sent for a line. Models that read inline audio tags get the stage direction as a
  * leading tag, such as "[whispers] ...". Other models get the text only.
  */
 export function ttsText(req: TtsRequest): string {
-  const direction = req.direction?.trim();
-  if (direction && readsAudioTags(ttsModelId(req))) return `[${direction}] ${req.text}`;
+  const words = audioTagWords(req.direction);
+  if (words && readsAudioTags(ttsModelId(req))) return `[${words}] ${req.text}`;
   return req.text;
 }
 
 /** True if the request has a direction that its model cannot read, so it is not sent. */
 export function dropsDirection(req: TtsRequest): boolean {
-  return Boolean(req.direction?.trim()) && !readsAudioTags(ttsModelId(req));
+  return audioTagWords(req.direction) !== "" && !readsAudioTags(ttsModelId(req));
 }
 
 /**

@@ -124,6 +124,27 @@ test.each(["eleven_v3", "eleven_v4"])(
   },
 );
 
+test.each([
+  ["whispers] please listen", "[whispers please listen] Hello."],
+  ["[whispers]", "[whispers] Hello."],
+  ["  [sighs]  [ softly ] ", "[sighs softly] Hello."],
+  ["[]", "Hello."],
+  ["] [ ][", "Hello."],
+])("TTS removes square brackets from the direction %j", async (direction, text) => {
+  const stub = stubFetch(() => audioResponse());
+  const tts = new ElevenLabsTtsProvider(options(stub.fetch));
+  const req = {
+    text: "Hello.",
+    voiceId: "v",
+    direction,
+    settings: { modelId: "eleven_v3" },
+    take: 0,
+  };
+  await tts.synthesize(req);
+  expect(bodyOf(stub.calls[0])).toEqual({ text, model_id: "eleven_v3" });
+  expect(tts.estimate(req)).toEqual({ characters: [...text].length, requests: 1 });
+});
+
 test("TTS sends the text only to a model that does not read audio tags", async () => {
   const stub = stubFetch(() => audioResponse());
   const tts = new ElevenLabsTtsProvider(options(stub.fetch));
@@ -158,6 +179,8 @@ test("dropsDirection is true only for a direction that the model does not read",
   expect(tts.dropsDirection(line("eleven_v4", "whispers"))).toBe(false);
   expect(tts.dropsDirection(line("eleven_multilingual_v2"))).toBe(false);
   expect(tts.dropsDirection(line("eleven_multilingual_v2", "  "))).toBe(false);
+  // A direction of only brackets has nothing to send, so nothing is dropped.
+  expect(tts.dropsDirection(line("eleven_multilingual_v2", "[ ]"))).toBe(false);
   // A request that throws as it is read gives false, not the error.
   const throwing = {
     ...line("eleven_multilingual_v2"),
