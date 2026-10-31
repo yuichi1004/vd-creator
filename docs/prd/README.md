@@ -92,4 +92,4 @@ What we believe without proof, and what could make this fail.
 
 | PRD | Title | Status |
 |---|---|---|
-| [P0001](P0001-product-baseline.md) | vd-creator product baseline | Draft |
+| [P0001](P0001-product-baseline.md) | vd-creator product baseline | In review |
