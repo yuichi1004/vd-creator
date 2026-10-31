@@ -13,10 +13,15 @@ describe("parseRoute", () => {
     expect(parseRoute("#/settings/")).toEqual(SETTINGS_ROUTE);
   });
 
+  test("a hash without the slash is accepted, a longer path is not", () => {
+    expect(parseRoute("#settings")).toEqual(SETTINGS_ROUTE);
+    expect(parseRoute("#/settings/extra")).toEqual(REVIEW_ROUTE);
+    expect(parseRoute("#settings/extra")).toEqual(REVIEW_ROUTE);
+  });
+
   test("unknown routes show the review screen", () => {
     expect(parseRoute("#/nope")).toEqual(REVIEW_ROUTE);
     expect(parseRoute("#/settings/extra")).toEqual(REVIEW_ROUTE);
-    expect(parseRoute("settings")).toEqual(REVIEW_ROUTE);
   });
 });
 

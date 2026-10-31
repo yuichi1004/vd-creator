@@ -1,5 +1,5 @@
 import type { ServerInfoResponse } from "@vd-creator/server";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ApiRequestError, UNKNOWN_ERROR_MESSAGE } from "../client.js";
 import {
   formatSpeed,
@@ -35,6 +35,12 @@ export function SettingsScreen({ settings, onChange, loadServer, onBack }: Props
     };
   }, [loadServer]);
 
+  // A route change gives no focus of its own, so the heading takes it when the screen opens.
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    heading.current?.focus();
+  }, []);
+
   const keepPitchAvailable = server?.preview.keepPitch !== false;
 
   return (
@@ -43,7 +49,9 @@ export function SettingsScreen({ settings, onChange, loadServer, onBack }: Props
         <button type="button" onClick={onBack}>
           <span aria-hidden="true">←</span> Back
         </button>
-        <h1>Settings</h1>
+        <h1 ref={heading} tabIndex={-1}>
+          Settings
+        </h1>
       </header>
 
       <section className="settings-section" aria-labelledby="settings-playback">
@@ -82,7 +90,7 @@ export function SettingsScreen({ settings, onChange, loadServer, onBack }: Props
             <input
               id="keep-pitch"
               type="checkbox"
-              checked={settings.keepPitch}
+              checked={keepPitchAvailable && settings.keepPitch}
               disabled={!keepPitchAvailable}
               aria-describedby="keep-pitch-note"
               onChange={(e) => onChange({ ...settings, keepPitch: e.target.checked })}

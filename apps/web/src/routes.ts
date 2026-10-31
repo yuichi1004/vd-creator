@@ -11,7 +11,7 @@ export const SETTINGS_ROUTE: Route = { name: "settings" };
 export function parseRoute(hash: string): Route {
   const path = hash.replace(/^#/, "").split("?")[0] ?? "";
   const trimmed = path.length > 1 ? path.replace(/\/+$/, "") : path;
-  return trimmed === "/settings" ? SETTINGS_ROUTE : REVIEW_ROUTE;
+  return trimmed === "/settings" || trimmed === "settings" ? SETTINGS_ROUTE : REVIEW_ROUTE;
 }
 
 /** The hash of a route, such as `#/settings`. */

@@ -94,8 +94,13 @@ export function App() {
       window.location.replace(buildHref(window.location.href, REVIEW_ROUTE));
     }
   }, []);
+  // Focus goes back to the gear button when settings closes (the screen focuses its own heading).
+  const settingsButton = useRef<HTMLButtonElement>(null);
+  const wasOnSettings = useRef(onSettings);
   useEffect(() => {
     if (!onSettings) pushedSettings.current = false;
+    if (wasOnSettings.current && !onSettings) settingsButton.current?.focus();
+    wasOnSettings.current = onSettings;
   }, [onSettings]);
 
   // Player state.
@@ -375,13 +380,31 @@ export function App() {
     [libraryTarget, patchItem, patchScene, generate],
   );
 
+  // The settings screen needs no project, so it opens even when the project fails to load.
+  const settingsPage = onSettings ? (
+    <div className={`app settings-page ${isPhone ? "phone" : "pc"}`}>
+      <SettingsScreen
+        settings={settings}
+        onChange={changeSettings}
+        loadServer={loadServer}
+        onBack={closeSettings}
+      />
+    </div>
+  ) : undefined;
+
   if (!project) {
+    if (onSettings) return <>{settingsPage}</>;
     return (
       <main className="app loading">
         <p role="status">{loadError ?? "Loading…"}</p>
         {loadError && (
           <button type="button" onClick={() => void reload()}>
             Retry
+          </button>
+        )}
+        {loadError && (
+          <button type="button" onClick={openSettings}>
+            Settings
           </button>
         )}
       </main>
@@ -431,16 +454,7 @@ export function App() {
 
   return (
     <>
-      {onSettings && (
-        <div className={`app settings-page ${isPhone ? "phone" : "pc"}`}>
-          <SettingsScreen
-            settings={settings}
-            onChange={changeSettings}
-            loadServer={loadServer}
-            onBack={closeSettings}
-          />
-        </div>
-      )}
+      {settingsPage}
       <div className={`app ${isPhone ? "phone" : "pc"}`} hidden={onSettings}>
         <header className="app-header">
           <h1>{scenario?.title ?? "vd-creator"}</h1>
@@ -465,7 +479,12 @@ export function App() {
             </button>
           )}
           {!isPhone && controls}
-          <button type="button" className="icon settings-button" onClick={openSettings}>
+          <button
+            ref={settingsButton}
+            type="button"
+            className="icon settings-button"
+            onClick={openSettings}
+          >
             <span aria-hidden="true">⚙</span>
             <span className="visually-hidden">Settings</span>
           </button>

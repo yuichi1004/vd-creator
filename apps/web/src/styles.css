@@ -695,7 +695,7 @@ select.speaker {
   font-variant-numeric: tabular-nums;
 }
 
-.speed-slider {
+input[type="range"].speed-slider {
   display: block;
   width: 100%;
   min-height: var(--touch);
