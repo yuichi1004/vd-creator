@@ -31,6 +31,14 @@ export function baseFields(base: TrialBase): LineFields {
   return fields;
 }
 
+/** The line fields as the base a client sends back with a trial or a restore. */
+export function viewBase(fields: LineFields): TrialBase {
+  const base: TrialBase = { speaker: fields.speaker, text: fields.line, take: fields.take };
+  if (fields.direction !== undefined) base.direction = fields.direction;
+  if (fields.voiceSettings !== undefined) base.voiceSettings = fields.voiceSettings;
+  return base;
+}
+
 /** The version as the take list shows it. */
 export function takeInfo(version: TakeVersion): TakeInfo {
   const { entry } = version;

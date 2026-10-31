@@ -3,6 +3,7 @@
 import type { AddressInfo } from "node:net";
 import { createAdaptorServer } from "@hono/node-server";
 import { type AssetResolver, reconcile } from "@vd-creator/core";
+import type { AgentOptions } from "./agent/command.js";
 import { type AppOptions, createApp, type ServerProviders } from "./app.js";
 import { createToken, TOKEN_QUERY } from "./token.js";
 import { ProjectWatcher, WatchError } from "./watcher.js";
@@ -29,6 +30,8 @@ export type StartServerOptions = {
   allowedHosts?: string[];
   /** Resolvers tried before the generated-item resolver, such as one for library items. */
   resolvers?: AssetResolver[];
+  /** The agent that answers instructions (`agent` in the user's config.yaml, plan 0013). */
+  agent?: AgentOptions;
 };
 
 export type RunningServer = {
@@ -79,6 +82,7 @@ export async function startServer(options: StartServerOptions): Promise<RunningS
   if (options.webDir !== undefined) appOptions.webDir = options.webDir;
   if (options.allowedHosts !== undefined) appOptions.allowedHosts = options.allowedHosts;
   if (options.resolvers !== undefined) appOptions.resolvers = options.resolvers;
+  if (options.agent !== undefined) appOptions.agent = options.agent;
   if (token !== undefined) appOptions.token = token;
   const app = createApp(appOptions);
   const server = createAdaptorServer({ fetch: app.fetch });

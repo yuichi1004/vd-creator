@@ -3,6 +3,7 @@
 export * from "./apply.js";
 export * from "./diff.js";
 export * from "./entry.js";
+export * from "./instruction.js";
 export * from "./lock.js";
 export * from "./log.js";
 export * from "./reconcile.js";

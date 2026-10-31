@@ -758,9 +758,9 @@ describe("entries", () => {
     expect(() => parseChangeEntry({ ...entry, source: "file" })).toThrow(ChangeLogError);
   });
 
-  test("the JSON Schema describes the six shapes of entry", () => {
+  test("the JSON Schema describes the eight shapes of entry", () => {
     const schema = changeEntryJsonSchema() as { oneOf: { properties: Record<string, unknown> }[] };
-    expect(schema.oneOf).toHaveLength(6);
+    expect(schema.oneOf).toHaveLength(8);
     expect(JSON.parse(JSON.stringify(schema))).toEqual(schema);
     const changes = schema.oneOf.map(
       (o) => (o.properties.change as { const: string } | undefined)?.const,

@@ -61,6 +61,9 @@ serve:
   host: 127.0.0.1                   # Same rules and warnings as --host in 0005
 init:
   publishUse: private               # Default publish.use for `vd init` (0007)
+agent:
+  command: claude                   # The agent that answers instructions in the review UI (0013)
+  timeoutSec: 120                   # 10 to 600, 120 if not set
 render:
   creditsTemplate: credits.template.txt   # Relative to the user dir
 ```
@@ -69,6 +72,31 @@ render:
 - `~` at the start of a path expands to the home directory. Relative paths are relative to the user directory.
 - Precedence: command-line flag, then environment variable, then `config.yaml`, then the built-in default. `vd config show` prints each effective value and where it came from.
 - There is no `provider` field. The provider stays `mock` unless a command names another, so that 0002's rule that an accidental run costs nothing holds. Adding such a field later needs a decision gate.
+
+### The `agent` key
+
+`vd serve` passes `agent` to the server, which then answers instructions with proposals ([plan 0013](0013-voice-retake-with-agent.md)). Without `agent.command`, the server has no agent, and the review UI offers no instruction field.
+
+- `command` takes only `claude`. `codex` is a config error with a fixed message, because `codex exec` has only sandbox modes and no way to turn off command execution, and an agent that answers an instruction must have no tools.
+- `timeoutSec` is a whole number from 10 to 600, 120 if not set. It needs `command`. A run that takes longer is ended and the UI shows a timeout.
+- There is no setting for the program path, the arguments, or the environment. The command is fixed, so a config file cannot make the server run anything else.
+- Environment variables and flags do not set `agent`: only `config.yaml` does.
+
+The server runs `claude` with these arguments, and nothing else:
+
+```
+claude -p --output-format json --tools "" --strict-mcp-config --mcp-config '{"mcpServers":{}}' --restricted --safe-mode --disable-slash-commands --no-session-persistence
+```
+
+- `-p --output-format json` prints one JSON envelope, whose `result` string is the agent's answer.
+- `--tools ""` turns off every built-in tool, so the agent can read and run nothing.
+- `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` allows no MCP server, even one configured elsewhere.
+- `--restricted --safe-mode` leave out user and project settings and hooks.
+- `--disable-slash-commands` leaves out skills and commands.
+- `--no-session-persistence` saves no session.
+- `--bare` is not used, because it would also drop the login.
+
+The prompt goes in through standard input, never in an argument. The run starts in a new empty temporary folder, in its own process group, and the folder is removed afterwards. At most 64 KB of output and 16 KB of error output are read, or the run fails. On cancel or timeout, the group gets SIGTERM, then SIGKILL after 5 seconds.
 
 ### Agent instructions and docs
 

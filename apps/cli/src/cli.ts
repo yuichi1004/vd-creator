@@ -948,6 +948,13 @@ async function serve(args: string[], options: Options, context: Context): Promis
   if (allowedHosts !== undefined) serverOptions.allowedHosts = allowedHosts;
   const library = libraryRoot(config);
   if (library !== undefined) serverOptions.library = library;
+  const agentCommand = config.settings["agent.command"].value;
+  if (agentCommand !== undefined) {
+    serverOptions.agent = {
+      command: agentCommand,
+      timeoutSec: config.settings["agent.timeoutSec"].value,
+    };
+  }
   // The server puts these before its generated-item resolver.
   serverOptions.resolvers = [libraryResolver(library)];
   if (webBuilt(context.webDir)) {

@@ -3,7 +3,12 @@
 import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appendEntries, recordReview } from "@vd-creator/core";
+import {
+  appendEntries,
+  recordInstruction,
+  recordInstructionOutcome,
+  recordReview,
+} from "@vd-creator/core";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { EXIT_FAILURE, EXIT_OK, EXIT_USAGE, run } from "./index.js";
 
@@ -54,6 +59,26 @@ describe("vd changes", () => {
     expect(result.stdout).toMatch(
       /^#1 \S+ file: item "s1-l1" edited line: "Once upon a time\.\.\." -> "Long ago\.\.\."$/,
     );
+  });
+
+  test("prints the instructions to the agent and what became of them", async () => {
+    await baseline();
+    await recordInstruction(dir, {
+      instructionId: "i1",
+      itemId: "s1-l1",
+      text: "Make it softer",
+    });
+    await recordInstructionOutcome(dir, "i1", "proposed");
+    await recordInstructionOutcome(dir, "i1", "discarded");
+    const result = await vd("changes", dir);
+    expect(result.code).toBe(EXIT_OK);
+    const lines = result.stdout.split("\n");
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toMatch(/item "s1-l1" instruction "i1" to the agent: "Make it softer"$/);
+    expect(lines[1]).toMatch(/item "s1-l1" instruction "i1" proposed$/);
+    expect(lines[2]).toMatch(/item "s1-l1" instruction "i1" discarded$/);
+    const json = JSON.parse((await vd("changes", dir, "--json")).stdout);
+    expect(JSON.stringify(json)).toContain("instruction-outcome");
   });
 
   test("lists entries since the last agent entry, even after a review entry", async () => {

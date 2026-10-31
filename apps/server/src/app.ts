@@ -1,5 +1,6 @@
 // The Hono app with the HTTP API of docs/plans/0005-review-ui.md, section "HTTP API".
 
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve as resolvePath } from "node:path";
@@ -13,13 +14,17 @@ import {
   computeTimeline,
   defaultResolvers,
   entriesSince,
+  findInstruction,
   findRestorable,
   type GeneratedItemResolver,
+  type InstructionOutcome,
   type LineEdit,
   lineCacheKey,
   lineFieldsOf,
   listTakes,
   mergeVoiceSettings,
+  type OutcomeOptions,
+  outcomesOf,
   type ProjectLicenseIssue,
   planGeneration,
   planTrial,
@@ -27,6 +32,8 @@ import {
   readEntries,
   readTakes,
   reconcileLocked,
+  recordInstruction,
+  recordInstructionOutcome,
   recordReview,
   recordUiChanges,
   runGeneration,
@@ -62,12 +69,19 @@ import {
 } from "@vd-creator/scenario";
 import { type Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
+import { parseAnswer, unwrapClaude } from "./agent/answer.js";
+import { type AgentOptions, launchOf } from "./agent/command.js";
+import { buildPrompt, lineContext } from "./agent/prompt.js";
+import { ProposalStore } from "./agent/proposals.js";
+import { runAgent } from "./agent/runner.js";
 import type {
   ApiError,
   ApiErrorCode,
   ApprovedCost,
+  CancelAgentResponse,
   ChangesResponse,
   ConfirmRequiredError,
+  DiscardProposalResponse,
   GenerateItemResult,
   GeneratePlanResponse,
   GenerateRequest,
@@ -76,6 +90,8 @@ import type {
   LibraryEntryInfo,
   LibraryResponse,
   ProjectResponse,
+  ProposalRequest,
+  ProposalResponse,
   ProviderInfo,
   ScenePatchRequest,
   ServerEventName,
@@ -99,7 +115,7 @@ import {
 } from "./preview.js";
 import { type MessageRoot, sanitizeMessage, sanitizeTarget } from "./sanitize.js";
 import { documentData, sceneIndex, updateSceneBgm } from "./scene-edit.js";
-import { baseFields, isPlainJson, takeInfo, UNAVAILABLE_MESSAGES } from "./takes.js";
+import { baseFields, isPlainJson, takeInfo, UNAVAILABLE_MESSAGES, viewBase } from "./takes.js";
 import { tokenCheck } from "./token.js";
 import type { ProjectEvents } from "./watcher.js";
 
@@ -139,6 +155,11 @@ export type AppOptions = {
   proposalReason?: (proposalId: string) => string | undefined;
   /** Hook for the agent (plan 0013): called after "Use this take" saved the line and logged it. */
   onTakeKept?: (kept: TakeKept) => void;
+  /**
+   * The agent that answers instructions (plan 0013), as `agent` in the user's config.yaml sets
+   * it. Without it, the proposal routes return 404.
+   */
+  agent?: AgentOptions;
 };
 
 /** What "Use this take" kept. `proposalId` and `reason` are those of a trial take. */
@@ -172,6 +193,8 @@ const MESSAGES: Record<ApiErrorCode, string> = {
   "not-found": "Not found",
   "confirm-required": "A paid provider needs confirm: true and the approved cost to generate",
   stale: "The line has changed since it was read, so nothing was changed",
+  busy: "The agent is working on another instruction",
+  timeout: "The agent did not answer in time",
   "server-error": "The server could not complete the request",
 };
 
@@ -180,12 +203,18 @@ const NOT_WEB = ["/api/", "/assets/", "/library-files/", "/preview/"];
 
 const PREVIEW_FAILED = "The preview could not be made";
 
+const AGENT_UNUSABLE = "The agent's answer could not be used";
+const AGENT_CANCELLED = "The agent run was cancelled";
+const INSTRUCTION_TOO_LONG = "The line and the instruction are too long to send to the agent";
+/** The longest instruction. */
+const MAX_INSTRUCTION = 1000;
+
 const PROJECT_UNREADABLE = "scenario.yaml cannot be read";
 const LIBRARY_UNREADABLE = "The library cannot be read; run vd library check";
 const LICENSES_UNCHECKED = "The licenses cannot be checked; run vd validate";
 const NOT_VERIFIED = "The entry was not verified; run vd library check";
 
-type Status = 400 | 401 | 404 | 409 | 500;
+type Status = 400 | 401 | 404 | 409 | 500 | 504;
 
 /** A failure whose response is fixed: thrown by handlers and answered by `onError`. */
 class HttpError extends Error {
@@ -216,6 +245,36 @@ export function createApp(options: AppOptions): Hono {
     const run = queue.then(task);
     queue = run.catch(() => {});
     return run;
+  };
+
+  // The agent (0013): the one run in progress, and the proposals it made, in memory only.
+  const agent = options.agent;
+  const proposals = new ProposalStore(agent?.now);
+  let agentRun: AbortController | undefined;
+
+  // Logs one outcome of an instruction, once. A log that cannot be written is reported without
+  // any request text, and never fails the request: the outcome is for the user's record.
+  async function logOutcome(
+    instructionId: string,
+    outcome: InstructionOutcome,
+    only: OutcomeOptions = {},
+  ): Promise<void> {
+    try {
+      await recordInstructionOutcome(projectDir, instructionId, outcome, only);
+    } catch (e) {
+      console.error(
+        "An instruction outcome could not be logged:",
+        e instanceof Error ? e.name : "?",
+      );
+    }
+  }
+
+  // The reason of a proposal for this line: from the hook, or from a proposal this server made.
+  const reasonOf = (proposalId: string, itemId: string): string | undefined => {
+    const hooked = options.proposalReason?.(proposalId);
+    if (hooked) return hooked;
+    const known = proposals.get(proposalId);
+    return known?.itemId === itemId ? known.reason : undefined;
   };
 
   const app = new Hono();
@@ -369,6 +428,7 @@ export function createApp(options: AppOptions): Hono {
       version: options.version ?? PACKAGE_VERSION,
       preview: { keepPitch: preview.keepPitch() },
     };
+    if (agent) response.agent = { command: agent.command };
     if (library !== undefined) {
       const lib = await readLibrary(library).catch(() => undefined);
       if (lib) response.library = { name: lib.meta.name };
@@ -384,7 +444,10 @@ export function createApp(options: AppOptions): Hono {
     else throw badRequest("since must be review, start, or an entry ID");
     const session = sessionOf(c);
     const response: ChangesResponse = {
-      entries: entriesSince(await readEntries(projectDir), point).map((e) => entryView(e, session)),
+      entries: entriesSince(await readEntries(projectDir), point).flatMap((e) => {
+        const view = entryView(e, session);
+        return view ? [view] : [];
+      }),
     };
     return c.json(response);
   });
@@ -498,6 +561,10 @@ export function createApp(options: AppOptions): Hono {
     });
     // After the edit is saved and logged, so a hook never hears of a restore that failed.
     if (kept) {
+      if (kept.proposalId !== undefined) {
+        proposals.delete(kept.proposalId);
+        await logOutcome(kept.proposalId, "kept", { itemId: kept.itemId });
+      }
       try {
         options.onTakeKept?.(kept);
       } catch (e) {
@@ -587,7 +654,7 @@ export function createApp(options: AppOptions): Hono {
       const run: TrialOptions = {};
       if (body.proposalId !== undefined) {
         run.proposalId = body.proposalId;
-        const reason = options.proposalReason?.(body.proposalId);
+        const reason = reasonOf(body.proposalId, id);
         if (reason) run.reason = reason.slice(0, MAX_REASON);
       }
       if (providerInfo.paid && body.approved) run.budget = body.approved;
@@ -620,7 +687,103 @@ export function createApp(options: AppOptions): Hono {
       };
       return c.json(error, 409);
     }
+    if ("trial" in outcome && body.proposalId !== undefined) {
+      await logOutcome(body.proposalId, "tried", { itemId: id, after: ["proposed"] });
+    }
     return c.json("plan" in outcome ? outcome.plan : outcome.trial);
+  });
+
+  // Asks the agent for a proposal. It writes nothing but the change log: scenario.yaml changes
+  // only when the user keeps a trial take made from the proposal.
+  app.post("/api/items/:id/proposals", async (c) => {
+    if (!agent) throw notFound();
+    const id = c.req.param("id");
+    const { instruction } = proposalRequest(await jsonBody(c));
+    // Checked and taken with no wait between, so two requests never both run.
+    if (agentRun) throw new HttpError(409, "busy");
+    const controller = new AbortController();
+    agentRun = controller;
+    try {
+      const { scenario, issues } = await loadScenario(projectDir).catch(() => {
+        throw new HttpError(500, "server-error", PROJECT_UNREADABLE);
+      });
+      if (!scenario) throw new ScenarioValidationError(issues);
+      const target = scenarioItems(scenario).find((i) => i.id === id);
+      if (!target) throw notFound();
+      if (target.kind !== "line") throw badRequest("proposals apply only to lines");
+      const fields = lineFieldsOf(scenario, id);
+      const context = lineContext(scenario, id);
+      if (!fields || !context) throw notFound();
+      const { merged, ...rest } = context;
+      const parameters = provider.tts.voiceParameters?.(merged) ?? [];
+      const prompt = buildPrompt({ ...rest, voiceParameters: parameters, instruction });
+      if (prompt === undefined) throw badRequest(INSTRUCTION_TOO_LONG);
+
+      // The ID of the instruction is the ID of its proposal.
+      const proposalId = randomUUID();
+      await recordInstruction(projectDir, {
+        instructionId: proposalId,
+        itemId: id,
+        text: instruction,
+      });
+      const result = await runAgent({
+        ...launchOf(agent),
+        prompt,
+        timeoutMs: agent.timeoutSec * 1000,
+        signal: controller.signal,
+        ...(agent.killGraceMs !== undefined ? { killGraceMs: agent.killGraceMs } : {}),
+      });
+      if (result.status === "cancelled") {
+        await logOutcome(proposalId, "cancelled");
+        throw new HttpError(500, "server-error", AGENT_CANCELLED);
+      }
+      if (result.status === "timeout") {
+        await logOutcome(proposalId, "failed");
+        throw new HttpError(504, "timeout");
+      }
+      const answer = result.status === "ok" ? unwrapClaude(result.stdout) : undefined;
+      const parsed = answer === undefined ? undefined : parseAnswer(answer, parameters);
+      if (!parsed?.ok) {
+        await logOutcome(proposalId, "failed");
+        throw new HttpError(500, "server-error", AGENT_UNUSABLE);
+      }
+      proposals.add(proposalId, id, parsed.proposal);
+      await logOutcome(proposalId, "proposed");
+      const response: ProposalResponse = {
+        proposal: { id: proposalId, ...parsed.proposal, base: viewBase(fields) },
+      };
+      return c.json(response);
+    } finally {
+      agentRun = undefined;
+    }
+  });
+
+  app.post("/api/agent-run/cancel", async (c) => {
+    if (!agent) throw notFound();
+    checkFields(await jsonBody(c), []);
+    const running = agentRun;
+    running?.abort();
+    const response: CancelAgentResponse = { cancelled: running !== undefined };
+    return c.json(response);
+  });
+
+  // The log says what became of the instruction, so a repeated discard changes nothing.
+  app.post("/api/proposals/:proposalId/discard", async (c) => {
+    if (!agent) throw notFound();
+    const proposalId = c.req.param("proposalId");
+    checkFields(await jsonBody(c), []);
+    const entries = await readEntries(projectDir);
+    if (
+      !IdSchema.safeParse(proposalId).success ||
+      !findInstruction(entries, proposalId) ||
+      !outcomesOf(entries, proposalId).includes("proposed")
+    ) {
+      throw notFound();
+    }
+    proposals.delete(proposalId);
+    await logOutcome(proposalId, "discarded", { unless: ["kept"] });
+    const response: DiscardProposalResponse = { discarded: true };
+    return c.json(response);
   });
 
   app.post("/api/generate", async (c) => {
@@ -936,6 +1099,16 @@ function itemPatch(body: unknown): ItemPatchRequest {
     patch.restore = { key: takeKey(restore.key), base: trialBase(restore.base) };
   }
   return patch;
+}
+
+/** The body of `POST /api/items/:id/proposals`. */
+function proposalRequest(body: unknown): ProposalRequest {
+  const record = checkFields(body, ["instruction"]);
+  const text = record.instruction;
+  if (typeof text !== "string" || text.trim() === "" || [...text].length > MAX_INSTRUCTION) {
+    throw badRequest(`instruction must be a string of 1 to ${MAX_INSTRUCTION} characters`);
+  }
+  return { instruction: text };
 }
 
 /** The body of `POST /api/items/:id/trials`. */

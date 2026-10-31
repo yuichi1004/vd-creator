@@ -2,7 +2,13 @@
 // the append and the snapshot. See "Finding file changes" in
 // docs/plans/0015-change-log-and-draft-audio.md.
 
-import type { ChangeEntry, ChangeFields, ChangeJsonValue, TargetChangeEntry } from "./entry.js";
+import {
+  type ChangeEntry,
+  type ChangeFields,
+  type ChangeJsonValue,
+  isTargetChange,
+  type TargetChangeEntry,
+} from "./entry.js";
 import type { ChangeSnapshot, SnapshotNode, SnapshotScene } from "./snapshot.js";
 
 /**
@@ -16,7 +22,7 @@ export function applyEntries(
   entries: readonly ChangeEntry[],
 ): ChangeSnapshot {
   const out = structuredClone(snapshot);
-  const changes = entries.filter((e): e is TargetChangeEntry => "target" in e);
+  const changes = entries.filter(isTargetChange);
 
   /**
    * The items of removed scenes. Their own entries may still move them to another scene, since

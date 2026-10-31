@@ -61,13 +61,74 @@ export type TargetChangeEntry = EntryBase & {
   session?: string;
 } & ChangeDetail;
 
+export const INSTRUCTION_OUTCOMES = [
+  "proposed",
+  "failed",
+  "cancelled",
+  "discarded",
+  "tried",
+  "kept",
+] as const;
+/** What became of an instruction to the agent (0013). */
+export type InstructionOutcome = (typeof INSTRUCTION_OUTCOMES)[number];
+
+/** The longest instruction text, as the server takes it. */
+export const INSTRUCTION_MAX_LENGTH = 1000;
+
+/**
+ * An instruction the user sent to the agent from the UI (0013). It does not change the target,
+ * so it never marks it as changed.
+ */
+export type InstructionEntry = EntryBase & {
+  source: "ui";
+  target: ChangeTarget;
+  change: "instruction";
+  /** Ties the outcomes to this entry. */
+  instructionId: string;
+  text: string;
+};
+
+/** What happened to an instruction. It never holds the agent's proposal. */
+export type InstructionOutcomeEntry = EntryBase & {
+  source: "ui";
+  target: ChangeTarget;
+  change: "instruction-outcome";
+  instructionId: string;
+  outcome: InstructionOutcome;
+};
+
 /** The reason an agent gave for its work. `refs` are the IDs of the entries it explains. */
 export type AgentEntry = EntryBase & { source: "agent"; reason: string; refs: number[] };
 
 /** The user marked everything up to here as reviewed. */
 export type ReviewEntry = EntryBase & { source: "review" };
 
-export type ChangeEntry = TargetChangeEntry | AgentEntry | ReviewEntry;
+export type ChangeEntry =
+  | TargetChangeEntry
+  | InstructionEntry
+  | InstructionOutcomeEntry
+  | AgentEntry
+  | ReviewEntry;
+
+/** An entry of the instruction kind, which records no change to the drama. */
+export type InstructionLogEntry = InstructionEntry | InstructionOutcomeEntry;
+
+/** True for the entries that record a change to the drama: `ui` and `file` entries. */
+export function isTargetChange(entry: ChangeEntry): entry is TargetChangeEntry {
+  return (
+    (entry.source === "ui" || entry.source === "file") &&
+    entry.change !== "instruction" &&
+    entry.change !== "instruction-outcome"
+  );
+}
+
+/** True for the entries of 0013 that record an instruction or its outcome. */
+export function isInstructionEntry(entry: ChangeEntry): entry is InstructionLogEntry {
+  return (
+    entry.source === "ui" &&
+    (entry.change === "instruction" || entry.change === "instruction-outcome")
+  );
+}
 
 type WithoutStamp<T> = T extends unknown ? Omit<T, "id" | "time"> : never;
 /** An entry before the log gives it its `id` and `time`. */
@@ -117,6 +178,19 @@ export function changeEntryJsonSchema(): Record<string, unknown> {
     additionalProperties: false,
   });
   const sources = ["ui", "file"];
+  // The entries of 0013: an instruction to the agent and what became of it. Always `ui`.
+  const instructionEntry = (change: Record<string, unknown>, need: string[]) => ({
+    type: "object",
+    properties: {
+      ...stamp,
+      source: { const: "ui" },
+      target: { $ref: "#/$defs/Target" },
+      instructionId: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9_-]*$" },
+      ...change,
+    },
+    required: ["id", "time", "source", "target", "change", "instructionId", ...need],
+    additionalProperties: false,
+  });
   return {
     $schema: "https://json-schema.org/draft/2020-12/schema",
     title: "vd-creator change log entry",
@@ -158,6 +232,17 @@ export function changeEntryJsonSchema(): Record<string, unknown> {
           new: jsonValue,
         },
         ["change", "field"],
+      ),
+      instructionEntry(
+        {
+          change: { const: "instruction" },
+          text: { type: "string", minLength: 1, maxLength: INSTRUCTION_MAX_LENGTH },
+        },
+        ["text"],
+      ),
+      instructionEntry(
+        { change: { const: "instruction-outcome" }, outcome: { enum: [...INSTRUCTION_OUTCOMES] } },
+        ["outcome"],
       ),
       {
         type: "object",
@@ -234,6 +319,41 @@ export function parseChangeEntry(value: unknown): ChangeEntry {
       throw bad("refs must be a list of entry IDs");
     }
     return value as AgentEntry;
+  }
+  if (entry.change === "instruction" || entry.change === "instruction-outcome") {
+    if (source !== "ui") throw bad("only a ui entry records an instruction");
+    const isInstruction = entry.change === "instruction";
+    noExtra(entry, [
+      ...allowed,
+      "target",
+      "change",
+      "instructionId",
+      isInstruction ? "text" : "outcome",
+    ]);
+    const target = object(entry.target, "target");
+    noExtra(target, ["kind", "id"]);
+    if (!(CHANGE_TARGET_KINDS as readonly string[]).includes(target.kind as string)) {
+      throw bad("target.kind is not a known kind");
+    }
+    if (typeof target.id !== "string" || target.id === "") throw bad("target.id must be a text");
+    if (
+      typeof entry.instructionId !== "string" ||
+      !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(entry.instructionId)
+    ) {
+      throw bad("instructionId must be an ID");
+    }
+    if (isInstruction) {
+      if (
+        typeof entry.text !== "string" ||
+        entry.text.trim() === "" ||
+        [...entry.text].length > INSTRUCTION_MAX_LENGTH
+      ) {
+        throw bad(`text must be a text of 1 to ${INSTRUCTION_MAX_LENGTH} characters`);
+      }
+    } else if (!(INSTRUCTION_OUTCOMES as readonly string[]).includes(entry.outcome as string)) {
+      throw bad("outcome is not a known outcome");
+    }
+    return value as InstructionLogEntry;
   }
   noExtra(entry, [
     ...allowed,

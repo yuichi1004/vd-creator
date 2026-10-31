@@ -1,15 +1,22 @@
 // Which targets changed since the user last reviewed. See "Marks in the UI" in
 // docs/plans/0015-change-log-and-draft-audio.md.
 
-import type { ChangeEntry, ChangeTarget } from "@vd-creator/core";
+import {
+  type ChangeEntry,
+  type ChangeTarget,
+  isInstructionEntry,
+  isTargetChange,
+} from "@vd-creator/core";
 import type { ChangedTarget, ChangeEntryView } from "./api.js";
 
 /**
  * An entry as a client sees it. The stored session ID is never sent, since another client could
  * copy it into `X-VD-Session` to hide its changes from a page. `own: true` marks a `ui` entry
- * made by the requester's own session.
+ * made by the requester's own session. The entries of instructions to the agent are not sent:
+ * they record no change to the drama, and the page does not show them.
  */
-export function entryView(entry: ChangeEntry, session?: string): ChangeEntryView {
+export function entryView(entry: ChangeEntry, session?: string): ChangeEntryView | undefined {
+  if (isInstructionEntry(entry)) return undefined;
   if (entry.source !== "ui") return entry;
   const { session: stored, ...rest } = entry;
   return session !== undefined && stored === session ? { ...rest, own: true } : rest;
@@ -35,7 +42,7 @@ export function changedSinceReview(
   };
   const byId = new Map(entries.map((e) => [e.id, e]));
   for (const entry of entries) {
-    if (entry.id <= reviewId) continue;
+    if (entry.id <= reviewId || isInstructionEntry(entry)) continue;
     const own = entry.source === "ui" && session !== undefined && entry.session === session;
     if (entry.source === "file" || (entry.source === "ui" && !own)) {
       mark(entry.target);
@@ -43,7 +50,8 @@ export function changedSinceReview(
       // A reason recorded after the review shows the changes it explains, however old.
       for (const ref of entry.refs) {
         const explained = byId.get(ref);
-        if (explained && explained.id <= reviewId && "target" in explained) mark(explained.target);
+        if (explained && explained.id <= reviewId && isTargetChange(explained))
+          mark(explained.target);
       }
     }
   }

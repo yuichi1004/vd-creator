@@ -186,6 +186,12 @@ export function formatEntry(entry: ChangeEntry): string {
     return `${head}: ${show(entry.reason)}${refs}`;
   }
   const target = `${entry.target.kind} ${JSON.stringify(entry.target.id)}`;
+  if (entry.change === "instruction") {
+    return `${head}: ${target} instruction ${JSON.stringify(entry.instructionId)} to the agent: ${show(entry.text)}`;
+  }
+  if (entry.change === "instruction-outcome") {
+    return `${head}: ${target} instruction ${JSON.stringify(entry.instructionId)} ${entry.outcome}`;
+  }
   let change: string;
   switch (entry.change) {
     case "added":

@@ -1,3 +1,4 @@
+export { type AgentOptions, CLAUDE_ARGS } from "./agent/command.js";
 export type * from "./api.js";
 export { type AppOptions, createApp, KEEP_ALIVE_MS, type ServerProviders } from "./app.js";
 export { hostAllowed, hostName, LOOPBACK_HOSTS } from "./hosts.js";

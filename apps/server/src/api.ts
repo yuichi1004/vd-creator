@@ -7,6 +7,7 @@ import type {
   ChangeEntry,
   ChangeTargetKind,
   GenerationPlan,
+  InstructionLogEntry,
   ProjectLicenseIssue,
   ScenarioItemKind,
   Timeline,
@@ -35,6 +36,8 @@ export type ServerInfoResponse = {
   provider: ProviderInfo;
   /** The library's name from its library.yaml. Absent when no library is set or it is unreadable. */
   library?: { name: string };
+  /** The agent that answers instructions (0013). Absent when none is set, so the UI hides its box. */
+  agent?: { command: AgentCommand };
   /** The vd version. */
   version: string;
   preview: {
@@ -70,11 +73,12 @@ export type ChangedTarget = { kind: ChangeTargetKind; id: string; count: number 
  * entry has `own`. The page makes its session ID random, at least 128 bits, so no one else
  * learns it.
  */
-export type ChangeEntryView = ChangeEntry extends infer E
-  ? E extends { session?: string }
-    ? Omit<E, "session"> & { own?: true }
-    : E
-  : never;
+export type ChangeEntryView =
+  Exclude<ChangeEntry, InstructionLogEntry> extends infer E
+    ? E extends { session?: string }
+      ? Omit<E, "session"> & { own?: true }
+      : E
+    : never;
 
 /** Response of `GET /api/changes`: the entries after the point, oldest first. */
 export type ChangesResponse = { entries: ChangeEntryView[] };
@@ -171,6 +175,34 @@ export type TrialRequest = {
   confirm?: boolean;
   approved?: ApprovedCost;
 };
+
+/** The agents the server can run. Only `claude` has a way to run with no tools (0013). */
+export type AgentCommand = "claude";
+
+/** Body of `POST /api/items/:id/proposals`: what the user wants changed, up to 1,000 characters. */
+export type ProposalRequest = { instruction: string };
+
+/**
+ * What the agent proposes for a line. `base` is the line as the proposal was made from; send it
+ * back with the trial. `settings` holds only parameters of the provider, inside their ranges.
+ */
+export type ProposalView = {
+  id: string;
+  text?: string;
+  direction?: string;
+  settings?: Record<string, number | boolean>;
+  reason: string;
+  base: TrialBase;
+};
+
+/** The 200 response of `POST /api/items/:id/proposals`. */
+export type ProposalResponse = { proposal: ProposalView };
+
+/** The 200 response of `POST /api/agent-run/cancel`: whether a run was in progress. */
+export type CancelAgentResponse = { cancelled: boolean };
+
+/** The 200 response of `POST /api/proposals/:proposalId/discard`. */
+export type DiscardProposalResponse = { discarded: true };
 
 /** The 200 response of a trial that generated. */
 export type TrialResponse = {
@@ -383,6 +415,10 @@ export type ApiErrorCode =
   | "not-found"
   | "confirm-required"
   | "stale"
+  /** 409: another agent run is in progress (0013). */
+  | "busy"
+  /** 504: the agent did not answer in time (0013). */
+  | "timeout"
   | "server-error";
 
 /**

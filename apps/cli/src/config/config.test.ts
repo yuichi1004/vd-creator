@@ -184,6 +184,8 @@ describe("precedence", () => {
       "serve.port": { value: 5310, source: "default" },
       "serve.host": { value: "127.0.0.1", source: "default" },
       "init.publishUse": { value: "private", source: "default" },
+      "agent.command": { value: undefined, source: "default" },
+      "agent.timeoutSec": { value: 120, source: "default" },
       "render.creditsTemplate": { value: undefined, source: "default" },
     });
   });
@@ -191,7 +193,7 @@ describe("precedence", () => {
   test("vd config show prints each value and where it came from", async () => {
     await writeConfig(
       userDir,
-      "version: 1\nserve:\n  port: 8080\ninit:\n  publishUse: commercial\nrender:\n  creditsTemplate: credits.txt\n",
+      "version: 1\nserve:\n  port: 8080\ninit:\n  publishUse: commercial\nagent:\n  command: claude\n  timeoutSec: 60\nrender:\n  creditsTemplate: credits.txt\n",
     );
     const env = envWith({ VD_USER_DIR: userDir, VD_LIBRARY: "~/sounds" });
     const result = await vd(env, "config", "show");
@@ -205,6 +207,8 @@ describe("precedence", () => {
         "serve.port: 8080 (config.yaml)",
         "serve.host: 127.0.0.1 (default)",
         "init.publishUse: commercial (config.yaml)",
+        "agent.command: claude (config.yaml)",
+        "agent.timeoutSec: 60 (config.yaml)",
         `render.creditsTemplate: ${join(userDir, "credits.txt")} (config.yaml)`,
       ].join("\n"),
     });
@@ -218,6 +222,8 @@ describe("precedence", () => {
         "serve.port": { value: 8080, source: "file" },
         "serve.host": { value: "127.0.0.1", source: "default" },
         "init.publishUse": { value: "commercial", source: "file" },
+        "agent.command": { value: "claude", source: "file" },
+        "agent.timeoutSec": { value: 60, source: "file" },
         "render.creditsTemplate": { value: join(userDir, "credits.txt"), source: "file" },
       },
     });
@@ -305,6 +311,8 @@ describe("config.yaml schema", () => {
 
   const PATH_RULE = "must be a path on one line of printable characters, at most 4096 long";
   const HOST_RULE = "must be a host name or an IPv4 or IPv6 address";
+  const AGENT_RULE =
+    "must be one of claude (codex is not supported: it cannot run without command execution)";
   const PUBLISH_RULE = "must be one of private, non-commercial, commercial";
   // Each string field, how to place a value in it, and the problem it gives.
   const STRING_FIELDS: [string, (value: string) => string, string][] = [
@@ -314,6 +322,11 @@ describe("config.yaml schema", () => {
       "init.publishUse",
       (v) => `version: 1\ninit:\n  publishUse: ${v}\n`,
       `init.publishUse: ${PUBLISH_RULE}`,
+    ],
+    [
+      "agent.command",
+      (v) => `version: 1\nagent:\n  command: ${v}\n`,
+      `agent.command: ${AGENT_RULE}`,
     ],
     [
       "render.creditsTemplate",
@@ -513,8 +526,44 @@ describe("config.yaml schema", () => {
       library: "~/sounds/vd-library",
       serve: { port: 5310, host: "127.0.0.1" },
       init: { publishUse: "private" },
+      agent: { command: "claude", timeoutSec: 120 },
       render: { creditsTemplate: "credits.template.txt" },
     });
+  });
+});
+
+describe("the agent settings", () => {
+  const read = (yaml: string) => parseUserConfig(`version: 1\n${yaml}`, "config.yaml");
+  const problemsOf = (yaml: string): string[] => {
+    try {
+      read(yaml);
+    } catch (e) {
+      return (e as ConfigError).problems;
+    }
+    return [];
+  };
+  const AGENT_RULE =
+    "must be one of claude (codex is not supported: it cannot run without command execution)";
+
+  test("accept claude and a timeout from 10 to 600 seconds", () => {
+    expect(read("agent:\n  command: claude\n").agent).toEqual({ command: "claude" });
+    for (const timeoutSec of [10, 120, 600]) {
+      expect(read(`agent:\n  command: claude\n  timeoutSec: ${timeoutSec}\n`).agent).toEqual({
+        command: "claude",
+        timeoutSec,
+      });
+    }
+  });
+
+  test("refuse codex with a clear message, and a timeout out of range", () => {
+    expect(problemsOf("agent:\n  command: codex\n")).toEqual([`agent.command: ${AGENT_RULE}`]);
+    for (const bad of ["9", "601", "1.5", "abc"]) {
+      expect(problemsOf(`agent:\n  command: claude\n  timeoutSec: ${bad}\n`)).toEqual([
+        "agent.timeoutSec: must be a whole number from 10 to 600",
+      ]);
+    }
+    // The timeout means nothing without a command.
+    expect(problemsOf("agent:\n  timeoutSec: 60\n")).toEqual([`agent.command: ${AGENT_RULE}`]);
   });
 });
 

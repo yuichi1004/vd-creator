@@ -29,6 +29,15 @@ export const PathSchema = z.string().min(1).max(MAX_PATH_LENGTH).regex(PRINTABLE
 /** A host name or an IPv4 or IPv6 address, without brackets, a port, or a zone. */
 export const HostSchema = z.union([z.string().regex(HOST_NAME), z.ipv6()]);
 
+/** The agents that can answer instructions. codex is not one: see docs/plans/0008-user-config.md. */
+export const AGENT_COMMANDS = ["claude"] as const;
+export type AgentCommand = (typeof AGENT_COMMANDS)[number];
+
+/** The seconds an agent may take for one answer. */
+export const AGENT_TIMEOUT_MIN = 10;
+export const AGENT_TIMEOUT_MAX = 600;
+export const AGENT_TIMEOUT_DEFAULT = 120;
+
 /** A TCP port. */
 export const PortSchema = z.number().int().min(1).max(65535);
 
@@ -50,6 +59,18 @@ export const UserConfigSchema = z.strictObject({
   init: z
     .strictObject({
       publishUse: z.enum(PUBLISH_USES).optional().describe("Default publish.use for vd init."),
+    })
+    .optional(),
+  agent: z
+    .strictObject({
+      command: z.enum(AGENT_COMMANDS).describe("The agent command that answers instructions."),
+      timeoutSec: z
+        .number()
+        .int()
+        .min(AGENT_TIMEOUT_MIN)
+        .max(AGENT_TIMEOUT_MAX)
+        .optional()
+        .describe("Seconds the agent may take for one answer."),
     })
     .optional(),
   render: z

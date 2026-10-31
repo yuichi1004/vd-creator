@@ -8,6 +8,7 @@ import { diffSnapshots } from "./diff.js";
 import {
   type AgentEntry,
   ChangeLogError,
+  isTargetChange,
   REASON_MAX_LENGTH,
   type ReviewEntry,
   type TargetChangeEntry,
@@ -158,7 +159,7 @@ export async function recordAgent(
       const refs = entries
         .filter((e) => e.source === "file" && !explained.has(e.id))
         .filter(
-          (e) => !only || ("target" in e && e.target.kind === "item" && only.has(e.target.id)),
+          (e) => !only || (isTargetChange(e) && e.target.kind === "item" && only.has(e.target.id)),
         )
         .map((e) => e.id);
       const [entry] = await appendEntries(

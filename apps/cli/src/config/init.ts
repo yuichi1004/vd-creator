@@ -34,6 +34,12 @@ version: 1
 # init:
 #   publishUse: private
 
+# The agent that answers instructions in the review UI (vd serve). Only claude is supported.
+# It runs with no tools. timeoutSec is 10 to 600 seconds, 120 if not set.
+# agent:
+#   command: claude
+#   timeoutSec: 120
+
 # Credits template for vd render, relative to this folder.
 # render:
 #   creditsTemplate: credits.template.txt

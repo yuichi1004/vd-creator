@@ -14,6 +14,11 @@ import {
   type UserDirLocation,
 } from "./location.js";
 import {
+  AGENT_COMMANDS,
+  AGENT_TIMEOUT_DEFAULT,
+  AGENT_TIMEOUT_MAX,
+  AGENT_TIMEOUT_MIN,
+  type AgentCommand,
   CONFIG_FILE,
   HostSchema,
   MAX_PATH_LENGTH,
@@ -29,6 +34,8 @@ export const SETTINGS = [
   "serve.port",
   "serve.host",
   "init.publishUse",
+  "agent.command",
+  "agent.timeoutSec",
   "render.creditsTemplate",
 ] as const;
 
@@ -41,6 +48,9 @@ export type ConfigValues = {
   "serve.port": number;
   "serve.host": string;
   "init.publishUse": PublishUse;
+  /** The agent that answers instructions. Undefined means there is no agent. */
+  "agent.command": AgentCommand | undefined;
+  "agent.timeoutSec": number;
   /** The credits template file. Undefined means render's built-in template. */
   "render.creditsTemplate": string | undefined;
 };
@@ -51,6 +61,8 @@ export const CONFIG_DEFAULTS: ConfigValues = {
   "serve.port": 5310,
   "serve.host": "127.0.0.1",
   "init.publishUse": "private",
+  "agent.command": undefined,
+  "agent.timeoutSec": AGENT_TIMEOUT_DEFAULT,
   "render.creditsTemplate": undefined,
 };
 
@@ -155,6 +167,12 @@ const KEY_RULES: ReadonlyMap<string, string> = new Map([
   ["serve.host", "must be a host name or an IPv4 or IPv6 address"],
   ["init", "must be a mapping"],
   ["init.publishUse", `must be one of ${PUBLISH_USES.join(", ")}`],
+  ["agent", "must be a mapping"],
+  [
+    "agent.command",
+    `must be one of ${AGENT_COMMANDS.join(", ")} (codex is not supported: it cannot run without command execution)`,
+  ],
+  ["agent.timeoutSec", `must be a whole number from ${AGENT_TIMEOUT_MIN} to ${AGENT_TIMEOUT_MAX}`],
   ["render", "must be a mapping"],
   ["render.creditsTemplate", PATH_RULE],
 ]);
@@ -165,6 +183,8 @@ const SETTING_SCHEMAS: ReadonlyMap<SettingName, z.ZodType> = new Map<SettingName
   ["serve.port", PortSchema],
   ["serve.host", HostSchema],
   ["init.publishUse", z.enum(PUBLISH_USES)],
+  ["agent.command", z.enum(AGENT_COMMANDS)],
+  ["agent.timeoutSec", z.number().int().min(AGENT_TIMEOUT_MIN).max(AGENT_TIMEOUT_MAX)],
   ["render.creditsTemplate", PathSchema],
 ]);
 
@@ -340,6 +360,8 @@ function fileValues(config: UserConfig): ConfigFlags {
     "serve.port": config.serve?.port,
     "serve.host": config.serve?.host,
     "init.publishUse": config.init?.publishUse,
+    "agent.command": config.agent?.command,
+    "agent.timeoutSec": config.agent?.timeoutSec,
     "render.creditsTemplate": config.render?.creditsTemplate,
   };
 }
