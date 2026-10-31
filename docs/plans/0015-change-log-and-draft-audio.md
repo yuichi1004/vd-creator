@@ -1,6 +1,6 @@
 # 0015: Change log, agent changes, and draft audio
 
-- Status: Draft
+- Status: In progress
 - Date: 2026-10-31
 - PRD: [P0001](../prd/P0001-product-baseline.md), R38, R39, R13, R36
 - Depends on: [0003](0003-scenario-format.md), [0005](0005-review-ui.md), [0006](0006-rendering.md)

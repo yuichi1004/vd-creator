@@ -215,3 +215,5 @@ A UI feature that would need several steps of judgment is a sign the work belong
 None.
 
 ## Change log
+
+- 2026-10-31: R39's "since their last visit" means until the user marks the changes reviewed, shared by all their devices, so marks survive a reload and a switch between phone and PC. Decided with the approval of plan 0015.
