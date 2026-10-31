@@ -1,8 +1,12 @@
 # Product requirements
 
-This directory holds product requirements documents (PRDs) for vd-creator. A PRD says who a feature is for, what it lets them do, and how we will know it worked. It says nothing about how it is built; that is the job of a [plan](../plans/). The workflow is described in [plan 0014](../plans/0014-product-requirements-workflow.md), which is a draft and being tried on [P0001](#index).
+This directory holds product requirements documents (PRDs) for vd-creator. A PRD says who a feature is for, what it lets them do, and how we will know it worked. It says nothing about how it is built; that is the job of a [plan](../plans/). The workflow is described in [plan 0014](../plans/0014-product-requirements-workflow.md), which was tried first on [P0001](#index).
 
 PRDs follow the repository rules: English, and no content from a user directory, a user's own drafts, or their paths. A persona describes a kind of user, never a real person.
+
+## When a PRD is needed
+
+New user-facing work needs an Approved PRD before its plan is written. The short path skips the PRD for bug fixes, follow-ups from reviews, refactors, test and tooling work, and docs fixes; such a plan says `- PRD: none (short path: <reason>)`. When in doubt, the coordinator asks the human. A change of scope after approval goes back to the PRD first, with a line in its change log.
 
 ## Naming
 

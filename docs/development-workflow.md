@@ -4,6 +4,19 @@ This guide explains how to run one plan through Orca orchestration, step by step
 
 Commands use `orca` as the executable name. Replace it with the Orca CLI on your machine. On Linux, outside an Orca terminal, a bare `orca` may launch the GNOME screen reader instead. Run `orca <command> --help` for every flag, and prefer `--json` when an agent reads the output.
 
+## Product step
+
+New user-facing work starts with a PRD, not a plan. The full process is in [plan 0014](plans/0014-product-requirements-workflow.md); in short:
+
+1. **Intake and discovery.** The coordinator writes the request into a PRD stub in [`docs/prd/`](prd/). A PM agent reads the code and asks the human 3 to 6 questions, each with a short name, options, and a recommended answer, through the coordinator: with `orca orchestration ask` in a Run, or in its report when it runs as a subagent.
+2. **Draft.** The PM writes the PRD from the [template](prd/README.md#template). For a product that exists in part, the "Today" column marks each requirement Built, Partial, or Missing.
+3. **Review.** In parallel: a table read by each persona in [personas.md](prd/personas.md), a pre-mortem, a feasibility check against the code, and, for new screens, a clickable mockup. Each reviewer writes `docs/prd/reviews/PNNNN/<role>.md`. Reviewers that only read and write one file each may run as subagents without a Run; their questions come back in their reports.
+4. **Review card.** The coordinator publishes one private page: the pitch; the mockup link, if there is a mockup; each decision with a short name, the coordinator's recommendation, and the reason behind it; one line per persona; and the top risks.
+5. **Revise and approve.** The PM answers every finding, at most two rounds. Only the human sets `Approved`.
+6. **Plan and traceability.** The plan names its PRD and each task its requirement IDs. A reviewer reports Must requirements that no task builds, tasks that serve no requirement, and non-goals the plan builds anyway, before the plan's own review.
+
+Short-path work, such as bug fixes, review follow-ups, refactors, test and tooling work, and docs fixes, skips this step.
+
 ## Before you start
 
 - Run the coordinator as a Claude Code session inside an **Orca terminal** on the main checkout, on branch `main`. Orchestration inbox commands identify the caller by its Orca session.

@@ -20,6 +20,7 @@ Numbers are never reused, even if a plan is dropped.
 
 - Status: Draft | Accepted | In progress | Done | Superseded by NNNN
 - Date: YYYY-MM-DD
+- PRD: [PNNNN](../prd/PNNNN-short-title.md), R1, R4 | none (short path: <reason>)
 
 ## Background
 
@@ -36,6 +37,7 @@ The proposed approach.
 ## Tasks
 
 - [ ] Short task name
+  - Requirements: the PRD requirement IDs this task builds, or "none" on the short path.
   - Target: files, modules, or components in scope.
   - Change: the concrete result to produce.
   - Constraints: invariants, compatibility rules, and boundaries not to touch.
@@ -48,6 +50,8 @@ Decisions that still need to be made.
 ```
 
 Each task must be self-contained: an agent working on it sees only the task, not the discussion behind it. See [0001](0001-agent-development-workflow.md) for how tasks become Orca orchestration Tasks.
+
+A plan for new user-facing work is written only after its PRD is Approved; see [`docs/prd/`](../prd/) and [plan 0014](0014-product-requirements-workflow.md). Bug fixes, review follow-ups, refactors, test and tooling work, and docs fixes take the short path and have no PRD.
 
 ## Index
 
@@ -66,5 +70,5 @@ Each task must be self-contained: an agent working on it sees only the task, not
 | [0011](0011-project-picker.md) | Several projects in one server | Draft |
 | [0012](0012-library-screen.md) | Library screen | Draft |
 | [0013](0013-voice-retake-with-agent.md) | Voice retakes with an agent | Accepted |
-| [0014](0014-product-requirements-workflow.md) | Product requirements before plans | Draft |
+| [0014](0014-product-requirements-workflow.md) | Product requirements before plans | Done |
 | [0015](0015-change-log-and-draft-audio.md) | Change log, agent changes, and draft audio | In progress |

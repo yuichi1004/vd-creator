@@ -9,6 +9,7 @@ vd-creator is a local web app for making voice dramas with generative AI voice t
 ## Rules
 
 - **Use English** for code, comments, commit messages, and documentation.
+- **Product requirements come before plans.** New user-facing work needs an Approved PRD in [`docs/prd/`](docs/prd/) before its plan is written, and the plan traces its tasks to the PRD's requirements. Bug fixes, review follow-ups, refactors, test and tooling work, and docs fixes take the short path, with no PRD; when in doubt, ask the user. Only the user approves a PRD. See [plan 0014](docs/plans/0014-product-requirements-workflow.md).
 - **Plans go in [`docs/plans/`](docs/plans/).** Follow the naming and template described there, and add each new plan to the index.
 - **Keep machine-specific config out of the repo.** Do not commit API keys, `.env` files, absolute paths from a personal machine, or local editor and agent settings. Put local-only agent settings in gitignored files, such as `.claude/settings.local.json` for Claude Code.
 - **Write scenarios following the [scenario format guide](docs/scenario-format.md).** Read it before you write or edit a `scenario.yaml`, and validate the result.

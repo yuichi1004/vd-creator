@@ -1,6 +1,6 @@
 # 0014: Product requirements before plans
 
-- Status: Draft
+- Status: Done
 - Date: 2026-10-31
 - Depends on: [0001](0001-agent-development-workflow.md)
 
@@ -16,10 +16,10 @@ Goals:
 
 - A PRD template for this repository, and a place for PRDs.
 - A product manager (PM) role, played by an agent, that turns a request into a PRD by asking the human about intent rather than guessing.
-- A PRD review that is easy for the human: short to read, answered mostly by choosing, and tried on a phone through a clickable mockup.
+- A PRD review that is easy for the human: short to read, answered mostly by choosing, and, for new screens, tried on a phone through a clickable mockup.
 - Reviews that take the user's point of view: persona walkthroughs and a pre-mortem, not only a technical review.
 - Traceability from each requirement to the plan tasks that build it.
-- The whole flow run with Orca orchestration, within the existing worker, reviewer, and decision-gate rules of 0001.
+- The whole flow run with Orca orchestration where workers need it, within the existing worker, reviewer, and decision-gate rules of 0001.
 
 Non-goals:
 
@@ -37,7 +37,7 @@ Request ──▶ PRD (what and why) ──▶ Plan (how) ──▶ Tasks ──
             approves               human approves reviewers
 ```
 
-- No plan for new user-facing work is written until its PRD is Approved. A plan names its PRD in its header (`- PRD: [P0003](../prd/P0003-....md)`), and each task names the requirement IDs it builds (`- Requirements: R1, R4`).
+- No plan for new user-facing work is written until its PRD is Approved. A plan names its PRD in its header, with the requirement IDs it builds (`- PRD: [P0003](../prd/P0003-....md), R1, R4`), and each task names the requirement IDs it builds (`- Requirements: R1, R4`).
 - **Short path, no PRD:** bug fixes, follow-ups from reviews, refactors, test and tooling work, and docs fixes. Such a plan says `- PRD: none (short path: <reason>)`. When in doubt, the coordinator asks the human.
 - A change of scope after approval goes back to the PRD first, as a new revision with a line in its change log, then to the plan.
 
@@ -53,7 +53,7 @@ PRDs follow the repository rules: English, and no content from the user director
 | Product manager (PM) | A Claude worker | Interviews, writes and revises the PRD, owns its consistency. Writes no design or code. |
 | Persona reviewers | Claude workers, one per persona | Walk through the PRD as that persona and report where they get stuck, confused, or worried. |
 | Pre-mortem reviewer | A Claude worker | Imagines the feature shipped and failed six months later, and explains why. |
-| Feasibility reviewer | A Codex worker (`gpt-6.1-sol`) | Flags requirements that are impossible, very costly, unsafe, or in conflict with the code. Proposes no design. |
+| Feasibility reviewer | A Claude worker; a Codex worker (`gpt-6.1-sol`) when the PRD touches security or paid generation | Flags requirements that are impossible, very costly, unsafe, or in conflict with the code. Proposes no design. |
 | Mockup maker | A Claude worker | Builds a clickable HTML mockup of the main screens from the PRD. |
 | Coordinator | The main agent | Runs the orchestration, relays questions to the human, merges the reviews into one review card. |
 
@@ -61,12 +61,12 @@ PRDs follow the repository rules: English, and no content from the user director
 
 `Draft` → `In review` → `Approved` → (`Superseded by PNNNN` or `Withdrawn`)
 
-1. **Intake.** The coordinator writes the request in the human's own words into a new PRD stub (Summary and Problem only), and starts a Run.
-2. **Discovery.** The PM reads the stub, the personas, the README, and the code that matters, to learn how the product behaves today. It then asks the human 3 to 6 questions about intent, each with options and a recommended answer, through `orca orchestration ask`. The coordinator relays them in one batch, as choices.
+1. **Intake.** The coordinator writes the request in the human's own words into a new PRD stub (Summary and Problem only), and starts a Run when the workers need one (see Orchestration).
+2. **Discovery.** The PM reads the stub, the personas, the README, and the code that matters, to learn how the product behaves today. It then asks the human 3 to 6 questions about intent, each with a short name, options, and a recommended answer, through `orca orchestration ask`, or in its report when it runs as a subagent without a Run. The coordinator relays them in one batch, as choices.
 3. **Draft.** The PM writes the PRD from the template below.
-4. **Review.** Persona walkthroughs, the pre-mortem, the feasibility check, and the mockup run in parallel. The coordinator merges them into the review card.
+4. **Review.** Persona walkthroughs, the pre-mortem, the feasibility check, and, for a PRD with new screens, the mockup run in parallel. The coordinator merges them into the review card.
 5. **Revise.** The PM answers every finding: changed, or not changed with a reason. At most two rounds, as for code.
-6. **Approval gate.** The human reads the review card, tries the mockup, answers the decisions, and approves or sends it back. Only the human sets `Approved`.
+6. **Approval gate.** The human reads the review card, tries the mockup if there is one, answers the decisions, and approves or sends it back. Only the human sets `Approved`.
 7. **Hand-off.** A plan author writes the plan from the Approved PRD. A traceability check, below, runs before the plan's own review.
 
 ### The review card
@@ -74,11 +74,11 @@ PRDs follow the repository rules: English, and no content from the user director
 The human should not have to read every review. The coordinator writes one page, as a private Artifact so that it opens on a phone, holding:
 
 - **The pitch:** the PRD's summary and its "before and after" story, in under 150 words.
-- **Try it:** the link to the mockup, with the two or three things to try.
-- **Decisions for you:** each open product question as a choice with a recommended option, which the human answers by tapping. Usually 2 to 5.
+- **Try it:** the link to the mockup, with the two or three things to try, when there is a mockup.
+- **Decisions for you:** each open product question with a short name and a number, the options, the coordinator's recommendation, and the opinion and design principle behind it. Usually 2 to 5. The human answers in chat.
 - **What the personas felt:** one line per persona, with its biggest friction, shown as a short quote in the persona's voice.
 - **Risks:** the top three from the pre-mortem and the feasibility check, each with what the PRD now does about it.
-- **Verdict buttons:** Approve, Approve with the chosen answers, or Send back with a note.
+- **Verdict:** Approve, Approve with the chosen answers, or Send back with a note, given in chat.
 
 The full reviews stay linked for anyone who wants detail. The human's answers are written back into the PRD's decision log by the PM.
 
@@ -102,12 +102,12 @@ The plan's own review (0001) starts only after these are resolved or accepted by
 
 ### Orchestration
 
-One Run per PRD, named `prd-PNNNN`. Within the session's guideline of fewer than ten agents per run:
+One Run per PRD, named `prd-PNNNN`, when workers need to ask the human or edit the same files. Reviewers that only read and each write one review file may instead run as subagents without a Run, as for P0001; their questions come back in their reports. Within the session's guideline of fewer than ten agents per run:
 
 | Step | Workers | Agent | Parallel |
 |---|---|---|---|
 | Discovery and draft | PM | Claude | — |
-| Review | 2 to 3 personas, pre-mortem, feasibility, mockup | Claude, Codex | yes |
+| Review | 2 to 3 personas, pre-mortem, feasibility, and a mockup for new screens | Claude; Codex for feasibility when the PRD touches security or paid generation | yes |
 | Revise | PM, same Dispatch where possible | Claude | — |
 | Plan and traceability | plan author, traceability reviewer | Claude | — |
 
@@ -150,11 +150,11 @@ A short story of one persona doing the task today, then the same task with this 
 
 ## Requirements
 
-| ID | Requirement | Priority | Acceptance (from the user's view) |
-|---|---|---|---|
-| R1 | What the user can do | Must / Should / Could | Given ..., when ..., then the user ... |
+| ID | Requirement | Priority | Acceptance (from the user's view) | Today |
+|---|---|---|---|---|
+| R1 | What the user can do | Must / Should / Could | Given ..., when ..., then the user ... | Built / Partial / Missing |
 
-Requirements say what the user can do and see, never how it is built.
+Requirements say what the user can do and see, never how it is built. The "Today" column is for a product that exists in part; leave it out for a new area.
 
 ## Experience
 
@@ -203,24 +203,27 @@ What we believe without proof, and what could make this fail.
 
 Run in order. Each task uses a Claude reviewer; the coordinator may review small doc diffs directly.
 
-- [ ] PRD docs and template
+- [x] PRD docs and template
   - Target: `docs/prd/` (new)
   - Change: `docs/prd/README.md` with the naming, lifecycle, short path, template, and index; `docs/prd/personas.md` with the three personas; `docs/prd/reviews/` with a README saying what goes there.
   - Constraints: no code. No content from the user directory or any real person.
   - Ownership: `docs/prd/`.
   - Acceptance: the coordinator checks that the template matches this plan and that the README links work.
-- [ ] Workflow and rules
+  - Review notes: written with P0001 in commits 349f9b3 and dd369d6; the short path was added to the README with the workflow task. The template gained the "Today" column from the trial. `docs/prd/reviews/` holds the reviews of each PRD; its purpose is described in the README instead of a README of its own.
+- [x] Workflow and rules
   - Target: `AGENTS.md`, `docs/development-workflow.md`, `docs/plans/README.md`
   - Change: an AGENTS.md rule that new user-facing work needs an Approved PRD before a plan, with the short path; a "Product step" section in the development workflow describing the roles, the lifecycle, the review card, the creative review techniques, the traceability check, and the orchestration table; and in the plan template, the `PRD:` header line and the `Requirements:` task field.
   - Constraints: no code. Keep the rules of 0001 unchanged except for the new step in front.
   - Ownership: `AGENTS.md`, `docs/development-workflow.md`, `docs/plans/README.md`.
   - Acceptance: the coordinator checks that the rules, the workflow, and the template agree with each other and with this plan.
-- [ ] First PRD as a trial
+  - Review notes: done by the coordinator after approval, with the lessons of the trial folded in: Claude for feasibility by default, a mockup only for new screens, and named decisions with reasons. Reviewed by a Claude reviewer.
+- [x] First PRD as a trial
   - Target: `docs/prd/P0001-*.md`
   - Change: run the full flow once on a real request, chosen by the human, including the review card and the mockup. Record what was slow or awkward in "Lessons learned" in this plan, and adjust the docs.
   - Constraints: follows the new workflow. Ends at the approval gate; the plan for it is separate work.
   - Ownership: `docs/prd/`, the "Lessons learned" section of this plan.
   - Acceptance: the human approves the PRD through the review card.
+  - Review notes: P0001, a baseline PRD of the existing product, chosen by the human. Five reviews, 54 findings; approved on 2026-10-31. No mockup, because the product exists. Lessons below.
 
 ## Lessons learned
 
@@ -235,6 +238,6 @@ From P0001, a baseline PRD written after the product, on 2026-10-31:
 
 ## Open questions
 
-- What happens to the draft plans 0010 to 0013, which came before this step? The suggestion is to use their four requests as the trial: one PRD for the review experience that covers speed, projects, library, and retakes, then revise the plans to trace to it.
+- Resolved: the draft plans 0010 to 0013 were revised to trace to P0001.
 - Should the PM interview the human live in the terminal, rather than through batched questions? The default is batched, so the human can answer from a phone.
-- Should the review card collect the human's answers by itself, through an artifact with saved state, so that no chat reply is needed? The default is yes if the artifact capability is available, otherwise the answers come back in chat.
+- Should the review card collect the human's answers by itself, through an artifact with saved state, so that no chat reply is needed? In the trial, answers in chat worked well; the default stays chat.
