@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readEntries, readTakes } from "@vd-creator/core";
 import { SCENARIO_FILE } from "@vd-creator/scenario";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type {
   ApiError,
   ConfirmRequiredError,
@@ -15,6 +15,23 @@ import type {
   TrialResponse,
 } from "./api.js";
 import { type AppOptions, createApp, type ServerProviders } from "./app.js";
+
+// A seam that alters the file right after a save, to play a form that reads back differently.
+const seam = vi.hoisted(() => ({ corrupt: false }));
+vi.mock("@vd-creator/scenario", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@vd-creator/scenario")>();
+  return {
+    ...actual,
+    saveScenario: async (...args: Parameters<typeof actual.saveScenario>) => {
+      await actual.saveScenario(...args);
+      if (seam.corrupt) {
+        const { readFile, writeFile } = await import("node:fs/promises");
+        const path = join(args[0], actual.SCENARIO_FILE);
+        await writeFile(path, (await readFile(path, "utf8")).replace("up there?", "up here?"));
+      }
+    },
+  };
+});
 
 const SAMPLE = fileURLToPath(
   new URL("../../../packages/scenario/fixtures/sample.yaml", import.meta.url),
@@ -27,6 +44,7 @@ let dir: string;
 let project: string;
 
 beforeEach(async () => {
+  seam.corrupt = false;
   dir = await mkdtemp(join(tmpdir(), "vd-server-takes-"));
   project = join(dir, "project");
   await mkdir(project);
@@ -292,11 +310,11 @@ describe("POST /api/items/:id/trials", () => {
     expect(requests).toHaveLength(1);
   });
 
-  test("an unknown or non-line item is 404", async () => {
+  test("an unknown item is 404, and an SFX is 400", async () => {
     const call = makeApp(fakeProviders().providers);
     const base = await baseOf(call);
     expect((await call("POST", "/api/items/nope/trials", { base })).status).toBe(404);
-    expect((await call("POST", "/api/items/s1-waves/trials", { base })).status).toBe(404);
+    expect((await call("POST", "/api/items/s1-waves/trials", { base })).status).toBe(400);
   });
 });
 
@@ -465,5 +483,105 @@ describe("restore", () => {
         reason: "Softer, as the user asked",
       },
     ]);
+  });
+});
+
+describe("restore as saved", () => {
+  test("a line that reads back with another request is rolled back with 409", async () => {
+    const call = makeApp(fakeProviders().providers);
+    await generateLine(call);
+    const [original] = await takes(call);
+    await call("PATCH", `/api/items/${LINE}`, { voiceSettings: { style: 0.3 } });
+    await generateLine(call);
+    const before = await scenarioText();
+    const entries = (await readEntries(project)).length;
+
+    seam.corrupt = true;
+    const response = await call("PATCH", `/api/items/${LINE}`, {
+      restore: { key: original?.key, base: await baseOf(call) },
+    });
+    seam.corrupt = false;
+    expect(response.status).toBe(409);
+    expect((await json<ApiError>(response)).error).toBe("stale");
+    expect(await scenarioText()).toBe(before);
+    expect((await readEntries(project)).length).toBe(entries);
+  });
+});
+
+describe("hooks and limits", () => {
+  test("a throwing onTakeKept does not fail a saved restore", async () => {
+    const call = makeApp(fakeProviders().providers, {
+      onTakeKept: () => {
+        throw new Error("hook broke");
+      },
+    });
+    await generateLine(call);
+    const [original] = await takes(call);
+    await call("PATCH", `/api/items/${LINE}`, { voiceSettings: { style: 0.3 } });
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const response = await call("PATCH", `/api/items/${LINE}`, {
+      restore: { key: original?.key, base: await baseOf(call) },
+    });
+    spy.mockRestore();
+    expect(response.status).toBe(200);
+    expect((await baseOf(call)).voiceSettings).toBeUndefined();
+  });
+
+  test("the trial key is that of the generated asset", async () => {
+    const call = makeApp(fakeProviders().providers);
+    const trial = await json<TrialResponse>(
+      await call("POST", `/api/items/${LINE}/trials`, {
+        base: await baseOf(call),
+        direction: "softly",
+        confirm: true,
+      }),
+    );
+    expect((await takes(call)).map((t) => t.key)).toEqual([trial.key]);
+  });
+
+  test("trial text over 500 characters and direction over 300 are 400", async () => {
+    const call = makeApp(fakeProviders().providers);
+    const base = await baseOf(call);
+    const post = (extra: object) => call("POST", `/api/items/${LINE}/trials`, { base, ...extra });
+    expect((await post({ text: "a".repeat(501) })).status).toBe(400);
+    expect((await post({ direction: "a".repeat(301) })).status).toBe(400);
+    expect((await post({ text: "a".repeat(500), direction: "a".repeat(300) })).status).toBe(200);
+  });
+});
+
+describe("bad targets", () => {
+  const key = "a".repeat(64);
+
+  test("trials refuse an unknown item, an SFX, and ids with path characters", async () => {
+    const call = makeApp(fakeProviders().providers);
+    const base = await baseOf(call);
+    expect((await call("POST", "/api/items/nope/trials", { base })).status).toBe(404);
+    const sfx = await call("POST", "/api/items/s1-waves/trials", { base });
+    expect(sfx.status).toBe(400);
+    expect((await json<ApiError>(sfx)).message).toContain("only to lines");
+    for (const id of ["..%2Fscenario", "a%2Fb", "%2E%2E", "a%00b"]) {
+      const response = await call("POST", `/api/items/${id}/trials`, { base });
+      expect([400, 404]).toContain(response.status);
+    }
+  });
+
+  test("restore refuses a bad key, an unknown item, an SFX, and ids with path characters", async () => {
+    const call = makeApp(fakeProviders().providers);
+    const base = await baseOf(call);
+    const before = await scenarioText();
+    for (const bad of ["short", "G".repeat(64), "../x", 5]) {
+      expect(
+        (await call("PATCH", `/api/items/${LINE}`, { restore: { key: bad, base } })).status,
+      ).toBe(400);
+    }
+    expect((await call("PATCH", "/api/items/nope", { restore: { key, base } })).status).toBe(404);
+    expect((await call("PATCH", "/api/items/s1-waves", { restore: { key, base } })).status).toBe(
+      400,
+    );
+    for (const id of ["..%2Fscenario", "a%2Fb", "%2E%2E", "a%00b"]) {
+      const response = await call("PATCH", `/api/items/${id}`, { restore: { key, base } });
+      expect([400, 404]).toContain(response.status);
+    }
+    expect(await scenarioText()).toBe(before);
   });
 });

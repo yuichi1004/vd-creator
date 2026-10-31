@@ -201,6 +201,19 @@ function requestKey(
   }
 }
 
+/**
+ * The cache key of the request a line makes now, or undefined if the item is not a line or makes
+ * no valid request. The server uses it to check a saved restore, as `listTakes` does.
+ */
+export function lineCacheKey(
+  scenario: Scenario,
+  itemId: string,
+  providerId: string,
+): string | undefined {
+  const target = lineTarget(scenario, itemId);
+  return target && requestKey(scenario, target, providerId);
+}
+
 async function versionOf(
   scenario: Scenario,
   cache: AssetCache,

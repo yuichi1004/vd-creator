@@ -89,6 +89,25 @@ describe("take history", () => {
   });
 });
 
+describe("concurrent appends", () => {
+  test("many at once all land, after a torn tail, with nothing truncated", async () => {
+    const scenario = await sample();
+    await generate(scenario, createMockProviders());
+    const [entry] = await readTakes(dir);
+    if (!entry) throw new Error("expected an entry");
+    const file = join(dir, TAKES_FILE);
+    await writeFile(file, `${await readFile(file, "utf8")}{"item":"cut`);
+    await Promise.all(
+      Array.from({ length: 40 }, (_, i) => appendTake(dir, { ...entry, take: i + 10 })),
+    );
+    const takes = (await readTakes(dir)).map((e) => e.take);
+    expect(takes).toHaveLength(41);
+    expect(takes.slice(1)).toEqual(Array.from({ length: 40 }, (_, i) => i + 10));
+    // The torn text is still in the file: it was skipped, not removed.
+    expect(await readFile(file, "utf8")).toContain('{"item":"cut');
+  });
+});
+
 describe("trial", () => {
   test("generates one asset, leaves the scenario alone, and numbers the take above all", async () => {
     const scenario = await sample();

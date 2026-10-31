@@ -154,7 +154,13 @@ export type ItemResult = {
   sceneId: string;
   resolver?: string;
 } & (
-  | { status: "cached" | "generated"; file: string; durationSec: number }
+  | {
+      status: "cached" | "generated";
+      file: string;
+      durationSec: number;
+      /** The cache key of the asset, set when this run resolved or generated it. */
+      key?: string;
+    }
   | { status: "unresolved"; reason: string }
   | { status: "failed"; error: GenerationError }
 );
@@ -387,6 +393,7 @@ async function runItem(
       status: asset.generated ? "generated" : "cached",
       file: asset.file,
       durationSec: asset.durationSec,
+      key: asset.key,
     };
   } catch (e) {
     return { ...withResolver, status: "failed", error: new GenerationError(item, "generate", e) };

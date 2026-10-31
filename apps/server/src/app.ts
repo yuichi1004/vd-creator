@@ -1,6 +1,7 @@
 // The Hono app with the HTTP API of docs/plans/0005-review-ui.md, section "HTTP API".
 
 import { readFileSync } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve as resolvePath } from "node:path";
 import {
   ASSETS_DIR,
@@ -15,6 +16,7 @@ import {
   findRestorable,
   type GeneratedItemResolver,
   type LineEdit,
+  lineCacheKey,
   lineFieldsOf,
   listTakes,
   mergeVoiceSettings,
@@ -50,6 +52,7 @@ import {
   IdSchema,
   type ItemPatch,
   loadScenario,
+  SCENARIO_FILE,
   type Scenario,
   ScenarioEditError,
   ScenarioValidationError,
@@ -446,7 +449,17 @@ export function createApp(options: AppOptions): Hono {
           if (!loaded.scenario) throw new ScenarioValidationError(loaded.issues);
           const restored = await restoreTake(loaded.scenario, id, body.restore);
           updateItem(doc, id, restored.patch);
+          const path = join(projectDir, SCENARIO_FILE);
+          const before = await readFile(path);
           await saveScenario(projectDir, doc);
+          // The check on the candidate does not cover how the file reads back, so check the
+          // line as saved too, and put the file back as it was if it does not make the request.
+          const saved = await loadScenario(projectDir).catch(() => undefined);
+          const savedKey = saved?.scenario && lineCacheKey(saved.scenario, id, providerInfo.id);
+          if (savedKey !== body.restore.key) {
+            await writeFile(path, before);
+            throw new HttpError(409, "stale", UNAVAILABLE_MESSAGES["request-changed"]);
+          }
           kept = restored.kept;
           return restored.kept.reason;
         }
@@ -484,7 +497,14 @@ export function createApp(options: AppOptions): Hono {
       return project(session);
     });
     // After the edit is saved and logged, so a hook never hears of a restore that failed.
-    if (kept) options.onTakeKept?.(kept);
+    if (kept) {
+      try {
+        options.onTakeKept?.(kept);
+      } catch (e) {
+        // The restore is saved and logged; a failing hook must not turn it into an error.
+        console.error("onTakeKept failed:", e instanceof Error ? e.message : "unknown error");
+      }
+    }
     return c.json(response);
   });
 
@@ -544,6 +564,9 @@ export function createApp(options: AppOptions): Hono {
         throw new HttpError(500, "server-error", PROJECT_UNREADABLE);
       });
       if (!scenario) throw new ScenarioValidationError(issues);
+      const target = scenarioItems(scenario).find((i) => i.id === id);
+      if (!target) throw notFound();
+      if (target.kind !== "line") throw badRequest("trials apply only to lines");
       const fields = lineFieldsOf(scenario, id);
       if (!fields) throw notFound();
       if (!sameLineFields(baseFields(body.base), fields)) throw new HttpError(409, "stale");
@@ -576,7 +599,7 @@ export function createApp(options: AppOptions): Hono {
         }
         throw new HttpError(500, "server-error", `Failed to generate line "${id}"`);
       }
-      const key = (await readTakes(projectDir)).filter((e) => e.item === id).at(-1)?.key;
+      const key = result.key;
       if (key === undefined) throw new HttpError(500, "server-error");
       return {
         trial: {
@@ -928,12 +951,12 @@ function trialRequest(body: unknown): TrialRequest {
   ]);
   const request: TrialRequest = { base: trialBase(record.base) };
   if (record.text !== undefined) {
-    if (typeof record.text !== "string" || record.text === "") {
-      throw badRequest("text must be a non-empty string");
+    if (typeof record.text !== "string" || record.text === "" || record.text.length > 500) {
+      throw badRequest("text must be a string of 1 to 500 characters");
     }
     request.text = record.text;
   }
-  if (record.direction !== undefined) request.direction = direction(record.direction);
+  if (record.direction !== undefined) request.direction = direction(record.direction, 300);
   if (record.voiceSettings !== undefined)
     request.voiceSettings = voiceSettings(record.voiceSettings);
   if (record.proposalId !== undefined) {
@@ -971,9 +994,9 @@ function trialBase(value: unknown): TrialBase {
   return base;
 }
 
-function direction(value: unknown): string {
-  if (typeof value !== "string" || value.length > 2000) {
-    throw badRequest("direction must be a string of at most 2000 characters");
+function direction(value: unknown, max = 2000): string {
+  if (typeof value !== "string" || value.length > max) {
+    throw badRequest(`direction must be a string of at most ${max} characters`);
   }
   return value;
 }

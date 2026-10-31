@@ -1,7 +1,7 @@
 // takes.jsonl: the take history of the lines of a project. See "Take history" in
 // docs/plans/0013-voice-retake-with-agent.md.
 
-import { appendFile, readFile, truncate } from "node:fs/promises";
+import { appendFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Scenario } from "@vd-creator/scenario";
 import { canonicalJson } from "../canonical.js";
@@ -117,18 +117,28 @@ export function takesOfItem(entries: readonly TakeEntry[], itemId: string): Take
   return entries.filter((e) => e.item === itemId);
 }
 
+const appendQueues = new Map<string, Promise<unknown>>();
+
 /**
- * Appends one entry, in one write ending in a newline. A cut-off last line of an earlier writer
- * is removed first. The entry must be plain JSON, which `canonicalJson` checks.
+ * Appends one entry, in one write ending in a newline. Appends to one file are serialized in this
+ * process, so none is lost. Nothing is truncated: when an earlier writer left a cut-off last line,
+ * the entry starts on a new line, and the reader skips the cut-off one. The entry must be plain
+ * JSON, which `canonicalJson` checks.
  */
 export async function appendTake(projectDir: string, entry: TakeEntry): Promise<void> {
   canonicalJson(entry);
-  const { cutOff } = await readComplete(projectDir);
-  if (cutOff) {
-    const data = await readFile(join(projectDir, TAKES_FILE));
-    await truncate(join(projectDir, TAKES_FILE), data.lastIndexOf(0x0a) + 1);
+  const file = join(projectDir, TAKES_FILE);
+  const run = async () => {
+    const { cutOff } = await readComplete(projectDir);
+    await appendFile(file, `${cutOff ? "\n" : ""}${JSON.stringify(entry)}\n`);
+  };
+  const turn = (appendQueues.get(file) ?? Promise.resolve()).then(run, run);
+  appendQueues.set(file, turn);
+  try {
+    await turn;
+  } finally {
+    if (appendQueues.get(file) === turn) appendQueues.delete(file);
   }
-  await appendFile(join(projectDir, TAKES_FILE), `${JSON.stringify(entry)}\n`);
 }
 
 function parseTakeEntry(value: unknown): TakeEntry | undefined {
