@@ -4,7 +4,7 @@
 // change on their side, or a field that turns out to be wrong, is fixed in one place. These shapes
 // follow the public API documentation and have not been checked against the live API yet.
 
-import type { MusicRequest, SfxRequest, TtsRequest } from "../types.js";
+import type { MusicRequest, SfxRequest, TtsRequest, VoiceParameter } from "../types.js";
 
 export const ELEVENLABS_BASE_URL = "https://api.elevenlabs.io";
 export const ELEVENLABS_API_KEY_ENV = "ELEVENLABS_API_KEY";
@@ -108,6 +108,29 @@ export function ttsText(req: TtsRequest): string {
   const words = audioTagWords(req.direction);
   if (words && readsAudioTags(ttsModelId(req))) return `[${words}] ${req.text}`;
   return req.text;
+}
+
+/** The model ID prefixes of the models that accept only 0, 0.5, and 1 as `stability`. */
+export const ELEVENLABS_STABILITY_STEPS_MODELS: readonly string[] = ["eleven_v3"];
+
+/**
+ * The voice settings the adapter sends (see `VOICE_SETTINGS_FIELDS`), with their ranges. A model
+ * can limit a range: `eleven_v3` takes a `stability` of only 0, 0.5, or 1. `settings` are the
+ * merged settings, whose `modelId` picks the model.
+ */
+export function voiceParameters(settings: Record<string, unknown> | undefined): VoiceParameter[] {
+  const modelId = ttsModelId({ text: "", voiceId: "", take: 0, settings });
+  const stabilitySteps = ELEVENLABS_STABILITY_STEPS_MODELS.some((p) => modelId.startsWith(p));
+  const unit = { kind: "number", min: 0, max: 1, step: 0.05 } as const;
+  return [
+    stabilitySteps
+      ? { key: "stability", label: "Stability", kind: "number", values: [0, 0.5, 1] }
+      : { key: "stability", label: "Stability", ...unit },
+    { key: "similarityBoost", label: "Similarity boost", ...unit },
+    { key: "style", label: "Style", ...unit },
+    { key: "speed", label: "Speed", kind: "number", min: 0.7, max: 1.2, step: 0.05 },
+    { key: "useSpeakerBoost", label: "Speaker boost", kind: "on-off" },
+  ];
 }
 
 /** True if the request has a direction that its model cannot read, so it is not sent. */

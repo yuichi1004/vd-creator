@@ -16,6 +16,7 @@ import type {
   SfxRequest,
   TtsProvider,
   TtsRequest,
+  VoiceParameter,
 } from "../types.js";
 import {
   type ApiCall,
@@ -32,6 +33,7 @@ import {
   ttsCall,
   ttsModelId,
   ttsText,
+  voiceParameters,
 } from "./api.js";
 import { type Mp3Frames, mp3Frames } from "./mp3.js";
 import { containsSecret, redactKey, truncate } from "./redact.js";
@@ -253,6 +255,11 @@ export class ElevenLabsTtsProvider implements TtsProvider {
     } catch {
       return false;
     }
+  }
+
+  /** The five settings the adapter sends, with the limits of the model the settings name. */
+  voiceParameters(settings: Record<string, unknown> | undefined): VoiceParameter[] {
+    return voiceParameters(settings);
   }
 }
 

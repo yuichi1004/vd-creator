@@ -128,6 +128,102 @@ export type ItemPatchRequest = {
   gapBeforeSec?: number;
   take?: number;
   source?: SoundSource;
+  /** The direction of a line. An empty string removes it. */
+  direction?: string;
+  /**
+   * The line's own voice settings, merged over its current override one key at a time: a value
+   * sets the key and `null` removes it. The line's `voice` is removed when no key is left.
+   */
+  voiceSettings?: Record<string, unknown>;
+  /**
+   * Makes the line exactly the listed version `key` of `GET /api/items/:id/takes`: its text,
+   * direction, voice override, and take number, so the line plays that very asset. It cannot be
+   * combined with other fields. `base` is the line as the sender last saw it; if the line has
+   * changed since, or the version cannot be used (`canUse` false), nothing changes and the
+   * answer is 409 `stale`.
+   */
+  restore?: { key: string; base: TrialBase };
+};
+
+/** The fields of a line as the sender saw them, to detect an edit made in between. */
+export type TrialBase = {
+  speaker: string;
+  text: string;
+  direction?: string;
+  voiceSettings?: Record<string, unknown>;
+  take: number;
+};
+
+/**
+ * Body of `POST /api/items/:id/trials`: one trial take of a line with a proposed change. It
+ * never writes `scenario.yaml`. `base` is the line as the sender last saw it; if the line has
+ * changed, the answer is 409 `stale` and nothing is generated. Without `confirm: true` the
+ * answer is a `GeneratePlanResponse` (the plan and cost) and nothing is generated. With a paid
+ * provider, `confirm: true` also needs `approved`, as `POST /api/generate` does.
+ */
+export type TrialRequest = {
+  base: TrialBase;
+  text?: string;
+  direction?: string;
+  voiceSettings?: Record<string, unknown>;
+  /** The proposal the trial tries; kept in the take history. */
+  proposalId?: string;
+  confirm?: boolean;
+  approved?: ApprovedCost;
+};
+
+/** The 200 response of a trial that generated. */
+export type TrialResponse = {
+  kind: "trial";
+  provider: ProviderInfo;
+  /** The cache key of the new asset: the `key` to restore it by. */
+  key: string;
+  /** The take number the trial used. */
+  take: number;
+  /** URL of the audio, under `/assets/`. */
+  url: string;
+  durationSec: number;
+};
+
+/** Why a version in the take list cannot be used. `message` is fixed text. */
+export type TakeUnavailableInfo = {
+  code:
+    | "missing-file"
+    | "other-provider"
+    | "other-voice"
+    | "other-speaker-settings"
+    | "request-changed"
+    | "shadowed";
+  message: string;
+};
+
+/** One version of a line in `GET /api/items/:id/takes`. */
+export type TakeInfo = {
+  key: string;
+  time: string;
+  take: number;
+  trial: boolean;
+  provider: string;
+  /** True if the line's request now has this version's asset. */
+  current: boolean;
+  text: string;
+  direction?: string;
+  voiceSettings?: Record<string, unknown>;
+  proposalId?: string;
+  reason?: string;
+  /** URL of the audio under `/assets/`, if the file exists. */
+  url?: string;
+  durationSec?: number;
+  /** True if `PATCH` with `restore` for this key can succeed now. */
+  canUse: boolean;
+  /** Why `canUse` is false. */
+  why?: TakeUnavailableInfo;
+};
+
+/** Response of `GET /api/items/:id/takes`: the versions of a line, newest first. */
+export type TakesResponse = {
+  itemId: string;
+  takes: TakeInfo[];
 };
 
 /** Body of `PATCH /api/scenes/:id`: the BGM source and volume of the scene. */
@@ -286,6 +382,7 @@ export type ApiErrorCode =
   | "unauthorized"
   | "not-found"
   | "confirm-required"
+  | "stale"
   | "server-error";
 
 /**
@@ -293,7 +390,8 @@ export type ApiErrorCode =
  * (missing or wrong token with `--host`), 403 `unauthorized` (without `--host`, a `Host`
  * header that names no allowed host: `localhost`, `127.0.0.1`, `[::1]`, a `.ts.net` name, or
  * one of the server's `allowedHosts`, from `vd serve --allow-host`), 404 `not-found`, 409
- * `confirm-required` (see `ConfirmRequiredError`), and 500 `server-error`. `message` is fixed
+ * `confirm-required` (see `ConfirmRequiredError`), 409 `stale` (the line changed since the
+ * sender's `base`, or the version cannot be used; nothing changed), and 500 `server-error`. `message` is fixed
  * text.
  */
 export type ApiError = {

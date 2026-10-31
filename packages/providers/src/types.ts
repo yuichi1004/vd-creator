@@ -1,5 +1,6 @@
 // Provider interfaces from plan 0004. Changing them needs a decision gate.
 // Plan 0009 added the optional TtsProvider.dropsDirection, approved at a decision gate.
+// Plan 0013 added the optional TtsProvider.voiceParameters, approved with that plan.
 
 export type AudioFormat = "mp3" | "wav";
 
@@ -41,7 +42,24 @@ export interface TtsProvider extends Provider {
    * it counts as sending every direction.
    */
   dropsDirection?(req: TtsRequest): boolean;
+  /**
+   * The voice settings the provider reads, with their ranges, for the given merged settings
+   * (the speaker's settings with the line's over them). The settings matter because a model can
+   * limit a value. An agent may propose only these keys, inside these ranges. Optional: a
+   * provider without it gets no settings in proposals.
+   */
+  voiceParameters?(settings: Record<string, unknown> | undefined): VoiceParameter[];
 }
+
+/**
+ * One voice setting a provider reads. A `number` is within `min` to `max` in steps of `step`
+ * from `min`, or one of `values` when the provider allows only a few. An `on-off` is a boolean.
+ */
+export type VoiceParameter = { key: string; label: string } & (
+  | { kind: "number"; min: number; max: number; step: number }
+  | { kind: "number"; values: readonly number[] }
+  | { kind: "on-off" }
+);
 
 export interface SfxProvider extends Provider {
   generate(req: SfxRequest): Promise<AudioResult>;

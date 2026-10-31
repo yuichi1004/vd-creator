@@ -12,17 +12,27 @@ import {
   computeTimeline,
   defaultResolvers,
   entriesSince,
+  findRestorable,
   type GeneratedItemResolver,
+  type LineEdit,
+  lineFieldsOf,
+  listTakes,
+  mergeVoiceSettings,
   type ProjectLicenseIssue,
   planGeneration,
+  planTrial,
   type RunGenerationOptions,
   readEntries,
+  readTakes,
   reconcileLocked,
   recordReview,
   recordUiChanges,
   runGeneration,
+  runTrial,
+  sameLineFields,
   scenarioAudioKinds,
   scenarioItems,
+  type TrialOptions,
   withProjectLock,
 } from "@vd-creator/core";
 import {
@@ -68,6 +78,10 @@ import type {
   ServerEventName,
   ServerInfoResponse,
   SoundSource,
+  TakesResponse,
+  TrialBase,
+  TrialRequest,
+  TrialResponse,
   VerifyLibraryEntryResponse,
 } from "./api.js";
 import { changedSinceReview, entryView } from "./changes.js";
@@ -82,6 +96,7 @@ import {
 } from "./preview.js";
 import { type MessageRoot, sanitizeMessage, sanitizeTarget } from "./sanitize.js";
 import { documentData, sceneIndex, updateSceneBgm } from "./scene-edit.js";
+import { baseFields, isPlainJson, takeInfo, UNAVAILABLE_MESSAGES } from "./takes.js";
 import { tokenCheck } from "./token.js";
 import type { ProjectEvents } from "./watcher.js";
 
@@ -113,7 +128,27 @@ export type AppOptions = {
   version?: string;
   /** Cache, ffmpeg runner, and limits of `GET /preview/*`. Tests replace them. */
   preview?: PreviewOptions;
+  /**
+   * Hook for the agent (plan 0013): the reason of a proposal, looked up when a trial of that
+   * proposal generates, and kept in the take history, so that "Use this take" can log it
+   * however much later. Only the server's own path calls it; a client cannot send a reason.
+   */
+  proposalReason?: (proposalId: string) => string | undefined;
+  /** Hook for the agent (plan 0013): called after "Use this take" saved the line and logged it. */
+  onTakeKept?: (kept: TakeKept) => void;
 };
+
+/** What "Use this take" kept. `proposalId` and `reason` are those of a trial take. */
+export type TakeKept = {
+  itemId: string;
+  key: string;
+  trial: boolean;
+  proposalId?: string;
+  reason?: string;
+};
+
+/** The longest reason the change log takes. */
+const MAX_REASON = 300;
 
 const PACKAGE_VERSION = (() => {
   try {
@@ -133,6 +168,7 @@ const MESSAGES: Record<ApiErrorCode, string> = {
   unauthorized: "This server needs the access token printed by vd serve",
   "not-found": "Not found",
   "confirm-required": "A paid provider needs confirm: true and the approved cost to generate",
+  stale: "The line has changed since it was read, so nothing was changed",
   "server-error": "The server could not complete the request",
 };
 
@@ -250,13 +286,52 @@ export function createApp(options: AppOptions): Hono {
   // Runs `edit` holding the project lock, after recording what the file changed since the
   // snapshot, then records the edit's own changes as `ui` entries, so the edit is never found
   // again as a `file` change and an outside edit is never recorded as the UI's.
-  async function uiChange(session: string | undefined, edit: () => Promise<void>): Promise<void> {
+  // The edit may return a reason, such as the one a kept trial take came with, for the entries.
+  async function uiChange(
+    session: string | undefined,
+    edit: () => Promise<string | undefined> | Promise<void>,
+  ): Promise<void> {
     await withProjectLock(projectDir, async () => {
       await reconcileLocked(projectDir);
-      await edit();
+      const reason = await edit();
       const { scenario } = await loadScenario(projectDir);
-      if (scenario) await recordUiChanges(projectDir, scenario, session ? { session } : {});
+      if (!scenario) return;
+      await recordUiChanges(projectDir, scenario, {
+        ...(session ? { session } : {}),
+        ...(reason ? { reason: reason.slice(0, MAX_REASON) } : {}),
+      });
     });
+  }
+
+  // Makes the line exactly version `restore.key`, as "Use this take". Nothing is written here;
+  // the caller saves the patch. A line that changed since `restore.base`, a version that is
+  // not listed as usable, and one not in the history all fail with nothing changed.
+  async function restoreTake(
+    scenario: Scenario,
+    id: string,
+    restore: NonNullable<ItemPatchRequest["restore"]>,
+  ): Promise<{ patch: ItemPatch; kept: TakeKept }> {
+    const fields = lineFieldsOf(scenario, id);
+    if (!fields) throw notFound();
+    if (!sameLineFields(baseFields(restore.base), fields)) throw new HttpError(409, "stale");
+    const history = await readTakes(projectDir);
+    const cache = await AssetCache.load(projectDir);
+    const found = await findRestorable(scenario, cache, history, id, providerInfo.id, restore.key);
+    if ("unavailable" in found) {
+      if (found.unavailable === "unknown") throw notFound();
+      throw new HttpError(409, "stale", UNAVAILABLE_MESSAGES[found.unavailable]);
+    }
+    const { entry } = found.version;
+    const patch: ItemPatch = {
+      line: entry.line,
+      take: entry.take,
+      direction: entry.direction,
+      voice: entry.voiceSettings === undefined ? undefined : { settings: entry.voiceSettings },
+    };
+    const kept: TakeKept = { itemId: id, key: entry.key, trial: entry.trial === true };
+    if (entry.proposalId !== undefined) kept.proposalId = entry.proposalId;
+    if (entry.reason !== undefined) kept.reason = entry.reason;
+    return { patch, kept };
   }
 
   // Paths in license messages are shown relative to these.
@@ -355,38 +430,62 @@ export function createApp(options: AppOptions): Hono {
     const id = c.req.param("id");
     const session = sessionOf(c);
     const body = itemPatch(await jsonBody(c));
-    return c.json(
-      await exclusive(async () => {
-        await uiChange(session, async () => {
-          const { doc } = await loadScenario(projectDir).catch(() => {
-            throw new HttpError(500, "server-error", PROJECT_UNREADABLE);
-          });
-          const item = findItem(documentData(doc), id);
-          if (!item) throw notFound();
-          const isLine = "line" in item;
-          const isSfx = "sfx" in item;
-          if ((body.text !== undefined || body.speaker !== undefined) && !isLine) {
-            throw badRequest("text and speaker apply only to lines");
-          }
-          if (body.source !== undefined && !isSfx) throw badRequest("source applies only to SFX");
-          if (body.take !== undefined && !isLine && !isSfx) {
-            throw badRequest("take applies only to lines and SFX");
-          }
-          const patch: ItemPatch = {};
-          if (body.text !== undefined) patch.line = body.text;
-          if (body.speaker !== undefined) patch.speaker = body.speaker;
-          if (body.gapBeforeSec !== undefined) patch.gapBeforeSec = body.gapBeforeSec;
-          if (body.take !== undefined) patch.take = body.take;
-          if (body.source !== undefined) {
-            patch.sfx =
-              "prompt" in body.source ? body.source.prompt : { library: body.source.library };
-          }
-          updateItem(doc, id, patch);
-          await saveScenario(projectDir, doc);
+    let kept: TakeKept | undefined;
+    const response = await exclusive(async () => {
+      await uiChange(session, async () => {
+        const loaded = await loadScenario(projectDir).catch(() => {
+          throw new HttpError(500, "server-error", PROJECT_UNREADABLE);
         });
-        return project(session);
-      }),
-    );
+        const { doc } = loaded;
+        const item = findItem(documentData(doc), id);
+        if (!item) throw notFound();
+        const isLine = "line" in item;
+        const isSfx = "sfx" in item;
+        if (body.restore !== undefined) {
+          if (!isLine) throw badRequest("restore applies only to lines");
+          if (!loaded.scenario) throw new ScenarioValidationError(loaded.issues);
+          const restored = await restoreTake(loaded.scenario, id, body.restore);
+          updateItem(doc, id, restored.patch);
+          await saveScenario(projectDir, doc);
+          kept = restored.kept;
+          return restored.kept.reason;
+        }
+        if (
+          (body.text !== undefined ||
+            body.speaker !== undefined ||
+            body.direction !== undefined ||
+            body.voiceSettings !== undefined) &&
+          !isLine
+        ) {
+          throw badRequest("text, speaker, direction, and voiceSettings apply only to lines");
+        }
+        if (body.source !== undefined && !isSfx) throw badRequest("source applies only to SFX");
+        if (body.take !== undefined && !isLine && !isSfx) {
+          throw badRequest("take applies only to lines and SFX");
+        }
+        const patch: ItemPatch = {};
+        if (body.text !== undefined) patch.line = body.text;
+        if (body.speaker !== undefined) patch.speaker = body.speaker;
+        if (body.gapBeforeSec !== undefined) patch.gapBeforeSec = body.gapBeforeSec;
+        if (body.take !== undefined) patch.take = body.take;
+        // An empty direction removes it; `undefined` in a patch removes a field.
+        if (body.direction !== undefined) patch.direction = body.direction || undefined;
+        if (body.voiceSettings !== undefined) {
+          const merged = mergeVoiceSettings(currentOverride(item), body.voiceSettings);
+          patch.voice = merged === undefined ? undefined : { settings: merged };
+        }
+        if (body.source !== undefined) {
+          patch.sfx =
+            "prompt" in body.source ? body.source.prompt : { library: body.source.library };
+        }
+        updateItem(doc, id, patch);
+        await saveScenario(projectDir, doc);
+      });
+      return project(session);
+    });
+    // After the edit is saved and logged, so a hook never hears of a restore that failed.
+    if (kept) options.onTakeKept?.(kept);
+    return c.json(response);
   });
 
   app.patch("/api/scenes/:id", async (c) => {
@@ -409,6 +508,96 @@ export function createApp(options: AppOptions): Hono {
         return project(session);
       }),
     );
+  });
+
+  // The versions of a line and whether each can be used again. Only reads.
+  app.get("/api/items/:id/takes", async (c) => {
+    const id = c.req.param("id");
+    const { scenario, issues } = await loadScenario(projectDir).catch(() => {
+      throw new HttpError(500, "server-error", PROJECT_UNREADABLE);
+    });
+    if (!scenario) throw new ScenarioValidationError(issues);
+    const cache = await AssetCache.load(projectDir);
+    const versions = await listTakes(
+      scenario,
+      cache,
+      await readTakes(projectDir),
+      id,
+      providerInfo.id,
+    );
+    if (!versions) throw notFound();
+    const response: TakesResponse = { itemId: id, takes: versions.map(takeInfo) };
+    return c.json(response);
+  });
+
+  // One trial take of a line with a proposed change. It never writes scenario.yaml.
+  app.post("/api/items/:id/trials", async (c) => {
+    const id = c.req.param("id");
+    const body = trialRequest(await jsonBody(c));
+    type Outcome =
+      | { refused: GeneratePlanResponse }
+      | { plan: GeneratePlanResponse }
+      | { trial: TrialResponse };
+    // In the queue, so that a trial waiting behind an edit sees the edited line.
+    const outcome = await exclusive(async (): Promise<Outcome> => {
+      const { scenario, issues } = await loadScenario(projectDir).catch(() => {
+        throw new HttpError(500, "server-error", PROJECT_UNREADABLE);
+      });
+      if (!scenario) throw new ScenarioValidationError(issues);
+      const fields = lineFieldsOf(scenario, id);
+      if (!fields) throw notFound();
+      if (!sameLineFields(baseFields(body.base), fields)) throw new HttpError(409, "stale");
+      const cache = await AssetCache.load(projectDir);
+      const edit: LineEdit = {};
+      if (body.text !== undefined) edit.line = body.text;
+      if (body.direction !== undefined) edit.direction = body.direction;
+      if (body.voiceSettings !== undefined) edit.voiceSettings = body.voiceSettings;
+      const plan: GeneratePlanResponse = {
+        kind: "plan",
+        provider: providerInfo,
+        plan: await planTrial(scenario, cache, resolvers, id, edit),
+      };
+      if (body.confirm !== true) return { plan };
+      if (providerInfo.paid && (!body.approved || !withinApproved(plan.plan.cost, body.approved))) {
+        return { refused: plan };
+      }
+      const run: TrialOptions = {};
+      if (body.proposalId !== undefined) {
+        run.proposalId = body.proposalId;
+        const reason = options.proposalReason?.(body.proposalId);
+        if (reason) run.reason = reason.slice(0, MAX_REASON);
+      }
+      if (providerInfo.paid && body.approved) run.budget = body.approved;
+      const { result, take } = await runTrial(scenario, cache, resolvers, id, edit, run);
+      if (result.status !== "generated" || !result.file) {
+        // A budget refusal is a refusal to confirm; any other failure is the server's.
+        if (result.status === "failed" && result.error.cause instanceof BudgetExceededError) {
+          return { refused: plan };
+        }
+        throw new HttpError(500, "server-error", `Failed to generate line "${id}"`);
+      }
+      const key = (await readTakes(projectDir)).filter((e) => e.item === id).at(-1)?.key;
+      if (key === undefined) throw new HttpError(500, "server-error");
+      return {
+        trial: {
+          kind: "trial",
+          provider: providerInfo,
+          key,
+          take,
+          url: `/assets/${result.file}`,
+          durationSec: result.durationSec,
+        },
+      };
+    });
+    if ("refused" in outcome) {
+      const error: ConfirmRequiredError = {
+        ...apiError("confirm-required"),
+        error: "confirm-required",
+        plan: outcome.refused,
+      };
+      return c.json(error, 409);
+    }
+    return c.json("plan" in outcome ? outcome.plan : outcome.trial);
   });
 
   app.post("/api/generate", async (c) => {
@@ -682,7 +871,16 @@ function findItem(data: unknown, id: string): Record<string, unknown> | undefine
 }
 
 function itemPatch(body: unknown): ItemPatchRequest {
-  const fields = ["text", "speaker", "gapBeforeSec", "take", "source"];
+  const fields = [
+    "text",
+    "speaker",
+    "gapBeforeSec",
+    "take",
+    "source",
+    "direction",
+    "voiceSettings",
+    "restore",
+  ];
   const record = checkFields(body, fields);
   const patch: ItemPatchRequest = {};
   if (record.text !== undefined) {
@@ -706,7 +904,99 @@ function itemPatch(body: unknown): ItemPatchRequest {
     patch.take = record.take as number;
   }
   if (record.source !== undefined) patch.source = soundSource(record.source, "source");
+  if (record.direction !== undefined) patch.direction = direction(record.direction);
+  if (record.voiceSettings !== undefined) patch.voiceSettings = voiceSettings(record.voiceSettings);
+  if (record.restore !== undefined) {
+    const restore = checkFields(record.restore, ["key", "base"]);
+    if (Object.keys(patch).length > 0)
+      throw badRequest("restore cannot be combined with other fields");
+    patch.restore = { key: takeKey(restore.key), base: trialBase(restore.base) };
+  }
   return patch;
+}
+
+/** The body of `POST /api/items/:id/trials`. */
+function trialRequest(body: unknown): TrialRequest {
+  const record = checkFields(body, [
+    "base",
+    "text",
+    "direction",
+    "voiceSettings",
+    "proposalId",
+    "confirm",
+    "approved",
+  ]);
+  const request: TrialRequest = { base: trialBase(record.base) };
+  if (record.text !== undefined) {
+    if (typeof record.text !== "string" || record.text === "") {
+      throw badRequest("text must be a non-empty string");
+    }
+    request.text = record.text;
+  }
+  if (record.direction !== undefined) request.direction = direction(record.direction);
+  if (record.voiceSettings !== undefined)
+    request.voiceSettings = voiceSettings(record.voiceSettings);
+  if (record.proposalId !== undefined) {
+    if (!IdSchema.safeParse(record.proposalId).success)
+      throw badRequest("proposalId must be an ID");
+    request.proposalId = record.proposalId as string;
+  }
+  if (record.confirm !== undefined) {
+    if (typeof record.confirm !== "boolean") throw badRequest("confirm must be a boolean");
+    request.confirm = record.confirm;
+  }
+  const approved = approvedCost(record.approved);
+  if (approved) request.approved = approved;
+  return request;
+}
+
+/** The line as the sender saw it. */
+function trialBase(value: unknown): TrialBase {
+  const record = checkFields(value, ["speaker", "text", "direction", "voiceSettings", "take"]);
+  if (!IdSchema.safeParse(record.speaker).success) throw badRequest("base.speaker must be an ID");
+  if (typeof record.text !== "string") throw badRequest("base.text must be a string");
+  if (!Number.isSafeInteger(record.take) || (record.take as number) < 0) {
+    throw badRequest("base.take must be a whole number, 0 or more");
+  }
+  const base: TrialBase = {
+    speaker: record.speaker as string,
+    text: record.text,
+    take: record.take as number,
+  };
+  if (record.direction !== undefined) {
+    if (typeof record.direction !== "string") throw badRequest("base.direction must be a string");
+    base.direction = record.direction;
+  }
+  if (record.voiceSettings !== undefined) base.voiceSettings = voiceSettings(record.voiceSettings);
+  return base;
+}
+
+function direction(value: unknown): string {
+  if (typeof value !== "string" || value.length > 2000) {
+    throw badRequest("direction must be a string of at most 2000 characters");
+  }
+  return value;
+}
+
+/** A plain JSON object of voice settings. A `null` value removes a key where it is merged. */
+function voiceSettings(value: unknown): Record<string, unknown> {
+  if (!isRecord(value) || !isPlainJson(value)) {
+    throw badRequest("voiceSettings must be an object of plain JSON values");
+  }
+  return value;
+}
+
+function takeKey(value: unknown): string {
+  if (typeof value !== "string" || !/^[0-9a-f]{64}$/.test(value)) {
+    throw badRequest("restore.key must be the key of a take");
+  }
+  return value;
+}
+
+/** The line's own `voice.settings` as written, if any. */
+function currentOverride(item: Record<string, unknown>): Record<string, unknown> | undefined {
+  const voice = item.voice;
+  return isRecord(voice) && isRecord(voice.settings) ? voice.settings : undefined;
 }
 
 function scenePatch(body: unknown): ScenePatchRequest {

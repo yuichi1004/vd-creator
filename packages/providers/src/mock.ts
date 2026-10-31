@@ -12,6 +12,7 @@ import type {
   SfxRequest,
   TtsProvider,
   TtsRequest,
+  VoiceParameter,
 } from "./types.js";
 import { encodeWav } from "./wav.js";
 
@@ -63,6 +64,22 @@ export class MockTtsProvider implements TtsProvider {
 
   estimate(req: TtsRequest): Cost {
     return { characters: [...req.text].length, requests: 1 };
+  }
+
+  /**
+   * The same settings as ElevenLabs, without model limits, so that retakes can be tried for
+   * free. The mock tones do not follow them, but a changed setting is a new request and a new
+   * draft, as it is with a real provider.
+   */
+  voiceParameters(): VoiceParameter[] {
+    const unit = { kind: "number", min: 0, max: 1, step: 0.05 } as const;
+    return [
+      { key: "stability", label: "Stability", ...unit },
+      { key: "similarityBoost", label: "Similarity boost", ...unit },
+      { key: "style", label: "Style", ...unit },
+      { key: "speed", label: "Speed", kind: "number", min: 0.7, max: 1.2, step: 0.05 },
+      { key: "useSpeakerBoost", label: "Speaker boost", kind: "on-off" },
+    ];
   }
 }
 

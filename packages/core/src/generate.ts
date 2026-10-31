@@ -20,6 +20,7 @@ import {
   type PlannedAsset,
   type ResolveContext,
 } from "./resolver.js";
+import { appendTake, type TakeContext, takeEntryFor } from "./takes/history.js";
 
 /** At most this many requests run at once. */
 export const GENERATION_CONCURRENCY = 4;
@@ -177,6 +178,12 @@ export type RunGenerationOptions = GenerationOptions & {
    * made. Calls to free providers are not counted. Without it, there is no limit.
    */
   budget?: Cost;
+  /**
+   * What the history entries of the generated lines say besides the line's own fields: that they
+   * are trial takes, and the proposal and reason they came from. Every generated line is
+   * appended to takes.jsonl whether or not this is set.
+   */
+  takes?: TakeContext;
 };
 
 /**
@@ -215,7 +222,7 @@ export async function runGeneration(
     while (next < targets.length) {
       const index = next++;
       const item = targets[index] as ScenarioItem;
-      const result = await runItem(item, ctx, resolvers, licenses);
+      const result = await runItem(item, ctx, resolvers, licenses, options.takes ?? {});
       results[index] = result;
       options.onItem?.(result);
     }
@@ -306,11 +313,28 @@ async function creditProvider(
   await recordProvider(ctx.cache.projectDir, entry.providerId, entry.kind, await licenses());
 }
 
+/**
+ * Appends the history entry of a line's new asset to takes.jsonl. A failed append fails the item,
+ * like a failed credit, so that no asset goes unlisted unnoticed.
+ */
+async function recordTake(
+  item: Extract<ScenarioItem, { kind: "line" }>,
+  key: string | undefined,
+  ctx: ResolveContext,
+  takes: TakeContext,
+): Promise<void> {
+  const cached = key === undefined ? undefined : ctx.cache.get(key);
+  if (key === undefined || !cached) return;
+  const made = { key, provider: cached.providerId, time: cached.createdAt };
+  await appendTake(ctx.cache.projectDir, takeEntryFor(ctx.scenario, item, made, takes));
+}
+
 async function runItem(
   item: ScenarioItem,
   ctx: ResolveContext,
   resolvers: readonly AssetResolver[],
   licenses: () => Promise<LicenseRegistry | undefined>,
+  takes: TakeContext,
 ): Promise<ItemResult> {
   const base = { id: item.id, kind: item.kind, sceneId: item.scene.id };
   const resolver = resolvers.find((r) => r.handles(item));
@@ -357,6 +381,7 @@ async function runItem(
     const asset = await resolver.resolve(item, ctx);
     // A failed record fails the item, so that a paid asset never goes uncredited unnoticed.
     await creditProvider(asset.key, ctx, licenses);
+    if (asset.generated && item.kind === "line") await recordTake(item, asset.key, ctx, takes);
     return {
       ...withResolver,
       status: asset.generated ? "generated" : "cached",
