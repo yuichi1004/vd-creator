@@ -81,6 +81,34 @@ function fileEdit(id: number, itemId: string): ChangeEntryView {
 }
 
 describe("marks", () => {
+  test("instructions to the agent and their outcomes add no detail to a mark", () => {
+    const target = { kind: "item", id: "l1" } as const;
+    const time = "2026-10-31T09:00:00.000Z";
+    const entries: ChangeEntryView[] = [
+      fileEdit(1, "l1"),
+      {
+        id: 2,
+        time,
+        source: "ui",
+        target,
+        change: "instruction",
+        instructionId: "i1",
+        text: "Softer",
+      },
+      {
+        id: 3,
+        time,
+        source: "ui",
+        target,
+        change: "instruction-outcome",
+        instructionId: "i1",
+        outcome: "proposed",
+      },
+    ];
+    const marks = buildMarks([{ kind: "item", id: "l1", count: 1 }], entries);
+    expect(marks.get(markKey("item", "l1"))?.details).toHaveLength(1);
+  });
+
   test("a file change shows its mark, and its details show the old and new value and reason", () => {
     const changed: ChangedTarget[] = [{ kind: "item", id: "l1", count: 1 }];
     const entries: ChangeEntryView[] = [

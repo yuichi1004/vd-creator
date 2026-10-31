@@ -7,7 +7,10 @@ import type { ApiClient } from "./client.js";
 import type { Scenario } from "./types.js";
 
 export type TargetKind = ChangedTarget["kind"];
-type TargetEntry = Extract<ChangeEntryView, { target: unknown }>;
+type TargetEntry = Exclude<
+  Extract<ChangeEntryView, { target: unknown }>,
+  { change: "instruction" | "instruction-outcome" }
+>;
 
 /** One change shown under a mark. */
 export type ChangeDetail = {
@@ -26,7 +29,12 @@ export function markKey(kind: TargetKind, id: string): string {
 }
 
 function isTargetEntry(entry: ChangeEntryView): entry is TargetEntry {
-  return entry.source === "file" || entry.source === "ui";
+  // Instructions to the agent (0013) are `ui` entries that record no change.
+  return (
+    (entry.source === "file" || entry.source === "ui") &&
+    entry.change !== "instruction" &&
+    entry.change !== "instruction-outcome"
+  );
 }
 
 /**

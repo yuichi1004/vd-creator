@@ -1,11 +1,11 @@
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { type ChangeEntry, readEntries } from "@vd-creator/core";
+import { type ChangeEntry, readEntries, readTakes } from "@vd-creator/core";
 import { SCENARIO_FILE } from "@vd-creator/scenario";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type {
   ApiError,
   CancelAgentResponse,
@@ -213,8 +213,12 @@ describe("a proposal", () => {
 
     const project1 = await json<ProjectResponse>(await call("GET", "/api/project"));
     expect(project1.changedSinceReview).toEqual([]);
+    // The API sends them, since it sends every entry; they mark nothing.
     const changes = await json<ChangesResponse>(await call("GET", "/api/changes?since=start"));
-    expect(JSON.stringify(changes)).not.toContain("instruction");
+    expect(changes.entries.map((e) => ("change" in e ? e.change : e.source))).toEqual([
+      "instruction",
+      "instruction-outcome",
+    ]);
   });
 
   test("refuses answers outside the schema, with fixed text only", async () => {
@@ -268,9 +272,17 @@ describe("a proposal", () => {
     }
     // An envelope that reports an error, and output that is not an envelope.
     process.env.FAKE_AGENT_MODE = "raw";
+    const envelope = { type: "result", subtype: "success", is_error: false, result: json1 };
+    const { subtype: _s, ...noSubtype } = envelope;
+    const { is_error: _e, ...noIsError } = envelope;
     for (const raw of [
-      JSON.stringify({ is_error: true, result: json1 }),
-      JSON.stringify({ result: 5 }),
+      JSON.stringify({ ...envelope, is_error: true }),
+      JSON.stringify({ ...envelope, result: 5 }),
+      JSON.stringify(noSubtype),
+      JSON.stringify(noIsError),
+      JSON.stringify({ ...envelope, subtype: "error_max_turns" }),
+      JSON.stringify({ ...envelope, type: "assistant" }),
+      JSON.stringify({ result: json1 }),
       json1,
       "",
     ]) {
@@ -562,6 +574,122 @@ describe("outcomes in the change log", () => {
     const instructionId = id && "instructionId" in id ? id.instructionId : "";
     expect((await call("POST", `/api/proposals/${instructionId}/discard`, {})).status).toBe(404);
     expect(await outcomes()).toEqual(["failed"]);
+  });
+});
+
+const agentFolders = (): string[] => readdirSync(tmpdir()).filter((n) => n.startsWith("vd-agent-"));
+
+describe("fix round 1", () => {
+  test("an abort right after runAgent is called cancels it before the agent starts", async () => {
+    const before = new Set(agentFolders());
+    const controller = new AbortController();
+    const running = runAgent({
+      file: process.execPath,
+      args: [FAKE_AGENT],
+      prompt: "x",
+      timeoutMs: 10_000,
+      signal: controller.signal,
+    });
+    // The folder is being made; no listener has seen the abort.
+    controller.abort();
+    expect(await running).toEqual({ status: "cancelled" });
+    expect(existsSync(join(agentDir, "record.json"))).toBe(false);
+    expect(agentFolders().filter((n) => !before.has(n))).toEqual([]);
+  });
+
+  test("a proposal can be tried only on its own line while it is live", async () => {
+    const call = makeApp();
+    answer({ direction: "softly", reason: "Softer" });
+    const { proposal } = await json<ProposalResponse>(await propose(call));
+    const other = await json<ProjectResponse>(await call("GET", "/api/project"));
+    const item = other.scenario?.scenes[1]?.items.find((i) => i.id === "s2-l1");
+    if (!item || !("line" in item)) throw new Error("no s2-l1");
+    const trial = (id: string, base: unknown, proposalId: string) =>
+      call("POST", `/api/items/${id}/trials`, {
+        base,
+        direction: "softly",
+        proposalId,
+        confirm: true,
+      });
+
+    // Another line, an unknown ID: nothing is generated or stored.
+    const otherBase = { speaker: item.speaker, text: item.line, take: item.take ?? 0 };
+    for (const [id, base, proposalId] of [
+      ["s2-l1", otherBase, proposal.id],
+      [LINE, proposal.base, "unknown-proposal"],
+    ] as const) {
+      const refused = await trial(id, base, proposalId);
+      expect(refused.status).toBe(409);
+      expect((await json<ApiError>(refused)).error).toBe("proposal-gone");
+    }
+    expect(await readTakes(project)).toEqual([]);
+    expect(await outcomes()).toEqual(["proposed"]);
+
+    // A discarded proposal.
+    await call("POST", `/api/proposals/${proposal.id}/discard`, {});
+    const discarded = await trial(LINE, proposal.base, proposal.id);
+    expect(discarded.status).toBe(409);
+    expect((await json<ApiError>(discarded)).error).toBe("proposal-gone");
+    expect(await readTakes(project)).toEqual([]);
+  });
+
+  test("an expired proposal cannot be tried", async () => {
+    let now = 1_000_000;
+    const call = makeApp({
+      agent: {
+        command: "claude",
+        timeoutSec: 30,
+        killGraceMs: 200,
+        now: () => now,
+        launch: { file: process.execPath, args: [FAKE_AGENT] },
+      },
+    });
+    answer({ direction: "softly", reason: "Softer" });
+    const { proposal } = await json<ProposalResponse>(await propose(call));
+    now += PROPOSAL_TTL_MS + 1;
+    const response = await call("POST", `/api/items/${LINE}/trials`, {
+      base: proposal.base,
+      direction: "softly",
+      proposalId: proposal.id,
+      confirm: true,
+    });
+    expect(response.status).toBe(409);
+    expect((await json<ApiError>(response)).error).toBe("proposal-gone");
+    expect(await readTakes(project)).toEqual([]);
+  });
+
+  test("a server shutdown ends the agent, its child, and the folder", async () => {
+    process.env.FAKE_AGENT_MODE = "child";
+    const shutdown = new AbortController();
+    const call = makeApp({ signal: shutdown.signal });
+    const run = propose(call);
+    await started();
+    const seen = await record();
+    expect(alive(seen.pid)).toBe(true);
+    shutdown.abort();
+    const ended = await run;
+    expect(ended.status).toBe(500);
+    await waitFor(() => !alive(seen.pid) && !alive(seen.childPid ?? 0));
+    expect(existsSync(seen.cwd)).toBe(false);
+    expect(await outcomes()).toEqual(["cancelled"]);
+  });
+
+  test("the shutdown listener is removed after a run", async () => {
+    const shutdown = new AbortController();
+    const remove = vi.spyOn(shutdown.signal, "removeEventListener");
+    answer(GOOD);
+    const call = makeApp({ signal: shutdown.signal });
+    expect((await propose(call)).status).toBe(200);
+    expect(remove.mock.calls.filter(([type]) => type === "abort").length).toBeGreaterThan(0);
+  });
+
+  test("a server that is already shut down never starts the agent", async () => {
+    const shutdown = new AbortController();
+    shutdown.abort();
+    answer(GOOD);
+    const call = makeApp({ signal: shutdown.signal });
+    expect((await propose(call)).status).toBe(500);
+    expect(existsSync(join(agentDir, "record.json"))).toBe(false);
   });
 });
 

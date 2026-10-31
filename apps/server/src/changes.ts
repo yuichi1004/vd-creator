@@ -12,11 +12,11 @@ import type { ChangedTarget, ChangeEntryView } from "./api.js";
 /**
  * An entry as a client sees it. The stored session ID is never sent, since another client could
  * copy it into `X-VD-Session` to hide its changes from a page. `own: true` marks a `ui` entry
- * made by the requester's own session. The entries of instructions to the agent are not sent:
- * they record no change to the drama, and the page does not show them.
+ * made by the requester's own session. The entries of instructions to the agent are sent as they
+ * are, since they carry no session; they record no change to the drama, so they mark nothing.
  */
-export function entryView(entry: ChangeEntry, session?: string): ChangeEntryView | undefined {
-  if (isInstructionEntry(entry)) return undefined;
+export function entryView(entry: ChangeEntry, session?: string): ChangeEntryView {
+  if (isInstructionEntry(entry)) return entry;
   if (entry.source !== "ui") return entry;
   const { session: stored, ...rest } = entry;
   return session !== undefined && stored === session ? { ...rest, own: true } : rest;

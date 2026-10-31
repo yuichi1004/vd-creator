@@ -194,6 +194,7 @@ const MESSAGES: Record<ApiErrorCode, string> = {
   "confirm-required": "A paid provider needs confirm: true and the approved cost to generate",
   stale: "The line has changed since it was read, so nothing was changed",
   busy: "The agent is working on another instruction",
+  "proposal-gone": "The proposal is no longer available for this line",
   timeout: "The agent did not answer in time",
   "server-error": "The server could not complete the request",
 };
@@ -444,10 +445,7 @@ export function createApp(options: AppOptions): Hono {
     else throw badRequest("since must be review, start, or an entry ID");
     const session = sessionOf(c);
     const response: ChangesResponse = {
-      entries: entriesSince(await readEntries(projectDir), point).flatMap((e) => {
-        const view = entryView(e, session);
-        return view ? [view] : [];
-      }),
+      entries: entriesSince(await readEntries(projectDir), point).map((e) => entryView(e, session)),
     };
     return c.json(response);
   });
@@ -653,9 +651,12 @@ export function createApp(options: AppOptions): Hono {
       }
       const run: TrialOptions = {};
       if (body.proposalId !== undefined) {
-        run.proposalId = body.proposalId;
+        // Only a live proposal for this line may be tried: not an unknown, expired, discarded,
+        // or other line's one. Nothing is generated otherwise.
         const reason = reasonOf(body.proposalId, id);
-        if (reason) run.reason = reason.slice(0, MAX_REASON);
+        if (reason === undefined) throw new HttpError(409, "proposal-gone");
+        run.proposalId = body.proposalId;
+        run.reason = reason.slice(0, MAX_REASON);
       }
       if (providerInfo.paid && body.approved) run.budget = body.approved;
       const { result, take } = await runTrial(scenario, cache, resolvers, id, edit, run);
@@ -703,6 +704,10 @@ export function createApp(options: AppOptions): Hono {
     if (agentRun) throw new HttpError(409, "busy");
     const controller = new AbortController();
     agentRun = controller;
+    // A server that is shutting down ends the run too.
+    const onShutdown = () => controller.abort();
+    if (options.signal?.aborted) onShutdown();
+    options.signal?.addEventListener("abort", onShutdown, { once: true });
     try {
       const { scenario, issues } = await loadScenario(projectDir).catch(() => {
         throw new HttpError(500, "server-error", PROJECT_UNREADABLE);
@@ -754,6 +759,7 @@ export function createApp(options: AppOptions): Hono {
       };
       return c.json(response);
     } finally {
+      options.signal?.removeEventListener("abort", onShutdown);
       agentRun = undefined;
     }
   });

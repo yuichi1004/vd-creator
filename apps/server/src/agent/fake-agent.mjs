@@ -49,7 +49,12 @@ function start() {
   switch (mode) {
     case "ok":
       process.stdout.write(
-        JSON.stringify({ type: "result", is_error: false, result: process.env.FAKE_AGENT_RESULT }),
+        JSON.stringify({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          result: process.env.FAKE_AGENT_RESULT,
+        }),
       );
       break;
     case "raw":

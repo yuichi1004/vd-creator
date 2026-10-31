@@ -40,6 +40,8 @@ export async function runAgent(spec: AgentRunSpec): Promise<AgentRunResult> {
   if (spec.signal.aborted) return { status: "cancelled" };
   const cwd = await mkdtemp(join(tmpdir(), "vd-agent-"));
   try {
+    // An abort during mkdtemp is not an event any listener saw, so look again before the spawn.
+    if (spec.signal.aborted) return { status: "cancelled" };
     return await run(spec, cwd);
   } finally {
     await rm(cwd, { recursive: true, force: true });
@@ -79,6 +81,8 @@ function run(spec: AgentRunSpec, cwd: string): Promise<AgentRunResult> {
     const timer = setTimeout(() => stop("timeout"), spec.timeoutMs);
     const onAbort = () => stop("cancelled");
     spec.signal.addEventListener("abort", onAbort, { once: true });
+    // An abort that came before the listener was attached fires no event.
+    if (spec.signal.aborted) onAbort();
 
     // Whatever the leader left running is ended with it.
     child.on("exit", () => signalGroup("SIGKILL"));

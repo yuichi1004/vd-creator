@@ -243,7 +243,7 @@ describe("POST /api/items/:id/trials", () => {
   });
 
   test("trying the same proposal twice gives two takes", async () => {
-    const call = makeApp(fakeProviders().providers);
+    const call = makeApp(fakeProviders().providers, { proposalReason: () => "Softer" });
     const request = async () =>
       json<TrialResponse>(
         await call("POST", `/api/items/${LINE}/trials`, {

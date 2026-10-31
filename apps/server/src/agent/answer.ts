@@ -27,7 +27,8 @@ const KEYS = new Set(["direction", "text", "settings", "reason"]);
 
 /**
  * The text that claude prints with `--output-format json`: the `result` string of its JSON
- * envelope. `undefined` if the output is not such an envelope, or it reports an error.
+ * envelope. `undefined` unless the output is a successful result envelope: `type` "result", `subtype`
+ * "success", `is_error` false.
  */
 export function unwrapClaude(stdout: string): string | undefined {
   let envelope: unknown;
@@ -36,7 +37,14 @@ export function unwrapClaude(stdout: string): string | undefined {
   } catch {
     return undefined;
   }
-  if (!isRecord(envelope) || envelope.is_error === true) return undefined;
+  if (
+    !isRecord(envelope) ||
+    envelope.type !== "result" ||
+    envelope.subtype !== "success" ||
+    envelope.is_error !== false
+  ) {
+    return undefined;
+  }
   return typeof envelope.result === "string" ? envelope.result : undefined;
 }
 

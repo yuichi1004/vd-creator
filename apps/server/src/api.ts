@@ -73,14 +73,19 @@ export type ChangedTarget = { kind: ChangeTargetKind; id: string; count: number 
  * entry has `own`. The page makes its session ID random, at least 128 bits, so no one else
  * learns it.
  */
-export type ChangeEntryView =
-  Exclude<ChangeEntry, InstructionLogEntry> extends infer E
-    ? E extends { session?: string }
+export type ChangeEntryView = ChangeEntry extends infer E
+  ? E extends InstructionLogEntry
+    ? E
+    : E extends { session?: string }
       ? Omit<E, "session"> & { own?: true }
       : E
-    : never;
+  : never;
 
-/** Response of `GET /api/changes`: the entries after the point, oldest first. */
+/**
+ * Response of `GET /api/changes`: the entries after the point, oldest first. That includes the
+ * `instruction` and `instruction-outcome` entries of 0013, which record no change to the drama:
+ * they never mark a target, and a page that shows changes skips them.
+ */
 export type ChangesResponse = { entries: ChangeEntryView[] };
 
 /** `GET /api/project`. */
@@ -417,6 +422,8 @@ export type ApiErrorCode =
   | "stale"
   /** 409: another agent run is in progress (0013). */
   | "busy"
+  /** 409: a trial named a proposal that is unknown, expired, discarded, or for another line (0013). */
+  | "proposal-gone"
   /** 504: the agent did not answer in time (0013). */
   | "timeout"
   | "server-error";
