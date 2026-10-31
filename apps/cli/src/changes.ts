@@ -88,7 +88,15 @@ async function listCommand(
   }
   const since = parseSince(options.since);
   const source = parseSource(options.source);
-  if (since === undefined || source === undefined) {
+  if (since === undefined) {
+    io.stderr(
+      'vd changes: --since must be an entry ID, "start", or an ISO 8601 time with a time zone, such as 2026-10-31T09:00:00Z',
+    );
+    io.stderr(CHANGES_USAGE);
+    return exit.usage;
+  }
+  if (source === undefined) {
+    io.stderr("vd changes: --source must be ui, file, agent, or review");
     io.stderr(CHANGES_USAGE);
     return exit.usage;
   }
@@ -147,7 +155,11 @@ function parseSince(text: string | undefined): ChangeSince | undefined {
   if (text === undefined) return "agent";
   if (text === "start") return "start";
   if (/^\d+$/.test(text)) return { id: Number(text) };
-  return Number.isNaN(Date.parse(text)) ? undefined : { time: text };
+  // Without a zone, Date.parse would read the time in the local zone of the machine.
+  const zoned = /^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}(:\d{2}(\.\d+)?)?([Zz]|[+-]\d{2}:\d{2})$/.test(
+    text,
+  );
+  return zoned && !Number.isNaN(Date.parse(text)) ? { time: text } : undefined;
 }
 
 function parseSource(text: string | undefined): ChangeSource | "all" | undefined {

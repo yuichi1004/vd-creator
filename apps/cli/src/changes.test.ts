@@ -106,7 +106,59 @@ describe("vd changes", () => {
       /^#1 /,
     );
     expect((await vd("changes", dir, "--since", "yesterday-ish")).code).toBe(EXIT_USAGE);
+    // A time needs a zone, so the result does not depend on the machine's.
+    const zoneless = await vd("changes", dir, "--since", "2026-10-31T09:00:00");
+    expect(zoneless.code).toBe(EXIT_USAGE);
+    expect(zoneless.stderr).toContain("ISO 8601 time with a time zone");
+    expect((await vd("changes", dir, "--since", "2000-01-01T00:00:00Z")).code).toBe(EXIT_OK);
+    expect((await vd("changes", dir, "--since", "2000-01-01T09:00:00+09:00")).code).toBe(EXIT_OK);
     expect((await vd("changes", dir, "--source", "robot")).code).toBe(EXIT_USAGE);
+  });
+
+  test("prints long and multi-line values in full, on one line", async () => {
+    await baseline();
+    const long = "word ".repeat(40).trim();
+    await editScenario("Once upon a time...", long);
+    const result = await vd("changes", dir);
+    expect(long.length).toBeGreaterThan(80);
+    expect(result.stdout).toContain(`-> ${JSON.stringify(long)}`);
+    expect(result.stdout).not.toContain("…");
+
+    // A YAML escape in a double-quoted string makes a real newline in the value.
+    await editScenario(long, "first\\nsecond");
+    const multi = (await vd("changes", dir, "--since", "1")).stdout;
+    expect(multi.split("\n")).toHaveLength(1);
+    expect(multi).toContain(`${JSON.stringify(long)} -> "first\\nsecond"`);
+  });
+
+  test("prints the fields of added and removed items", async () => {
+    await baseline();
+    const fields = {
+      line: "A new line, quite a long one so that the whole value is past 80 characters.",
+      speaker: "narrator",
+    };
+    await appendEntries(dir, [
+      {
+        source: "file",
+        target: { kind: "item", id: "s1-l9" },
+        change: "added",
+        fields,
+        to: { scene: "s1", index: 1 },
+      },
+      {
+        source: "file",
+        target: { kind: "item", id: "s1-l9" },
+        change: "removed",
+        fields,
+        from: { scene: "s1", index: 1 },
+      },
+    ]);
+    const lines = (await vd("changes", dir)).stdout.split("\n");
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatch(/item "s1-l9" added at s1 #2: /);
+    expect(lines[0]).toContain(JSON.stringify(fields));
+    expect(lines[1]).toMatch(/item "s1-l9" removed from s1 #2: /);
+    expect(lines[1]).toContain(JSON.stringify(fields));
   });
 
   test("--json prints the entries", async () => {

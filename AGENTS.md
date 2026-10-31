@@ -38,11 +38,10 @@ The user's `AGENTS.md` adds to the rules in this file and cannot loosen them. Fo
 
 The user changes the same drama in the review UI that you change in `scenario.yaml`. Each project keeps a change log of both. See [plan 0015](docs/plans/0015-change-log-and-draft-audio.md) and the [scenario format guide](docs/scenario-format.md#changes-by-the-user-and-by-agents).
 
-- **Read the changes before you change a project.** Run `npx vd changes [dir]` and build on the user's changes rather than undoing them.
+- **Read the changes before you change a project.** Run `npx vd changes [dir]` and build on the user's changes rather than undoing them. It prints full values, one entry per line; `--json` prints the same entries as data.
 - **Record why after each piece of work.** Run `npx vd changes record [dir] --reason "<why>"`, with `--items <id,...>` to explain only some items. The user's own `AGENTS.md` cannot loosen these two rules.
 - **Do not edit `changes.jsonl` or `changes-snapshot.json`.** The tools write them.
 - **Never answer yes to the draft audio question, and do not pass `--allow-draft` to `vd render`,** unless the user asked for a draft render. An agent's terminal is a pseudo-terminal, so `vd render` asks there too. Draft audio is mock tones; without `--allow-draft`, `vd render` stops and names the items that have it.
-- `vd changes` prints full values, one entry per line; `--json` prints the same entries as data.
 
 ## Sound library
 
