@@ -25,6 +25,8 @@ Coding agents can do most of the mechanical work, but only if the drama is writt
 
 ## Users
 
+Developers who work with agents come first. The product then grows toward creators who are at home with agentic content tools, such as ElevenLabs users, but who may not program. Requirements are written so that such a creator could meet them, even where today's product still needs a developer.
+
 From [personas](personas.md):
 
 - **The weekend creator** (main): wants to hear a first draft of an episode quickly, review it on a phone, and fix it in small steps, without surprise costs.
@@ -120,9 +122,22 @@ From [personas](personas.md):
 |---|---|---|---|---|
 | R31 | The user can pick a drama from a list in the UI, without restarting anything. | Should | Given several projects, when the user opens the UI, then they choose one from a list. | Missing (draft plan 0011) |
 | R32 | Personal settings, notes, and keys stay outside the shared code and are never published by the tool. | Must | Given a user directory, when the user works with agents, then nothing from it is committed or uploaded. | Built (user directory) |
-| R33 | A series can share speakers and voices across episodes. | Could | Given episode 2 of a series, when it is created, then it starts with episode 1's speakers. | Missing |
+| R33 | A new episode can start from another project's speakers and voices. A series is several projects, not a separate thing. | Could | Given episode 2, when an agent creates it from episode 1, then it starts with episode 1's speakers. | Missing |
 
 ## Experience
+
+### Design principle: agent first, UI for what agents do badly
+
+The drama is made through agents. Anything that needs judgment in many steps, such as writing, restructuring, choosing sounds, or a complex fix, is asked of an agent in plain words. The UI covers the work where an agent is a poor fit:
+
+- **Hearing and seeing:** playback, preview, speed, and following the images. An agent cannot listen for the user.
+- **Quick, single-step actions:** regenerate a take, pick an earlier take, swap a sound for a library entry, adjust one parameter.
+- **Small text fixes:** a typo or a word in one line, where explaining the change would take longer than making it.
+- **Human-only decisions:** confirming a paid generation and verifying a license.
+
+A UI feature that would need several steps of judgment is a sign the work belongs to an agent. The UI may hand such work to an agent, as a proposal the user accepts, but it does not grow its own editor for it.
+
+### Where the user works
 
 - **Agents in a terminal** do the drafting, generation, structural edits, library imports, and rendering, through the `vd` commands and the scenario format guide.
 - **The review UI** in a browser on a PC, or on a phone over a private network, is for listening, judging, and small fixes. On a phone it is one column with the image at the top and the player at the bottom, and every control works by tap.
@@ -163,15 +178,13 @@ From [personas](personas.md):
 
 | Date | Question | Decision | By |
 |---|---|---|---|
+| 2026-10-31 | Who is the user? | Developers who use agents first; later, creators at home with agentic content tools who may not program. | Owner |
+| 2026-10-31 | Where does a drama start? | From an agent only. The UI follows the design principle in Experience. | Owner |
+| 2026-10-31 | Is setting voices by ID enough for now (R4)? | Yes for now. R4 stays Should. | Owner |
+| 2026-10-31 | Is a series its own thing (R33)? | No. A series is several projects. | Owner |
 
 ## Open questions
 
-These need the owner's answer; each has a suggested default.
-
-1. **Who is the user beyond the owner?** Only the owner for now, or creators who are not developers? Default: developers and agent users first; setup for others later.
-2. **Where should a drama start?** Only from an agent in a terminal, or also from the UI? Default: agent only, until R5 improves.
-3. **Voice casting (R4).** Is choosing voices by ID in the scenario enough for now? Default: Should, after the review improvements.
-4. **Priority of the gaps.** Default order: speed (R12), retakes and takes (R17 to R19), library browse (R24, R25), project picker (R31), then R4, R9, R14, R20, R30, R33.
-5. **Series (R33).** Is a series a first-class thing, or just several projects? Default: several projects for now.
+1. **Order of the missing pieces.** Which gaps to build first. Suggested: speed (R12); then fixing lines with direction, settings, and earlier takes (R17 to R19); then the library screen (R24, R25); then the project picker (R31); then the rest (R4, R9, R14, R20, R30, R33).
 
 ## Change log

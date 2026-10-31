@@ -6,6 +6,7 @@ Every PRD and every PRD review uses these personas. They describe kinds of users
 
 - **Goal:** turn their own stories into voice dramas as a hobby, and enjoy the process.
 - **Setting:** writes at a PC in the evening, and listens and reviews on a phone on the train or in bed.
+- **Skills:** at home with AI content tools such as voice generators, and asks agents for things in plain words, but does not write code.
 - **Fears:** surprise costs from paid voice generation, and losing an evening to setup or tools that break.
 - **Success:** hears a draft of a new episode the same day they finish the script, and fixes what sounds wrong in a few taps.
 
