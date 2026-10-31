@@ -1,6 +1,6 @@
 # 0013: Voice retakes with an agent
 
-- Status: Accepted
+- Status: In progress
 - Date: 2026-10-31
 - PRD: [P0001](../prd/P0001-product-baseline.md), R18, R19, R17
 - Depends on: [0003](0003-scenario-format.md), [0004](0004-providers-and-generation.md), [0005](0005-review-ui.md), [0010](0010-settings-and-playback-speed.md), [0015](0015-change-log-and-draft-audio.md)
