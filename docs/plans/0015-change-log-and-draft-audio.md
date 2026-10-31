@@ -1,6 +1,6 @@
 # 0015: Change log, agent changes, and draft audio
 
-- Status: In progress
+- Status: Done
 - Date: 2026-10-31
 - PRD: [P0001](../prd/P0001-product-baseline.md), R38, R39, R13, R36
 - Depends on: [0003](0003-scenario-format.md), [0005](0005-review-ui.md), [0006](0006-rendering.md)
@@ -117,13 +117,14 @@ Run the first task, then the second and third at the same time, then the fourth.
   - Ownership: `apps/server/`, the API table in plan 0005.
   - Acceptance: `npm test -w apps/server` passes, with tests that a PATCH writes one `ui` entry per field with the session ID and no `file` entry; that an outside edit of `scenario.yaml` writes `file` entries; that an outside edit not yet seen by the watcher is recorded as `file` before a PATCH on top of it; that edits made while the server was stopped are recorded on start; that `review` clears `changedSinceReview`, and an `agent` entry after it marks its targets again; that a speaker and an item with the same ID are marked apart; and that a mock asset gives `audio: "draft"` while library and paid assets give `final`.
   - Review notes: first review by Codex `gpt-6.1-sol`: four P2. The server typecheck failed on a test type; requests without a session matched each other; `GET /api/changes` returned session IDs, which another client could copy into `X-VD-Session` to hide its edits from that page; and a review or a log-only agent reason sent no live event. Round 1 hides entries only for a matching session ID, never sends session IDs (only `own: true` to the requester), and watches `changes.jsonl`. The Claude re-review found no P1 or P2. Follow-ups: each PATCH now fires two `project-changed` events (one for `scenario.yaml`, one for `changes.jsonl`), so the page reloads twice per edit; coalesce them. Add tests that an empty, over-long, or newline-suffixed `X-VD-Session` gets 400, including on `GET /api/changes`. Strip `session` from every entry in responses, not only `ui` entries.
-- [ ] Marks and draft badges in the UI
+- [x] Marks and draft badges in the UI
   - Requirements: R39, R13
   - Target: `apps/web/src/`
   - Change: the session ID header, the "changed" marks with their details, the header count and the "Changes" list, "Mark all reviewed", and the "draft" badge and count.
   - Constraints: no new dependencies. The phone rules of 0005 apply. Depends on the third task.
   - Ownership: `apps/web/src/`.
   - Acceptance: `npm run build -w apps/web && npm test -w apps/web` pass, with tests that a `file` change shows its mark and reason, that the page's own changes are not marked, that "Mark all reviewed" sends one request and clears the marks, and that draft items show the badge. Before the plan is closed, the coordinator edits the scenario as an agent would, records a reason, and checks the marks in a browser at 1280 px and 375 px widths.
+  - Review notes: Claude reviews. The first found two P2: a reason that refers to entry 1 could never show its details, because `since` is exclusive and the server rejected 0; and entries were refetched only when the marked targets changed, so a later agent reason for an already-marked target never appeared. Round 1 lets `GET /api/changes` accept `since=start` (a server change, allowed for this round), refetches entries on every project update and keeps the old ones while loading, numbers project requests to drop stale responses, reloads once for events within 150 ms, fixes the label wording, and shows a notice when loading entries fails. The re-review found no P1 or P2. The coordinator checked in headless Chrome at 1280 and 375 px: an agent edit with a reason that refers to entry 1 shows both marks, the details and the reason, in the marks and the Changes list, and "Mark all reviewed" clears them. Follow-ups: a dropped stale reload still clears the load error, and the fetch-failure notice is not cleared by a later success; with no changes each update sets a new empty array (an extra render); a steady stream of events under 150 ms apart defers the reload; the coalescing and stale-response logic has no unit test, because the web tests have no DOM.
 
 ## Open questions
 
