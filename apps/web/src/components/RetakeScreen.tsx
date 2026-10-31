@@ -1,7 +1,7 @@
 import type { TakeInfo } from "@vd-creator/server";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { ApiClient } from "../client.js";
-import { SequencePlayer } from "../contextAudio.js";
+import { SequencePlayer, stopWhenHidden } from "../contextAudio.js";
 import {
   assetFileOf,
   type EditFields,
@@ -22,6 +22,8 @@ export type RetakeActions = {
   discard: () => void;
   tryProposal: () => void;
   tryEdit: (fields: EditFields) => void;
+  /** The proposal was copied into the fields: a try of them keeps its provenance. */
+  editProposal: () => void;
   keep: () => void;
   dropTrial: () => void;
   takeBack: (take: TakeInfo) => void;
@@ -89,6 +91,7 @@ export function RetakeView(props: RetakeViewProps) {
 
   const editProposal = () => {
     if (!proposal) return;
+    actions.editProposal();
     setFields({
       text: proposal.text ?? fields.text,
       direction: proposal.direction ?? fields.direction,
@@ -384,8 +387,14 @@ export function RetakeScreen(props: Props) {
     const current = player.current;
     return () => current?.stop();
   }, []);
+  // A locked phone or a hidden tab stops the sound, as the main player does (plan 0005).
+  useEffect(() => {
+    const current = player.current;
+    return current ? stopWhenHidden(current) : undefined;
+  }, []);
 
   const actions: RetakeActions = {
+    editProposal: () => controller.editProposal(),
     ask: (text) => void controller.ask(text),
     cancel: () => void controller.cancel(),
     discard: () => void controller.discard(),

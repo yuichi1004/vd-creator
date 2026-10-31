@@ -35,7 +35,7 @@ function apiError(error: string, status: number, extra: object = {}): Reply {
 /** A controller over a mocked fetch. `route` answers a request or returns nothing for "ok". */
 function setup(
   route: (call: Call) => Reply | undefined,
-  options: { paid?: boolean; confirm?: boolean } = {},
+  options: { paid?: boolean; confirm?: boolean; base?: () => TrialBase } = {},
 ) {
   const calls: Call[] = [];
   const events: string[] = [];
@@ -55,7 +55,7 @@ function setup(
     client: new ApiClient(PREFIX, fetchImpl),
     itemId: "l1",
     paid: options.paid ?? false,
-    getBase: () => BASE,
+    getBase: options.base ?? (() => BASE),
     applyProject: () => {
       events.push("applied");
     },

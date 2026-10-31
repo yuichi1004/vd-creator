@@ -34,6 +34,7 @@ const ACTIONS: RetakeActions = {
   discard: noop,
   tryProposal: noop,
   tryEdit: noop,
+  editProposal: noop,
   keep: noop,
   dropTrial: noop,
   takeBack: noop,

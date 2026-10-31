@@ -404,9 +404,17 @@ export function App() {
   const projectRef = useRef(project);
   projectRef.current = project;
   const paid = project?.provider.paid ?? false;
-  const retake = useMemo(() => {
-    if (retakeId === undefined) return undefined;
-    return new RetakeController({
+  // It is created when a line opens and disposed when the screen is left or another line opens,
+  // so that a late plan of one line never opens a dialog on the next.
+  const [retakeController, setRetakeController] = useState<RetakeController>();
+  useEffect(() => {
+    if (retakeId === undefined) {
+      setRetakeController(undefined);
+      return;
+    }
+    // The confirm step this controller has open, if any.
+    let closeOpen: (() => void) | undefined;
+    const controller = new RetakeController({
       client,
       itemId: retakeId,
       paid,
@@ -418,21 +426,26 @@ export function App() {
       reload,
       askConfirm: (plan, changed) =>
         new Promise<boolean>((resolve) => {
+          const finish = (answer: boolean) => {
+            closeOpen = undefined;
+            setConfirm(undefined);
+            resolve(answer);
+          };
+          closeOpen = () => finish(false);
           setConfirm({
             plan,
             changed,
-            onConfirm: () => {
-              setConfirm(undefined);
-              resolve(true);
-            },
-            onCancel: () => {
-              setConfirm(undefined);
-              resolve(false);
-            },
+            onConfirm: () => finish(true),
+            onCancel: () => finish(false),
           });
         }),
+      closeConfirm: () => closeOpen?.(),
     });
+    setRetakeController(controller);
+    return () => controller.dispose();
   }, [client, retakeId, paid, applyProject, reload]);
+  // Never the controller of another line, for the render before the effect has run.
+  const retake = retakeController?.itemId === retakeId ? retakeController : undefined;
 
   const openLibrary = useCallback(
     (target: LibraryTarget) => {

@@ -79,6 +79,8 @@ export type RetakeDeps = {
    * user approved an earlier one.
    */
   askConfirm: (plan: GeneratePlanResponse, changed: boolean) => Promise<boolean>;
+  /** Closes the confirm step if it is open. Called when the controller is disposed. */
+  closeConfirm?: () => void;
 };
 
 /** The line as a base, in the form the server compares. */
@@ -224,8 +226,29 @@ export class RetakeController {
   };
   private readonly listeners = new Set<() => void>();
   private cancelRequested = false;
+  private disposed = false;
+  /** Counts takes reads, so that only the newest one applies. */
+  private takesSeq = 0;
+  /** True once the user pressed Edit on the proposal: later tries keep its provenance. */
+  private adopted = false;
 
   constructor(private readonly deps: RetakeDeps) {}
+
+  /** The line this controller is for. */
+  get itemId(): string {
+    return this.deps.itemId;
+  }
+
+  /**
+   * Ends the controller when the screen is left or another line opens. Late answers are
+   * ignored, an open confirm step is closed, and no later request is sent.
+   */
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.listeners.clear();
+    this.deps.closeConfirm?.();
+  }
 
   getState = (): RetakeState => this.state;
 
@@ -237,18 +260,28 @@ export class RetakeController {
   };
 
   private set(patch: Partial<RetakeState>): void {
+    if (this.disposed) return;
     this.state = { ...this.state, ...patch };
     for (const listener of this.listeners) listener();
   }
 
-  /** Loads the line's versions. */
+  /** Loads the line's versions. Only the newest read applies; an older answer is dropped. */
   async loadTakes(): Promise<void> {
+    if (this.disposed) return;
+    const seq = ++this.takesSeq;
     try {
       const response = await this.deps.client.getTakes(this.deps.itemId);
+      if (seq !== this.takesSeq) return;
       this.set({ takes: response.takes, takesError: undefined });
     } catch (error) {
+      if (seq !== this.takesSeq) return;
       this.set({ takesError: messageOf(error) });
     }
+  }
+
+  /** Marks the proposal as copied into the fields, so that a try of them keeps its ID. */
+  editProposal(): void {
+    if (this.state.proposal) this.adopted = true;
   }
 
   dismissMessage(): void {
@@ -265,6 +298,7 @@ export class RetakeController {
     this.set({ asking: true, message: undefined });
     try {
       const response = await this.deps.client.createProposal(this.deps.itemId, text);
+      this.adopted = false;
       this.set({ asking: false, proposal: response.proposal });
     } catch (error) {
       this.set({ asking: false, message: this.agentFailure(error) });
@@ -298,6 +332,7 @@ export class RetakeController {
   async discard(): Promise<void> {
     const proposal = this.state.proposal;
     if (!proposal) return;
+    this.adopted = false;
     this.set({ proposal: undefined });
     try {
       await this.deps.client.discardProposal(proposal.id);
@@ -326,8 +361,21 @@ export class RetakeController {
 
   /** Makes a trial take of the fields the user edited by hand. */
   async tryEdit(fields: EditFields): Promise<void> {
-    const base = this.deps.getBase();
+    let base = this.deps.getBase();
     if (!base) return;
+    // A proposal copied into the fields keeps its ID and base, so that its reason and its
+    // tried and kept outcomes stay linked. It is dropped when the line changed meanwhile.
+    let proposalId: string | undefined;
+    const proposal = this.state.proposal;
+    if (proposal && this.adopted) {
+      if (sameJson(proposal.base, base)) {
+        base = proposal.base;
+        proposalId = proposal.id;
+      } else {
+        this.adopted = false;
+        this.set({ proposal: undefined });
+      }
+    }
     const settings = parseSettings(fields.settings);
     if (!settings) {
       this.set({ message: { text: TEXT.badSettings, kind: "error" } });
@@ -343,7 +391,10 @@ export class RetakeController {
       this.set({ message: { text: TEXT.nothingChanged, kind: "info" } });
       return;
     }
-    await this.runTrial({ base, ...request }, base);
+    await this.runTrial(
+      { base, ...(proposalId !== undefined ? { proposalId } : {}), ...request },
+      base,
+    );
   }
 
   private async runTrial(
@@ -358,13 +409,19 @@ export class RetakeController {
     this.set({ working: "trial", message: undefined });
     try {
       const planned = await this.deps.client.trial(this.deps.itemId, request);
+      // A plan that arrives after the screen was left must not open a dialog.
+      if (this.disposed) return;
       if (planned.kind !== "plan") throw new ApiRequestError("Unexpected response.", 200);
       let plan = planned;
       let changed = false;
       for (;;) {
-        if (this.deps.paid && !(await this.deps.askConfirm(plan, changed))) {
-          this.set({ working: undefined });
-          return;
+        if (this.deps.paid) {
+          const approved = await this.deps.askConfirm(plan, changed);
+          if (this.disposed) return;
+          if (!approved) {
+            this.set({ working: undefined });
+            return;
+          }
         }
         try {
           const run = await this.deps.client.trial(this.deps.itemId, {
@@ -379,11 +436,13 @@ export class RetakeController {
                 }
               : {}),
           });
+          if (this.disposed) return;
           if (run.kind !== "trial") throw new ApiRequestError("Unexpected response.", 200);
           this.set({ working: undefined, trial: trialOf(run, base) });
           await this.loadTakes();
           return;
         } catch (error) {
+          if (this.disposed) return;
           if (error instanceof ApiRequestError && isConfirmRequired(error.body)) {
             plan = error.body.plan;
             changed = true;
@@ -444,6 +503,7 @@ export class RetakeController {
 
   /** Shows a failed request. A line that changed meanwhile is reloaded. */
   private async fail(error: unknown): Promise<void> {
+    if (this.disposed) return;
     const code = error instanceof ApiRequestError ? error.body?.error : undefined;
     if (code === "stale") {
       this.set({
