@@ -152,13 +152,14 @@ The server owns each instruction's record in `changes.jsonl` (0015). When an ins
 
 Run in order, after plans 0015 and 0010, and not at the same time as another plan that owns `apps/server/` or `apps/web/src/`. The scenario task's first review uses `gpt-6-astra`, because it changes the scenario format and the cache key. The agent task's first review uses Codex `gpt-6.1-sol`, because the server starts a process from a request. Fix rounds and the other tasks use a Claude reviewer.
 
-- [ ] Line voice settings
+- [x] Line voice settings
   - Requirements: R18
   - Target: `packages/scenario/`, `packages/core/`, `docs/scenario-format.md`
   - Change: the optional `voice.settings` on lines with the plain-JSON check and the JSON Schema, `updateItem` support for the nested map, the merge over the speaker's settings in planning and generation, the merged settings in the cache key, and the guide. Also fix the guide's speaker example, which writes `similarity`, a key the ElevenLabs adapter ignores, to `similarityBoost`.
   - Constraints: no new dependencies. A line without `voice` must give the same cache key as today, so no asset is generated again. Use the mock provider in tests.
   - Ownership: `packages/scenario/`, `packages/core/` except `src/changes/`, `docs/scenario-format.md`.
   - Acceptance: the standard acceptance chain passes, with tests that a line override wins over the speaker one key at a time, that a change to the override changes the cache key, that a scenario without overrides keeps its cache keys, and that `updateItem` sets and removes one key and keeps comments.
+  - Review notes: first review by Codex `gpt-6-astra`: no P1, two P2, both in `updateItem`. Removing the last key of a block-style `voice.settings` threw, and a flow-style one left empty maps behind; and a list value was written as the text "1,2". In both cases the file stayed unchanged. Astra confirmed by loading the old code that a line without `voice` keeps its exact cache key, also with an empty `voice` or `settings`, and that every TTS request goes through `generationRequest`. It judged the top-level merge, where a nested object replaces the speaker's as a whole, as the plan specifies, and found empty overrides cache-neutral, which is right. Round 1 removes the emptied `settings`, then the emptied `voice`, in block and flow style, and writes lists and nested maps as YAML at any depth. The Claude re-review found no P1 or P2. Follow-ups: a string with a newline inside a nested list or map is refused instead of written; a nested `yes` stays unquoted, which a YAML 1.1 reader would read as a boolean; the removal tests cover only one-key maps, and none checks that a survivor keeps its comment, that the result has a no-voice line's cache key, or that other item kinds are unchanged.
 - [ ] Voice parameters and the takes API
   - Requirements: R18, R19, R17
   - Target: `packages/providers/`, `apps/server/`
