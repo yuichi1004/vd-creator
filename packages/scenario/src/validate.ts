@@ -169,6 +169,14 @@ function checkSettings(data: unknown): Issue[] {
       checkPlainJson(settings, ["speakers", i, "voice", "settings"], issues);
     }
   }
+  for (const [i, scene] of records(field(data, "scenes"))) {
+    for (const [j, item] of records(field(scene, "items"))) {
+      const settings = field(field(item, "voice"), "settings");
+      if (isRecord(settings) && nonJsonKind(settings) === undefined) {
+        checkPlainJson(settings, ["scenes", i, "items", j, "voice", "settings"], issues);
+      }
+    }
+  }
   return issues;
 }
 

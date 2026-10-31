@@ -57,6 +57,14 @@ export const VoiceSchema = z.strictObject({
   settings: VoiceSettingsSchema.optional(),
 });
 
+export const LineVoiceSchema = z
+  .strictObject({
+    settings: VoiceSettingsSchema.optional().describe(
+      "Settings for this line only, merged over the speaker's voice.settings one key at a time.",
+    ),
+  })
+  .describe("Voice overrides for this line.");
+
 export const SpeakerSchema = z.strictObject({
   id: IdSchema,
   name: z.string().min(1),
@@ -108,6 +116,7 @@ export const LineItemSchema = z.strictObject({
   id: IdSchema,
   speaker: IdSchema.describe("Speaker ID."),
   direction: z.string().optional().describe("Delivery hint for TTS and for humans."),
+  voice: LineVoiceSchema.optional(),
   take: TakeSchema,
   gapBeforeSec: gapBeforeSec(DEFAULT_LINE_GAP_SEC),
 });

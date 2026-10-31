@@ -35,6 +35,7 @@ export {
   LibraryRefSchema,
   type LineItem,
   LineItemSchema,
+  LineVoiceSchema,
   type PauseItem,
   PauseItemSchema,
   PUBLISH_USES,

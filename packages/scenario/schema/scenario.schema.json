@@ -175,6 +175,23 @@
                       "description": "Delivery hint for TTS and for humans.",
                       "type": "string"
                     },
+                    "voice": {
+                      "type": "object",
+                      "properties": {
+                        "settings": {
+                          "description": "Settings for this line only, merged over the speaker's voice.settings one key at a time.",
+                          "type": "object",
+                          "propertyNames": {
+                            "type": "string"
+                          },
+                          "additionalProperties": {
+                            "$ref": "#/$defs/JsonValue"
+                          }
+                        }
+                      },
+                      "additionalProperties": false,
+                      "description": "Voice overrides for this line."
+                    },
                     "take": {
                       "default": 0,
                       "description": "Selected generation of the item. Regenerating increments it.",

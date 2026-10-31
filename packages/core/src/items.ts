@@ -62,7 +62,7 @@ export function generationRequest(
           text: item.line,
           voiceId: speaker.voice.voiceId,
           direction: item.direction,
-          settings: speaker.voice.settings,
+          settings: mergedSettings(speaker.voice.settings, item.voice?.settings),
           take: item.take,
         }),
       };
@@ -87,6 +87,17 @@ export function generationRequest(
       };
     }
   }
+}
+
+// The line's settings win over the speaker's one key at a time. Without an override the
+// speaker's settings are used as they are, so the request and its cache key do not change.
+function mergedSettings(
+  speaker: Record<string, unknown> | undefined,
+  line: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (line === undefined) return speaker;
+  if (speaker === undefined && Object.keys(line).length === 0) return undefined;
+  return { ...speaker, ...line };
 }
 
 function withoutUndefined<T extends object>(value: T): T {

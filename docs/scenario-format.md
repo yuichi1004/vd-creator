@@ -59,7 +59,7 @@ speakers:
     voice:
       provider: elevenlabs
       voiceId: 21m00Tcm4TlvDq8ikWAM
-      settings: { stability: 0.4, similarity: 0.8 } # Passed to the provider as is
+      settings: { stability: 0.4, similarityBoost: 0.8 } # Passed to the provider as is
   - id: keeper
     name: The Keeper
     voice:
@@ -189,8 +189,20 @@ Common fields:
 | `id` | ID | yes | Stable ID of the line. |
 | `speaker` | ID | yes | ID of a speaker in `speakers`. |
 | `direction` | string | no | Delivery hint for TTS and for humans. |
+| `voice` | mapping | no | Voice overrides for this line. Its only key is `settings`. |
+| `voice.settings` | mapping of plain JSON values | no | Settings for this line only. They are merged over the speaker's `voice.settings` one key at a time: a key set here wins, and the speaker's other keys still apply. The values follow the same rules as the speaker's `voice.settings`. A line without `voice` uses the speaker's settings unchanged. The merged settings are part of the cache key, so a change makes a new asset. |
 | `take` | integer, 0 or more | no | Default 0. |
 | `gapBeforeSec` | number, -1 or more | no | Default 0.3. |
+
+For example, this line is read with `stability: 0.35` and `style: 0.2`, and keeps all other settings of its speaker:
+
+```yaml
+- line: "Which shop?"
+  id: s0-l2
+  speaker: noki
+  voice:
+    settings: { stability: 0.35, style: 0.2 }
+```
 
 **SFX**: a sound effect.
 
