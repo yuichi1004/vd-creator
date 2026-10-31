@@ -224,7 +224,14 @@ Run in order. Each task uses a Claude reviewer; the coordinator may review small
 
 ## Lessons learned
 
-Filled in by the trial task.
+From P0001, a baseline PRD written after the product, on 2026-10-31:
+
+- A baseline PRD of an existing product needs a "Today" column (Built, Partial, Missing). It turned the PRD into a gap list, and the feasibility reviewer corrected 12 of its 33 entries against the code. Keep the column in the template.
+- The reviews ran as five parallel Claude subagents without an Orca Run, because they only read and each wrote one file. That was enough for a PRD review. The feasibility check ran on Claude, not Codex, and still found the most facts; Codex can stay optional for PRDs that touch security.
+- No mockup was made, because the product exists and the owner can try it. A mockup is for PRDs of new screens.
+- The review card worked best as decisions with a recommended answer, answered in chat. The owner answered several by asking for an opinion instead, so the card should state the coordinator's opinion and the design principle behind each recommendation.
+- Numbered questions drifted: the owner's numbers did not match the card's after a skipped question. Give each decision a short name as well as a number.
+- Writing a design principle (agent first, UI for what agents do badly) settled several decisions at once. A PRD for a new area should ask early whether such a principle exists.
 
 ## Open questions
 

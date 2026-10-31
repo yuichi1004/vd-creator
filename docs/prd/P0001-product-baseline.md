@@ -1,6 +1,6 @@
 # P0001: vd-creator product baseline
 
-- Status: In review
+- Status: Approved
 - Date: 2026-10-31
 - Owner: the project owner
 - Plans: written after the product, as a baseline: [0002](../plans/0002-architecture.md) to [0009](../plans/0009-follow-ups-0003-0008.md). Draft plans [0010](../plans/0010-settings-and-playback-speed.md) to [0013](../plans/0013-voice-retake-with-agent.md) wait for this PRD.
@@ -203,6 +203,7 @@ A UI feature that would need several steps of judgment is a sign the work belong
 | 2026-10-31 | How are lines' acting fixed (R17 to R19)? | By a one-line instruction to an agent (R18, Must), with earlier takes in the UI (R19, Must). Direction as text is Should (R17); direct voice settings are Could (R37). | Owner |
 | 2026-10-31 | How do agents learn what changed in the UI? | A change log of UI edits that agents read (R38, Must). | Owner |
 | 2026-10-31 | Should the UI show what an agent changed and why (R39)? | Yes, Must: the counterpart of the change log. | Owner |
+| 2026-10-31 | In what order are the gaps built? | 1. The review loop: R18, R19, R38, R39, R12, R13, R36. 2. Rights: R27, R40, R41, R29. 3. Draft and pilot: R34, R35. 4. The library screen (R24, R25) and the project picker (R31). 5. The rest. | Owner |
 | 2026-10-31 | Which assets need license records? | Voices, music, sound effects, and images (R27, R40, R41, Must). | Owner |
 | 2026-10-31 | Are the human-only steps enforced by the tool? | Not for now. They stay agent rules, backed by the agent tool's own permission checks. | Owner |
 | 2026-10-31 | How does the user judge a drama before paying? | A free draft with real words (R34), a paid pilot scene (R35), then the full run; render warns about draft audio (R36). | Owner |
@@ -211,6 +212,6 @@ A UI feature that would need several steps of judgment is a sign the work belong
 
 ## Open questions
 
-1. **Order of the missing pieces.** Suggested: the review loop first (R18, R19, R38, R39, R12, R13, R36), then rights (R27, R40, R41, R29), then the draft and pilot (R34, R35), then the library screen (R24, R25), the project picker (R31), and the rest.
+None.
 
 ## Change log
