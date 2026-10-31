@@ -13,7 +13,7 @@ import {
 } from "@vd-creator/core";
 import { SCENARIO_FILE } from "@vd-creator/scenario";
 
-export const CHANGES_USAGE = `Usage: vd changes [dir] [--since <entry ID|time|start>] [--source ui|file|agent] [--json]
+export const CHANGES_USAGE = `Usage: vd changes [dir] [--since <entry ID|ISO 8601 time with zone|start>] [--source ui|file|agent|review] [--json]
        vd changes record [dir] --reason "<why>" [--items <id,...>]`;
 
 export type ChangesOptions = {
@@ -155,12 +155,9 @@ function parseSource(text: string | undefined): ChangeSource | "all" | undefined
   return (CHANGE_SOURCES as readonly string[]).includes(text) ? (text as ChangeSource) : undefined;
 }
 
-const VALUE_MAX = 80;
-
+/** A value in full, as JSON on one line, so an agent can read the user's whole edit. */
 function show(value: unknown): string {
-  if (value === undefined) return "(none)";
-  const text = JSON.stringify(value);
-  return text.length > VALUE_MAX ? `${text.slice(0, VALUE_MAX - 1)}…` : text;
+  return value === undefined ? "(none)" : JSON.stringify(value);
 }
 
 function position(p: { scene?: string; index: number }): string {
@@ -180,10 +177,10 @@ export function formatEntry(entry: ChangeEntry): string {
   let change: string;
   switch (entry.change) {
     case "added":
-      change = `added at ${position(entry.to)}`;
+      change = `added at ${position(entry.to)}: ${show(entry.fields)}`;
       break;
     case "removed":
-      change = `removed from ${position(entry.from)}`;
+      change = `removed from ${position(entry.from)}: ${show(entry.fields)}`;
       break;
     case "moved":
       change = `moved from ${position(entry.from)} to ${position(entry.to)}`;

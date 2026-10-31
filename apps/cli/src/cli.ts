@@ -131,10 +131,12 @@ Commands:
     --srt             Also write out/drama.srt with the lines
     --format <f>      mp3 (default) or wav, for out/drama.wav
     --print-command   Print the ffmpeg commands as a shell script after the checks, and
-                      render nothing. ffmpeg need not be on PATH
+                      render nothing. ffmpeg need not be on PATH. The draft audio check
+                      below still applies
     --allow-draft     Render even if some items have draft audio (mock tones). Without it,
                       render stops and names them, or on a terminal asks whether to go on.
-                      Agents: pass it only when the user asked for a draft render
+                      Agents: never answer yes to that question, and pass --allow-draft only
+                      when the user asked for a draft render
   clean [dir]       Remove files in assets/voice, assets/sfx, and assets/bgm, and cache.json
                     entries, that the scenario no longer uses. assets/library/,
                     changes.jsonl, and changes-snapshot.json are kept
@@ -143,9 +145,10 @@ Commands:
                     first: time, source (ui, file, agent, review), target, change, reason.
                     Compares scenario.yaml with the last recorded state first. Run it before
                     you change a project, and build on the user's changes
-    --since <p>       Start after entry ID <p>, after the time <p>, or at "start"
+    --since <p>       Start after the entry ID <p>, after the ISO 8601 time <p> with a time
+                      zone, such as 2026-10-31T09:00:00Z, or at "start"
     --source <s>      Only entries from ui, file, agent, or review
-    --json            Print the entries as JSON
+    --json            Print the entries as JSON. Values are printed in full either way
   changes record [dir] --reason "<why>"
                     Record why you changed the project, in up to 300 characters. It explains
                     every change in the file that no reason explains yet. Run it after each
@@ -846,10 +849,6 @@ async function clean(args: string[], options: Options, context: Context): Promis
   return EXIT_OK;
 }
 
-/**
- * Loads and validates the scenario of a project, like vd validate, and its cache. Prints the
- * problems and returns an exit code if either cannot be used.
- */
 /** A yes or no prompt on the real terminal, or undefined if stdin or stdout is not one. */
 function terminalConfirm(): ((question: string) => Promise<boolean>) | undefined {
   if (!process.stdin.isTTY || !process.stdout.isTTY) return undefined;
@@ -863,6 +862,10 @@ function terminalConfirm(): ((question: string) => Promise<boolean>) | undefined
   };
 }
 
+/**
+ * Loads and validates the scenario of a project, like vd validate, and its cache. Prints the
+ * problems and returns an exit code if either cannot be used.
+ */
 async function loadProject(
   command: string,
   dir: string,

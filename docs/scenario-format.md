@@ -287,12 +287,12 @@ So that the UI can always edit what you write, **do not use YAML anchors (`&name
 
 The user fixes lines in the review UI while you edit `scenario.yaml`. Each project keeps a change log, `changes.jsonl`, of both sides, and `changes-snapshot.json`, the last state it compared with. Both are written by the tools, so do not edit them, and `vd clean` keeps them. Plan [0015](plans/0015-change-log-and-draft-audio.md) describes them.
 
-- **Before you change a project**, run `vd changes [dir]`. It lists, oldest first, what the user and others changed since the last time an agent recorded its work. Build on those changes rather than undoing them. `--since <entry ID|time|start>` reads further back, `--source ui|file|agent|review` filters, and `--json` prints the entries.
+- **Before you change a project**, run `vd changes [dir]`. It lists, oldest first, what the user and others changed since the last time an agent recorded its work. Build on those changes rather than undoing them. It prints the full old and new values. `--since <entry ID|ISO 8601 time with a zone|start>` reads further back, `--source ui|file|agent|review` filters, and `--json` prints the entries.
 - **After you change it**, run `vd changes record [dir] --reason "<why>"`, with a reason of up to 300 characters. The user sees it next to the items you changed. It explains every change in the file that no reason explains yet; `--items <id,...>` explains only the changes to those items. Run it after each piece of work, so the next agent starts from there.
 
 ## Draft audio
 
-Audio made by the free `mock` provider is a test tone, called draft audio. Library sounds and the audio of a paid provider are final. `vd render` stops and names every item with draft audio, and on a terminal asks whether to go on. **Do not pass `--allow-draft` unless the user asked for a draft render.** To make the audio final, run `vd generate` with a paid provider, which needs the user's decision.
+Audio made by the free `mock` provider is a test tone, called draft audio. Library sounds and the audio of a paid provider are final. `vd render` stops and names every item with draft audio, and on a terminal asks whether to go on. **Never answer yes to that question, and never pass `--allow-draft`, unless the user asked for a draft render.** Your terminal is a pseudo-terminal, so `vd render` asks there too. To make the audio final, run `vd generate` with a paid provider, which needs the user's decision.
 
 ## Common mistakes
 

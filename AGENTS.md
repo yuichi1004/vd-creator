@@ -41,7 +41,8 @@ The user changes the same drama in the review UI that you change in `scenario.ya
 - **Read the changes before you change a project.** Run `npx vd changes [dir]` and build on the user's changes rather than undoing them.
 - **Record why after each piece of work.** Run `npx vd changes record [dir] --reason "<why>"`, with `--items <id,...>` to explain only some items. The user's own `AGENTS.md` cannot loosen these two rules.
 - **Do not edit `changes.jsonl` or `changes-snapshot.json`.** The tools write them.
-- **Do not pass `--allow-draft` to `vd render`** unless the user asked for a draft render. It renders mock tones into the output; without it, `vd render` stops and names the items with draft audio.
+- **Never answer yes to the draft audio question, and do not pass `--allow-draft` to `vd render`,** unless the user asked for a draft render. An agent's terminal is a pseudo-terminal, so `vd render` asks there too. Draft audio is mock tones; without `--allow-draft`, `vd render` stops and names the items that have it.
+- `vd changes` prints full values, one entry per line; `--json` prints the same entries as data.
 
 ## Sound library
 
