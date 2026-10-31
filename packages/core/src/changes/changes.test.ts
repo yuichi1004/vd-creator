@@ -366,6 +366,55 @@ describe("reconcile", () => {
     ]);
   });
 
+  test("after a crash, a revert to the old snapshot and a later edit start from the appended entries", async () => {
+    await start();
+    const before = await readFile(join(dir, SNAPSHOT_FILE), "utf8");
+    await edit(["Hello", "B"]);
+    await reconcile(dir); // 1: A to B
+    await writeFile(join(dir, SNAPSHOT_FILE), before);
+
+    // The file went back to A: B to A is recorded.
+    await write(BASE);
+    await reconcile(dir);
+    expect(
+      (await fileEntries()).map((e) => (e.change === "edited" ? [e.old, e.new] : null)),
+    ).toEqual([
+      ["Hello", "B"],
+      ["B", "Hello"],
+    ]);
+
+    // The same, with a further edit to C: its old value is B.
+    await writeFile(join(dir, SNAPSHOT_FILE), before);
+    await edit(["Hello", "C"]);
+    await reconcile(dir);
+    const last = (await fileEntries()).at(-1);
+    expect(last).toMatchObject({ field: "line", old: "Hello", new: "C" });
+  });
+
+  test("recovery applies added, removed, and moved entries too", async () => {
+    await start();
+    const before = await readFile(join(dir, SNAPSHOT_FILE), "utf8");
+    await write(
+      BASE.replace("      - line: World\n        id: l2\n        speaker: ann\n", "").replace(
+        "  - id: s2\n    items:\n",
+        "  - id: s2\n    items:\n      - pause: 2\n        id: p1\n",
+      ),
+    );
+    await reconcile(dir);
+    const count = (await readEntries(dir)).length;
+    await writeFile(join(dir, SNAPSHOT_FILE), before);
+    expect(await reconcile(dir)).toEqual({ status: "ok", entries: [] });
+    expect(await readEntries(dir)).toHaveLength(count);
+    // Back to the base: the removal and the addition are undone, each once.
+    await write(BASE);
+    await writeFile(join(dir, SNAPSHOT_FILE), before);
+    await reconcile(dir);
+    expect((await fileEntries()).slice(count).map(summary)).toEqual([
+      "item:l2:added",
+      "item:p1:removed",
+    ]);
+  });
+
   test("a UI change is recorded as ui, and not again as a file change", async () => {
     await start();
     await edit(["Hello", "Agent edit"]);
@@ -420,6 +469,20 @@ describe("agent entries", () => {
     expect(second.entry.refs).toEqual([2]);
     const third = await recordAgent(dir, "Nothing new");
     expect(third.entry.refs).toEqual([]);
+  });
+
+  test("--items names items only, not a speaker with the same ID", async () => {
+    const same = BASE.replace("id: l1", "id: ann");
+    await write(same);
+    expect(await reconcile(dir)).toEqual({ status: "baseline" });
+    await write(same.replace("name: Ann", "name: Anne").replace("Hello", "Hi"));
+    const first = await recordAgent(dir, "The item", { items: ["ann"] });
+    expect(first.entry.refs).toHaveLength(1);
+    const second = await recordAgent(dir, "The rest");
+    expect(second.entry.refs).toHaveLength(1);
+    const targets = (await fileEntries()).map((e) => e.target.kind);
+    expect(first.entry.refs.map((r) => targets[r - 1])).toEqual(["item"]);
+    expect(second.entry.refs.map((r) => targets[r - 1])).toEqual(["speaker"]);
   });
 
   test("ui entries are not explained, and the reason is checked", async () => {
@@ -523,6 +586,46 @@ describe("the project lock", () => {
     expect(await readFile(join(dir, LOCK_FILE), "utf8")).toContain('"other"');
   });
 
+  test("releasing goes through the gate, so a takeover in progress cannot lose the lock", async () => {
+    const gate = join(dir, `${LOCK_FILE}.break`);
+    let release: () => void = () => {};
+    const done = withProjectLock(dir, async () => {
+      // Someone is breaking a lock: the holder must not remove the lock file meanwhile.
+      await writeFile(gate, "");
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    expect(await readFile(join(dir, LOCK_FILE), "utf8")).toContain('"token"');
+    let finished = false;
+    done.then(() => {
+      finished = true;
+      release();
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(finished).toBe(false);
+    await rm(gate);
+    await new Promise<void>((r) => {
+      release = r;
+    });
+    await expect(readFile(join(dir, LOCK_FILE))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("a stale lock replaced during a release is not removed by the old holder", async () => {
+    const path = join(dir, LOCK_FILE);
+    await withProjectLock(
+      dir,
+      async () => {
+        // The lock is taken over while the first holder still runs.
+        await rm(path);
+        await writeFile(
+          path,
+          JSON.stringify({ pid: process.pid, time: new Date().toISOString(), token: "new" }),
+        );
+      },
+      { waitMs: 1000 },
+    );
+    expect(await readFile(path, "utf8")).toContain('"new"');
+  });
+
   test("the lock is released when the work throws, and holders run one at a time", async () => {
     await expect(
       withProjectLock(dir, async () => {
@@ -622,6 +725,34 @@ describe("entries", () => {
       },
     ];
     for (const entry of bad) expect(() => parseChangeEntry(entry)).toThrow(ChangeLogError);
+  });
+
+  test("the JSON Schema agrees with the reader on time and session", () => {
+    const schema = changeEntryJsonSchema() as {
+      oneOf: {
+        properties: { time: { format?: string }; session?: unknown };
+        if?: unknown;
+        then?: { properties: { source: { const: string } } };
+      }[];
+    };
+    for (const branch of schema.oneOf) expect(branch.properties.time.format).toBe("date-time");
+    // A session is allowed on ui entries only, as in the reader.
+    const targetBranches = schema.oneOf.filter((b) => b.properties.session);
+    expect(targetBranches).toHaveLength(4);
+    for (const b of targetBranches) {
+      expect(b.if).toEqual({ required: ["session"] });
+      expect(b.then?.properties.source.const).toBe("ui");
+    }
+    const entry = {
+      id: 1,
+      time: "2026-10-31T00:00:00.000Z",
+      target: { kind: "item", id: "a" },
+      change: "edited",
+      field: "line",
+      session: "p",
+    };
+    expect(parseChangeEntry({ ...entry, source: "ui" })).toBeTruthy();
+    expect(() => parseChangeEntry({ ...entry, source: "file" })).toThrow(ChangeLogError);
   });
 
   test("the JSON Schema describes the six shapes of entry", () => {

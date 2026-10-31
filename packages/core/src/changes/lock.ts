@@ -43,7 +43,7 @@ export async function withProjectLock<T>(
   try {
     return await fn();
   } finally {
-    await release(projectDir, token);
+    await release(projectDir, token, options.staleMs ?? LOCK_STALE_MS);
   }
 }
 
@@ -94,32 +94,62 @@ async function createExclusive(path: string, content: string, token: string): Pr
   }
 }
 
-async function release(projectDir: string, token: string): Promise<void> {
+/**
+ * Removes the lock if it is still ours. Like breaking a stale lock, this goes through the gate, so
+ * that a takeover cannot replace the lock between the check and the removal.
+ */
+async function release(projectDir: string, token: string, staleMs: number): Promise<void> {
   const path = join(projectDir, LOCK_FILE);
-  // A lock that was taken over is not ours to remove.
-  const raw = await readRaw(path);
-  if (raw !== undefined && parseLock(raw)?.token === token) await rm(path, { force: true });
+  await withGate(path, staleMs, async () => {
+    // A lock that was taken over is not ours to remove.
+    const raw = await readRaw(path);
+    if (raw !== undefined && parseLock(raw)?.token === token) await rm(path, { force: true });
+  });
 }
 
 /**
- * Removes the lock if it is stale. Only one process breaks a lock at a time, through
- * `changes.lock.break`, and it removes the lock only if it still holds the content it judged
- * stale, so a lock taken a moment later is kept.
+ * Removes the lock if it is stale. The lock file is only removed while holding the gate,
+ * `changes.lock.break`, and only created while absent, so the content judged stale cannot change
+ * before the removal. It is removed only if it still holds that content.
  */
 async function breakStale(path: string, staleMs: number): Promise<void> {
   const raw = await readRaw(path);
   if (raw === undefined || !(await isStale(path, raw, staleMs))) return;
+  await withGate(
+    path,
+    staleMs,
+    async () => {
+      if ((await readRaw(path)) === raw) await unlink(path);
+    },
+    false,
+  );
+}
+
+/**
+ * Runs `fn` holding the gate of the lock file, `<lock>.break`, created exclusively. With `wait`
+ * it polls until it has the gate; without, it gives up if someone else has it. A gate left by a
+ * process that stopped is older than `staleMs` and is removed.
+ */
+async function withGate(
+  path: string,
+  staleMs: number,
+  fn: () => Promise<void>,
+  wait = true,
+): Promise<void> {
   const gate = `${path}.break`;
-  try {
-    await writeFile(gate, "", { flag: "wx" });
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-    // A gate left by a process that stopped is old; one in use is not.
-    if (await isOlderThan(gate, staleMs)) await rm(gate, { force: true });
-    return;
+  for (;;) {
+    try {
+      await writeFile(gate, "", { flag: "wx" });
+      break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      if (await isOlderThan(gate, staleMs)) await rm(gate, { force: true });
+      else if (!wait) return;
+      else await new Promise((resolve) => setTimeout(resolve, 5));
+    }
   }
   try {
-    if ((await readRaw(path)) === raw) await unlink(path);
+    await fn();
   } finally {
     await rm(gate, { force: true });
   }

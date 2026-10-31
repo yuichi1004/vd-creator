@@ -90,7 +90,7 @@ export function changeEntryJsonSchema(): Record<string, unknown> {
   };
   const stamp = {
     id: { type: "integer", minimum: 1, description: "One higher than the entry before it." },
-    time: { type: "string", description: "ISO 8601 with time zone." },
+    time: { type: "string", format: "date-time", description: "ISO 8601 with time zone." },
   };
   const reason = { type: "string", minLength: 1, maxLength: REASON_MAX_LENGTH };
   const targetEntry = (
@@ -104,9 +104,12 @@ export function changeEntryJsonSchema(): Record<string, unknown> {
       source: { enum: source },
       target: { $ref: "#/$defs/Target" },
       reason,
-      session: { type: "string", minLength: 1 },
+      session: { type: "string", minLength: 1, description: "Only on a ui entry." },
       ...change,
     },
+    if: { required: ["session"] },
+    // biome-ignore lint/suspicious/noThenProperty: "then" is a JSON Schema keyword here
+    then: { properties: { source: { const: "ui" } } },
     required: ["id", "time", "source", "target", ...need],
     additionalProperties: false,
   });

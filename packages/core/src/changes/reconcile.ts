@@ -3,11 +3,10 @@
 // docs/plans/0015-change-log-and-draft-audio.md.
 
 import { type Issue, loadScenario, type Scenario } from "@vd-creator/scenario";
-import { canonicalJson } from "../canonical.js";
-import { diffSnapshots, type TargetChange } from "./diff.js";
+import { applyEntries } from "./apply.js";
+import { diffSnapshots } from "./diff.js";
 import {
   type AgentEntry,
-  type ChangeEntry,
   ChangeLogError,
   REASON_MAX_LENGTH,
   type ReviewEntry,
@@ -48,8 +47,8 @@ export function reconcile(
 /**
  * `reconcile` for a caller that already holds the project lock, such as a UI change. If a
  * writer stopped after appending entries but before replacing the snapshot, the differences are
- * found again; those that an entry after the snapshot's `lastEntryId` already records, with the
- * same target, change, and values, are not recorded a second time.
+ * found again from the state that the entries after the snapshot's `lastEntryId` already
+ * describe, so those are not recorded a second time, and a later change starts from their result.
  */
 export async function reconcileLocked(
   projectDir: string,
@@ -73,10 +72,13 @@ export async function reconcileLocked(
     return { status: "baseline" };
   }
   const after = snapshotOf(scenario, lastId);
-  const differences = withoutRecorded(
-    diffSnapshots(before, after),
+  // Entries after the snapshot were appended by a writer that stopped before replacing it, so
+  // the state to compare with is the snapshot with those entries applied.
+  const recorded0 = applyEntries(
+    before,
     entries.filter((e) => e.id > before.lastEntryId),
   );
+  const differences = diffSnapshots(recorded0, after);
   const recorded = (await appendEntries(
     projectDir,
     differences.map((d) => ({ source: "file" as const, ...d })),
@@ -85,34 +87,6 @@ export async function reconcileLocked(
   after.lastEntryId = recorded.at(-1)?.id ?? lastId;
   await writeSnapshot(projectDir, after);
   return { status: "ok", entries: recorded };
-}
-
-/** The differences that no entry records yet. Each entry accounts for one difference. */
-function withoutRecorded(
-  differences: TargetChange[],
-  entries: readonly ChangeEntry[],
-): TargetChange[] {
-  const left = entries.filter((e): e is TargetChangeEntry => "target" in e);
-  return differences.filter((d) => {
-    const i = left.findIndex((e) => sameChange(e, d));
-    if (i < 0) return true;
-    left.splice(i, 1);
-    return false;
-  });
-}
-
-/** The target, change, and values of an entry or a difference, without who or when. */
-function sameChange(entry: TargetChangeEntry, d: TargetChange): boolean {
-  const key = (c: TargetChange) =>
-    canonicalJson({
-      target: c.target,
-      change: c.change,
-      ...("fields" in c && { fields: c.fields }),
-      ...("from" in c && { from: c.from }),
-      ...("to" in c && { to: c.to }),
-      ...("field" in c && { field: c.field, old: c.old, new: c.new }),
-    });
-  return key(entry) === key(d);
 }
 
 export type UiChangeOptions = ChangeOptions & {
@@ -156,7 +130,7 @@ export async function recordUiChanges(
 }
 
 export type RecordAgentOptions = ChangeOptions & {
-  /** Explain only the `file` entries whose target has one of these IDs. */
+  /** Explain only the `file` entries whose target is an item with one of these IDs. */
   items?: readonly string[];
 };
 
@@ -183,7 +157,9 @@ export async function recordAgent(
       const only = options.items && new Set(options.items);
       const refs = entries
         .filter((e) => e.source === "file" && !explained.has(e.id))
-        .filter((e) => !only || ("target" in e && only.has(e.target.id)))
+        .filter(
+          (e) => !only || ("target" in e && e.target.kind === "item" && only.has(e.target.id)),
+        )
         .map((e) => e.id);
       const [entry] = await appendEntries(
         projectDir,
