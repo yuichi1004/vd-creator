@@ -188,6 +188,15 @@ describe("review and marks", () => {
     expect((await request(app, "GET", "/api/changes?since=abc")).status).toBe(400);
   });
 
+  test("GET /api/changes?since=start returns every entry, the first one too", async () => {
+    const app = createApp({ projectDir: dir, provider: providers() });
+    await request(app, "PATCH", "/api/items/s1-l1", { body: { text: "a", gapBeforeSec: 1 } });
+    const { entries } = await json<ChangesResponse>(
+      await request(app, "GET", "/api/changes?since=start"),
+    );
+    expect(entries.map((e) => e.id)).toEqual([1, 2]);
+  });
+
   test("the page's own session is not marked", async () => {
     const app = createApp({ projectDir: dir, provider: providers() });
     const headers = { "X-VD-Session": "me" };

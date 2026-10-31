@@ -261,9 +261,9 @@ export function createApp(options: AppOptions): Hono {
   app.get("/api/changes", async (c) => {
     const since = c.req.query("since") ?? "review";
     let point: Parameters<typeof entriesSince>[1];
-    if (since === "review") point = "review";
+    if (since === "review" || since === "start") point = since;
     else if (/^[1-9]\d{0,15}$/.test(since)) point = { id: Number(since) };
-    else throw badRequest("since must be review or an entry ID");
+    else throw badRequest("since must be review, start, or an entry ID");
     const session = sessionOf(c);
     const response: ChangesResponse = {
       entries: entriesSince(await readEntries(projectDir), point).map((e) => entryView(e, session)),

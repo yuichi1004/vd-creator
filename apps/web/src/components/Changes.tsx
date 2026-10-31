@@ -1,10 +1,13 @@
 import { useState } from "react";
 import { type ChangeGroup, describeChange, type TargetMark } from "../changes.js";
 
+/** The ID of the Changes list, for `aria-controls` of the header button. */
+export const CHANGES_PANEL_ID = "changes-panel";
+
 /** What changed in one target, with the old and new values and the reason. */
-export function ChangeDetails({ mark }: { mark: TargetMark }) {
+export function ChangeDetails({ mark, id }: { mark: TargetMark; id?: string }) {
   return (
-    <ul className="change-details">
+    <ul className="change-details" id={id}>
       {mark.details.length === 0 && <li className="muted">Explained by a note of an agent.</li>}
       {mark.details.map((d) => (
         <li key={d.entry.id}>
@@ -20,18 +23,20 @@ export function ChangeDetails({ mark }: { mark: TargetMark }) {
 export function ChangedMark({ mark, label }: { mark: TargetMark | undefined; label: string }) {
   const [open, setOpen] = useState(false);
   if (!mark) return null;
+  const detailsId = `changes-${mark.kind}-${mark.id}`;
   return (
     <span className="changed-wrap">
       <button
         type="button"
         className="changed-mark"
         aria-expanded={open}
-        aria-label={`Changes of ${label}`}
+        aria-controls={open ? detailsId : undefined}
+        aria-label={`changed: ${label}`}
         onClick={() => setOpen(!open)}
       >
         changed
       </button>
-      {open && <ChangeDetails mark={mark} />}
+      {open && <ChangeDetails mark={mark} id={detailsId} />}
     </span>
   );
 }
@@ -44,7 +49,7 @@ export function ChangesPanel(props: {
 }) {
   const { groups } = props;
   return (
-    <section className="changes-panel" aria-label="Changes">
+    <section className="changes-panel" id={CHANGES_PANEL_ID} aria-label="Changes">
       <div className="changes-head">
         <h2>Changes</h2>
         <button type="button" disabled={props.busy} onClick={props.onMarkReviewed}>

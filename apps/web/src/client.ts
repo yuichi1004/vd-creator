@@ -119,8 +119,8 @@ export class ApiClient {
     return this.request<PatchResponse>("PATCH", `api/scenes/${segment(id)}`, patch);
   }
 
-  /** The change log entries after the last review, or after the entry with ID `since`. */
-  async getChanges(since: "review" | number = "review"): Promise<ChangesResponse> {
+  /** The change log entries after the last review, all of them, or after the entry `since`. */
+  async getChanges(since: "review" | "start" | number = "review"): Promise<ChangesResponse> {
     return this.request<ChangesResponse>("GET", `api/changes?since=${since}`);
   }
 

@@ -10,7 +10,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type AudioContextLike, AudioUnlock, Player, type UnlockState } from "./audio.js";
 import { buildMarks, countDraft, groupMarks, loadChangeEntries } from "./changes.js";
 import { ApiClient, ApiRequestError, UNKNOWN_ERROR_MESSAGE } from "./client.js";
-import { ChangesPanel } from "./components/Changes.js";
+import { CHANGES_PANEL_ID, ChangesPanel } from "./components/Changes.js";
 import { ConfirmDialog, type ConfirmRequest } from "./components/ConfirmDialog.js";
 import { ImageLane } from "./components/ImageLane.js";
 import { IssueList } from "./components/IssueList.js";
@@ -23,6 +23,8 @@ import { placeIssues } from "./issues.js";
 import { LiveUpdates } from "./live.js";
 import { imageAt, itemAt, startOf } from "./playback.js";
 
+/** Events that arrive within this time of each other reload the project once. */
+const COALESCE_MS = 150;
 const PHONE_QUERY = "(max-width: 767px)";
 
 type Notice = { text: string; kind: "info" | "error" };
@@ -87,8 +89,18 @@ export function App() {
 
   // Loading and live updates. A reload that changes nothing keeps the state as it is.
   const lastJson = useRef("");
+  // Requests are numbered when they start. An answer older than one already applied is dropped,
+  // so a slow response cannot overwrite a newer project.
+  const requestCounter = useRef(0);
+  const appliedRequest = useRef(0);
+  // Counts the answers applied, even those that change nothing, so the details of the marks
+  // are read again after every project-changed event.
+  const [projectRound, setProjectRound] = useState(0);
   const applyProject = useCallback(
-    (next: ProjectResponse) => {
+    (next: ProjectResponse, ticket = ++requestCounter.current) => {
+      if (ticket < appliedRequest.current) return;
+      appliedRequest.current = ticket;
+      setProjectRound((n) => n + 1);
       const json = JSON.stringify(next);
       if (json === lastJson.current) return;
       lastJson.current = json;
@@ -99,8 +111,9 @@ export function App() {
     [player],
   );
   const reload = useCallback(async () => {
+    const ticket = ++requestCounter.current;
     try {
-      applyProject(await client.getProject());
+      applyProject(await client.getProject(), ticket);
       setLoadError(undefined);
     } catch (error) {
       setLoadError(errorText(error));
@@ -109,16 +122,28 @@ export function App() {
 
   useEffect(() => {
     void reload();
+    // One edit sends several events (the scenario and the change log); they reload once.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const scheduleReload = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = undefined;
+        void reload();
+      }, COALESCE_MS);
+    };
     const live = new LiveUpdates({
       url: client.eventsUrl(),
-      onChange: () => void reload(),
+      onChange: scheduleReload,
       createEventSource:
         typeof EventSource === "undefined"
           ? undefined
           : (url) => new EventSource(url, { withCredentials: true }),
     });
     live.start();
-    return () => live.stop();
+    return () => {
+      live.stop();
+      if (timer !== undefined) clearTimeout(timer);
+    };
   }, [client, reload]);
 
   // The position follows playback.
@@ -154,6 +179,8 @@ export function App() {
 
   // The details of the marks. The project says what is marked; the entries only explain it.
   const changedJson = JSON.stringify(project?.changedSinceReview ?? []);
+  // The old entries stay shown while the new ones load, and when loading fails.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: projectRound triggers the reload
   useEffect(() => {
     if (changedJson === "[]") {
       setChangeEntries([]);
@@ -162,17 +189,18 @@ export function App() {
     let current = true;
     loadChangeEntries(client).then(
       (entries) => current && setChangeEntries(entries),
-      () => current && setChangeEntries([]),
+      () => current && setNotice({ text: "Could not load the change details.", kind: "error" }),
     );
     return () => {
       current = false;
     };
-  }, [client, changedJson]);
+  }, [client, changedJson, projectRound]);
 
   const markReviewed = useCallback(async () => {
     setReviewing(true);
+    const ticket = ++requestCounter.current;
     try {
-      applyProject(await client.markReviewed());
+      applyProject(await client.markReviewed(), ticket);
       setChangesOpen(false);
     } catch (error) {
       showError(error);
@@ -183,8 +211,9 @@ export function App() {
 
   const patchItem = useCallback(
     async (id: string, patch: ItemPatchRequest): Promise<boolean> => {
+      const ticket = ++requestCounter.current;
       try {
-        applyProject(await client.patchItem(id, patch));
+        applyProject(await client.patchItem(id, patch), ticket);
         return true;
       } catch (error) {
         showError(error);
@@ -196,8 +225,9 @@ export function App() {
 
   const patchScene = useCallback(
     async (id: string, patch: ScenePatchRequest): Promise<boolean> => {
+      const ticket = ++requestCounter.current;
       try {
-        applyProject(await client.patchScene(id, patch));
+        applyProject(await client.patchScene(id, patch), ticket);
         return true;
       } catch (error) {
         showError(error);
@@ -384,6 +414,7 @@ export function App() {
             type="button"
             className="changed-mark"
             aria-expanded={changesOpen}
+            aria-controls={changesOpen ? CHANGES_PANEL_ID : undefined}
             onClick={() => setChangesOpen(!changesOpen)}
           >
             {marks.size} changed

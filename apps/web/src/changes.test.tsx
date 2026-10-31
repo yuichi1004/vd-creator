@@ -116,7 +116,7 @@ describe("marks", () => {
     const marks = buildMarks([{ kind: "item", id, count: 1 }], [fileEdit(1, id)]);
     const markup = renderList(scenario, emptyTimeline, marks);
     expect(markup.match(/class="changed-mark"/g)).toHaveLength(1);
-    expect(markup).toContain(`aria-label="Changes of ${id}"`);
+    expect(markup).toContain(`aria-label="changed: ${id}"`);
     expect(renderList(scenario, emptyTimeline, new Map())).not.toContain("changed-mark");
   });
 
@@ -168,6 +168,35 @@ describe("marks", () => {
     );
     const groups = groupMarks(marks, scenario);
     expect(groups.map((g) => g.key)).toEqual([`scene:${sceneId}`, "removed", "drama"]);
+  });
+
+  test("a reason that refers to entry 1 loads the log from its start", async () => {
+    const calls: string[] = [];
+    const fetchImpl = async (url: string) => {
+      calls.push(url);
+      return json(
+        url.endsWith("since=review")
+          ? {
+              entries: [
+                {
+                  id: 3,
+                  time: "2026-10-31T10:00:00.000Z",
+                  source: "agent",
+                  reason: "Why",
+                  refs: [1],
+                },
+              ],
+            }
+          : { entries: [fileEdit(1, "l1"), fileEdit(2, "l2")] },
+      );
+    };
+    const entries = await loadChangeEntries(new ApiClient(PREFIX, fetchImpl));
+    expect(calls).toEqual([
+      `${PREFIX}api/changes?since=review`,
+      `${PREFIX}api/changes?since=start`,
+    ]);
+    const marks = buildMarks([{ kind: "item", id: "l1", count: 1 }], entries);
+    expect(marks.get(markKey("item", "l1"))?.details[0]?.reason).toBe("Why");
   });
 
   test("older entries that a later reason explains are loaded too", async () => {

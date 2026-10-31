@@ -42,8 +42,9 @@ export async function loadChangeEntries(client: ApiClient): Promise<ChangeEntryV
     for (const ref of entry.refs) if (!have.has(ref)) oldest = Math.min(oldest, ref);
   }
   if (!Number.isFinite(oldest)) return entries;
-  // `since` is exclusive, and the lowest ID the server accepts is 1.
-  const older = (await client.getChanges(Math.max(1, oldest - 1))).entries;
+  // `since` is exclusive, so the entry before the oldest ref starts the range; for entry 1 that
+  // is the start of the log.
+  const older = (await client.getChanges(oldest <= 1 ? "start" : oldest - 1)).entries;
   const merged = new Map<number, ChangeEntryView>();
   for (const entry of [...older, ...entries]) merged.set(entry.id, entry);
   return [...merged.values()].sort((a, b) => a.id - b.id);
