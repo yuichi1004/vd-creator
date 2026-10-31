@@ -50,6 +50,7 @@ type Item = CST.CollectionItem;
  * as patched or if a valid scenario would become invalid.
  */
 export function updateItem(doc: ScenarioDocument, id: string, patch: ItemPatch): void {
+  patch = pruneVoice(patch);
   const at: { path: IssuePath } = { path: [] };
   try {
     applyPatch(doc, id, patch, at);
@@ -136,6 +137,23 @@ function applyPatch(
   if (usesCrlf(doc.text)) text = text.replace(/\r?\n/g, "\r\n");
   checkEdit(doc, text, id, path, expected);
   doc.setText(text);
+}
+
+// A line's voice settings with no key left, and a voice with nothing left, are removed
+// instead of written as empty maps. A block map cannot stay empty in the text, and a line
+// with no voice must read the same as a line with an empty one.
+function pruneVoice(patch: ItemPatch): ItemPatch {
+  const voice: unknown = patch.voice;
+  if (!isRecord(voice)) return patch;
+  const kept = Object.entries(voice).filter(([, v]) => v !== undefined);
+  const pruned = Object.fromEntries(
+    kept.flatMap(([key, v]): [string, unknown][] => {
+      if (key !== "settings" || !isRecord(v)) return [[key, v]];
+      const settings = Object.fromEntries(Object.entries(v).filter(([, e]) => e !== undefined));
+      return Object.keys(settings).length === 0 ? [] : [[key, settings]];
+    }),
+  );
+  return { ...patch, voice: Object.keys(pruned).length === 0 ? undefined : pruned };
 }
 
 function refusal(id: string, issues: Issue[], reason = ""): ScenarioEditError {
@@ -405,8 +423,8 @@ function setValue(map: MapToken, index: number, value: unknown, path: IssuePath)
     fillEmpty(map, index, value);
     return;
   }
-  if (isRecord(value)) {
-    if (isMapToken(token)) {
+  if (isRecord(value) || Array.isArray(value)) {
+    if (isRecord(value) && isMapToken(token)) {
       for (const [k, v] of Object.entries(value)) setField(token, k, v, [...path, k]);
       for (const k of token.items.map(keyOf)) {
         if (k !== undefined && !Object.hasOwn(value, k)) {
@@ -416,7 +434,8 @@ function setValue(map: MapToken, index: number, value: unknown, path: IssuePath)
       return;
     }
     const trailing = takeTrailing(token);
-    const comments = token.type === "block-seq" ? fixSeparator(item) : [];
+    const comments =
+      token.type === "block-seq" || token.type === "block-map" ? fixSeparator(item) : [];
     item.value = valueToken(value, 0, inFlow, [...comments, ...trailing]);
     return;
   }
@@ -541,7 +560,7 @@ function fixSeparator(item: Item): CST.SourceToken[] {
 }
 
 function valueToken(value: unknown, indent: number, inFlow: boolean, end: CST.SourceToken[]) {
-  if (isRecord(value)) {
+  if (isRecord(value) || Array.isArray(value)) {
     const source = stringify(value, { collectionStyle: "flow", lineWidth: 0 }).trimEnd();
     const parsed = Array.from(new Parser().parse(source)).find((t) => t.type === "document");
     const token = parsed?.value;
