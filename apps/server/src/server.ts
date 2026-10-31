@@ -2,7 +2,7 @@
 
 import type { AddressInfo } from "node:net";
 import { createAdaptorServer } from "@hono/node-server";
-import type { AssetResolver } from "@vd-creator/core";
+import { type AssetResolver, reconcile } from "@vd-creator/core";
 import { type AppOptions, createApp, type ServerProviders } from "./app.js";
 import { createToken, TOKEN_QUERY } from "./token.js";
 import { ProjectWatcher, WatchError } from "./watcher.js";
@@ -62,7 +62,9 @@ export async function startServer(options: StartServerOptions): Promise<RunningS
   const token = options.host !== undefined ? createToken() : undefined;
   let watcher: ProjectWatcher;
   try {
-    watcher = new ProjectWatcher(options.projectDir);
+    // Edits made while no server ran are recorded now, before the first page load.
+    await reconcile(options.projectDir).catch(() => {});
+    watcher = new ProjectWatcher(options.projectDir, () => reconcile(options.projectDir));
   } catch (e) {
     throw new WatchError(e);
   }

@@ -2,10 +2,15 @@
 // Types only: apps/web imports them with `import type`, so nothing here may be runtime code.
 
 import type {
+  AudioKind,
+  BgmSpan,
+  ChangeEntry,
+  ChangeTargetKind,
   GenerationPlan,
   ProjectLicenseIssue,
   ScenarioItemKind,
   Timeline,
+  TimelineItem,
 } from "@vd-creator/core";
 import type { Entry, LibraryKind, LicenseTerms } from "@vd-creator/library";
 import type { Issue, Scenario, ScenarioErrorBody, ScenarioErrorIssue } from "@vd-creator/scenario";
@@ -21,6 +26,27 @@ export type ProviderInfo = {
    */
   paid: boolean;
 };
+
+/**
+ * Whether the audio of a line, SFX, or BGM is draft (made by the free provider) or final (a
+ * library sound, or made by a paid provider). `null` where there is no asset yet.
+ */
+export type { AudioKind };
+
+/**
+ * A timeline whose items and BGM spans say whether their audio is draft. The server always sets
+ * `audio`, `null` for an item without audio or asset.
+ */
+export type ProjectTimeline = Omit<Timeline, "items" | "bgm"> & {
+  items: (TimelineItem & { audio?: AudioKind | null })[];
+  bgm: (BgmSpan & { audio?: AudioKind | null })[];
+};
+
+/** A target with changes the user has not reviewed. `count` is the number of change entries. */
+export type ChangedTarget = { kind: ChangeTargetKind; id: string; count: number };
+
+/** Response of `GET /api/changes`: the entries after the point, oldest first. */
+export type ChangesResponse = { entries: ChangeEntry[] };
 
 /** `GET /api/project`. */
 export type ProjectResponse = {
@@ -38,7 +64,13 @@ export type ProjectResponse = {
    * Start time and duration of every item. Absent when there is no valid scenario. Asset
    * files are relative to `assets/` and are fetched from `assets/<file>`.
    */
-  timeline?: Timeline;
+  timeline?: ProjectTimeline;
+  /**
+   * Targets changed in the file, or in the UI by another session, since the last `review` entry
+   * of the change log, or explained by an `agent` entry after it (0015). `ui` changes of the
+   * session sent in `X-VD-Session` are left out. Empty when there is no valid scenario.
+   */
+  changedSinceReview: ChangedTarget[];
   provider: ProviderInfo;
   /** True if the server knows a library, so `/api/library` is available. */
   library: boolean;

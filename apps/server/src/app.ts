@@ -5,16 +5,24 @@ import {
   ASSETS_DIR,
   AssetCache,
   type AssetResolver,
+  type AudioKind,
   BudgetExceededError,
   checkLibraryLicenses,
   computeTimeline,
   defaultResolvers,
+  entriesSince,
   type GeneratedItemResolver,
   type ProjectLicenseIssue,
   planGeneration,
   type RunGenerationOptions,
+  readEntries,
+  reconcileLocked,
+  recordReview,
+  recordUiChanges,
   runGeneration,
+  scenarioAudioKinds,
   scenarioItems,
+  withProjectLock,
 } from "@vd-creator/core";
 import {
   type Entry,
@@ -44,6 +52,7 @@ import type {
   ApiError,
   ApiErrorCode,
   ApprovedCost,
+  ChangesResponse,
   ConfirmRequiredError,
   GenerateItemResult,
   GeneratePlanResponse,
@@ -59,6 +68,7 @@ import type {
   SoundSource,
   VerifyLibraryEntryResponse,
 } from "./api.js";
+import { changedSinceReview } from "./changes.js";
 import { relativeUrlPath, serveFile } from "./files.js";
 import { hostCheck } from "./hosts.js";
 import { type MessageRoot, sanitizeMessage, sanitizeTarget } from "./sanitize.js";
@@ -179,20 +189,49 @@ export function createApp(options: AppOptions): Hono {
     await next();
   });
 
-  async function project(): Promise<ProjectResponse> {
+  // `session` leaves the `ui` changes of that session unmarked.
+  async function project(session?: string): Promise<ProjectResponse> {
     const base = { provider: providerInfo, library: library !== undefined };
     let loaded: Awaited<ReturnType<typeof loadScenario>>;
     try {
       loaded = await loadScenario(projectDir);
     } catch {
       const issues = [{ path: [], message: PROJECT_UNREADABLE, severity: "error" as const }];
-      return { ...base, issues, licenseIssues: [] };
+      return { ...base, issues, licenseIssues: [], changedSinceReview: [] };
     }
     const { scenario, issues } = loaded;
-    if (!scenario) return { ...base, issues, licenseIssues: [] };
+    if (!scenario) return { ...base, issues, licenseIssues: [], changedSinceReview: [] };
     const cache = await AssetCache.load(projectDir);
     const timeline = await computeTimeline(scenario, cache, resolvers);
-    return { ...base, scenario, issues, licenseIssues: await licenseIssues(scenario), timeline };
+    const kinds = new Map<string, AudioKind | null>();
+    for (const k of await scenarioAudioKinds(scenario, cache))
+      kinds.set(`${k.kind}:${k.id}`, k.audio);
+    const audioOf = (kind: string, id: string | undefined) =>
+      (id !== undefined && kinds.get(`${kind}:${id}`)) || null;
+    return {
+      ...base,
+      scenario,
+      issues,
+      licenseIssues: await licenseIssues(scenario),
+      timeline: {
+        ...timeline,
+        items: timeline.items.map((item) => ({ ...item, audio: audioOf(item.kind, item.id) })),
+        bgm: timeline.bgm.map((span) => ({ ...span, audio: audioOf("bgm", span.sceneId) })),
+      },
+      changedSinceReview: changedSinceReview(await readEntries(projectDir), session),
+    };
+  }
+
+  // Runs `edit` holding the project lock, after recording what the file changed since the
+  // snapshot, then records the edit's own changes as `ui` entries, so the edit is never found
+  // again as a `file` change and an outside edit is never recorded as the UI's.
+  async function uiChange(session: string | undefined, edit: () => Promise<void>): Promise<void> {
+    await withProjectLock(projectDir, async () => {
+      await reconcileLocked(projectDir);
+      await edit();
+      const { scenario } = await loadScenario(projectDir);
+      if (scenario) await recordUiChanges(projectDir, scenario, session ? { session } : {});
+    });
   }
 
   // Paths in license messages are shown relative to these.
@@ -217,7 +256,30 @@ export function createApp(options: AppOptions): Hono {
     }
   }
 
-  app.get("/api/project", async (c) => c.json(await project()));
+  app.get("/api/project", async (c) => c.json(await project(sessionOf(c))));
+
+  app.get("/api/changes", async (c) => {
+    const since = c.req.query("since") ?? "review";
+    let point: Parameters<typeof entriesSince>[1];
+    if (since === "review") point = "review";
+    else if (/^[1-9]\d{0,15}$/.test(since)) point = { id: Number(since) };
+    else throw badRequest("since must be review or an entry ID");
+    const response: ChangesResponse = {
+      entries: entriesSince(await readEntries(projectDir), point),
+    };
+    return c.json(response);
+  });
+
+  app.post("/api/changes/review", async (c) => {
+    const session = sessionOf(c);
+    checkFields(await jsonBody(c), []);
+    return c.json(
+      await exclusive(async () => {
+        await recordReview(projectDir);
+        return project(session);
+      }),
+    );
+  });
 
   app.get("/api/events", (c) => {
     c.header("Cache-Control", "no-cache");
@@ -250,54 +312,60 @@ export function createApp(options: AppOptions): Hono {
 
   app.patch("/api/items/:id", async (c) => {
     const id = c.req.param("id");
+    const session = sessionOf(c);
     const body = itemPatch(await jsonBody(c));
     return c.json(
       await exclusive(async () => {
-        const { doc } = await loadScenario(projectDir).catch(() => {
-          throw new HttpError(500, "server-error", PROJECT_UNREADABLE);
+        await uiChange(session, async () => {
+          const { doc } = await loadScenario(projectDir).catch(() => {
+            throw new HttpError(500, "server-error", PROJECT_UNREADABLE);
+          });
+          const item = findItem(documentData(doc), id);
+          if (!item) throw notFound();
+          const isLine = "line" in item;
+          const isSfx = "sfx" in item;
+          if ((body.text !== undefined || body.speaker !== undefined) && !isLine) {
+            throw badRequest("text and speaker apply only to lines");
+          }
+          if (body.source !== undefined && !isSfx) throw badRequest("source applies only to SFX");
+          if (body.take !== undefined && !isLine && !isSfx) {
+            throw badRequest("take applies only to lines and SFX");
+          }
+          const patch: ItemPatch = {};
+          if (body.text !== undefined) patch.line = body.text;
+          if (body.speaker !== undefined) patch.speaker = body.speaker;
+          if (body.gapBeforeSec !== undefined) patch.gapBeforeSec = body.gapBeforeSec;
+          if (body.take !== undefined) patch.take = body.take;
+          if (body.source !== undefined) {
+            patch.sfx =
+              "prompt" in body.source ? body.source.prompt : { library: body.source.library };
+          }
+          updateItem(doc, id, patch);
+          await saveScenario(projectDir, doc);
         });
-        const item = findItem(documentData(doc), id);
-        if (!item) throw notFound();
-        const isLine = "line" in item;
-        const isSfx = "sfx" in item;
-        if ((body.text !== undefined || body.speaker !== undefined) && !isLine) {
-          throw badRequest("text and speaker apply only to lines");
-        }
-        if (body.source !== undefined && !isSfx) throw badRequest("source applies only to SFX");
-        if (body.take !== undefined && !isLine && !isSfx) {
-          throw badRequest("take applies only to lines and SFX");
-        }
-        const patch: ItemPatch = {};
-        if (body.text !== undefined) patch.line = body.text;
-        if (body.speaker !== undefined) patch.speaker = body.speaker;
-        if (body.gapBeforeSec !== undefined) patch.gapBeforeSec = body.gapBeforeSec;
-        if (body.take !== undefined) patch.take = body.take;
-        if (body.source !== undefined) {
-          patch.sfx =
-            "prompt" in body.source ? body.source.prompt : { library: body.source.library };
-        }
-        updateItem(doc, id, patch);
-        await saveScenario(projectDir, doc);
-        return project();
+        return project(session);
       }),
     );
   });
 
   app.patch("/api/scenes/:id", async (c) => {
     const id = c.req.param("id");
+    const session = sessionOf(c);
     const body = scenePatch(await jsonBody(c));
     return c.json(
       await exclusive(async () => {
-        const { doc } = await loadScenario(projectDir).catch(() => {
-          throw new HttpError(500, "server-error", PROJECT_UNREADABLE);
+        await uiChange(session, async () => {
+          const { doc } = await loadScenario(projectDir).catch(() => {
+            throw new HttpError(500, "server-error", PROJECT_UNREADABLE);
+          });
+          const data = documentData(doc);
+          if (data === undefined) throw new ScenarioEditError("Cannot edit a document with errors");
+          const index = sceneIndex(data, id);
+          if (index === -1) throw notFound();
+          updateSceneBgm(doc, index, body);
+          await saveScenario(projectDir, doc);
         });
-        const data = documentData(doc);
-        if (data === undefined) throw new ScenarioEditError("Cannot edit a document with errors");
-        const index = sceneIndex(data, id);
-        if (index === -1) throw notFound();
-        updateSceneBgm(doc, index, body);
-        await saveScenario(projectDir, doc);
-        return project();
+        return project(session);
       }),
     );
   });
@@ -521,6 +589,14 @@ function entryInfo(entry: Entry, licenses: LicenseRegistry): LibraryEntryInfo {
   const terms = lookupLicense(licenses, entry.license.id);
   if (terms) info.licenseTerms = terms;
   return info;
+}
+
+/** The ID of the page's session, from `X-VD-Session`; absent if the header is not sent. */
+function sessionOf(c: Context): string | undefined {
+  const value = c.req.header("X-VD-Session");
+  if (value === undefined) return undefined;
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(value)) throw badRequest("X-VD-Session is not a valid ID");
+  return value;
 }
 
 async function jsonBody(c: Context): Promise<unknown> {

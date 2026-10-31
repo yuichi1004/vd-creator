@@ -40,7 +40,14 @@ export class ProjectWatcher implements ProjectEvents {
   #timers = new Map<ProjectChangedEvent["file"], NodeJS.Timeout>();
   #watcher: FSWatcher;
 
-  constructor(projectDir: string) {
+  /**
+   * `onScenarioChange` runs, and is waited for, before listeners hear that scenario.yaml
+   * changed, so that they find the change already in the change log. Its errors are ignored.
+   */
+  constructor(
+    projectDir: string,
+    private readonly onScenarioChange?: () => Promise<unknown>,
+  ) {
     this.#watcher = watch(projectDir, { persistent: false }, (_type, name) => {
       if (name && WATCHED.has(name)) this.#changed(name as ProjectChangedEvent["file"]);
     });
@@ -66,7 +73,10 @@ export class ProjectWatcher implements ProjectEvents {
       file,
       setTimeout(() => {
         this.#timers.delete(file);
-        for (const listener of [...this.#listeners]) listener({ file });
+        const hook = file === SCENARIO_FILE ? this.onScenarioChange : undefined;
+        void (hook ? hook().catch(() => {}) : Promise.resolve()).then(() => {
+          for (const listener of [...this.#listeners]) listener({ file });
+        });
       }, WATCH_DEBOUNCE_MS),
     );
   }
