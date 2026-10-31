@@ -801,6 +801,131 @@ input[type="range"].speed-slider {
   flex-basis: 100%;
 }
 
+/* Retake screen (plan 0013): a side panel on a PC, a full-screen sheet on a phone. */
+
+.retake {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.retake-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.retake-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.retake-section {
+  min-width: 0;
+  padding: 8px 12px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.retake-section h3 {
+  margin: 4px 0 8px;
+  font-size: 1rem;
+}
+
+.retake-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.retake-field textarea,
+.retake-field input {
+  width: 100%;
+}
+
+.retake-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.retake-context {
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+}
+
+.retake-context li {
+  padding: 4px 0;
+}
+
+.retake-context .here {
+  font-weight: 600;
+}
+
+.retake-context .speaker {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.retake-diff {
+  margin: 0;
+}
+
+.diff-row {
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+}
+
+.diff-row dt {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.diff-row dd {
+  margin: 2px 0 0;
+}
+
+.diff-row .old {
+  color: var(--error);
+  text-decoration: line-through;
+}
+
+.diff-row .new {
+  color: var(--ok);
+}
+
+.retake-takes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.retake-take {
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.retake-take.current {
+  background: var(--current);
+}
+
+.retake-sheet {
+  padding-left: calc(12px + env(safe-area-inset-left));
+  padding-right: calc(12px + env(safe-area-inset-right));
+}
+
+/* The Retake button on a phone card is as easy to tap as the other buttons. */
+.retake-button {
+  min-height: var(--touch);
+}
+
 @media (max-width: 767px) {
   .layout {
     display: block;

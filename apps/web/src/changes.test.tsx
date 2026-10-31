@@ -60,6 +60,7 @@ function renderList(scenario: Scenario, timeline: Timeline, marks: ReturnType<ty
       onGenerate={noop}
       onPlayFrom={noop}
       onEditLine={noop}
+      onRetake={noop}
       onOpenLibrary={noop}
     />,
   );

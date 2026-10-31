@@ -16,6 +16,8 @@ type Handlers = {
   onGenerate: (id: string) => void;
   onPlayFrom: (id: string) => void;
   onEditLine: (id: string) => void;
+  /** Opens the retake screen of a line. */
+  onRetake: (id: string) => void;
   onOpenLibrary: (target: LibraryTarget) => void;
 };
 
@@ -154,6 +156,7 @@ function LineRow(props: RowProps<Extract<Item, { line: string }>>) {
       draft={entry?.audio === "draft"}
       onPatchItem={props.onPatchItem}
       onRegenerate={props.onRegenerate}
+      onRetake={props.onRetake}
     />
   );
   if (isPhone) {
@@ -172,6 +175,8 @@ function LineRow(props: RowProps<Extract<Item, { line: string }>>) {
           {time}
           <PlayFromButton id={item.id} onPlayFrom={props.onPlayFrom} />
           <span className="take">take {item.take}</span>
+          {/* Shown on the card itself, not behind a tap, so the user sees what a card offers. */}
+          <RetakeButton id={item.id} onRetake={props.onRetake} />
           <StatusBadge status={status} draft={entry?.audio === "draft"} />
         </div>
       </div>
@@ -353,6 +358,14 @@ function PlayFromButton({ id, onPlayFrom }: { id: string; onPlayFrom: (id: strin
   );
 }
 
+function RetakeButton({ id, onRetake }: { id: string; onRetake: Handlers["onRetake"] }) {
+  return (
+    <button type="button" className="retake-button" onClick={() => onRetake(id)}>
+      Retake<span className="visually-hidden"> {id}</span>
+    </button>
+  );
+}
+
 function TakeControls(props: {
   id: string;
   take: number;
@@ -360,6 +373,8 @@ function TakeControls(props: {
   draft: boolean;
   onPatchItem: Handlers["onPatchItem"];
   onRegenerate: Handlers["onRegenerate"];
+  /** Given for a line: the Retake button then takes the place of Regenerate. */
+  onRetake?: Handlers["onRetake"];
 }) {
   const { id, take, status, draft } = props;
   return (
@@ -375,13 +390,17 @@ function TakeControls(props: {
           onSave={(next) => props.onPatchItem(id, { take: next })}
         />
       </span>
-      <button
-        type="button"
-        disabled={status === "generating"}
-        onClick={() => props.onRegenerate(id, take)}
-      >
-        Regenerate
-      </button>
+      {props.onRetake ? (
+        <RetakeButton id={id} onRetake={props.onRetake} />
+      ) : (
+        <button
+          type="button"
+          disabled={status === "generating"}
+          onClick={() => props.onRegenerate(id, take)}
+        >
+          Regenerate
+        </button>
+      )}
       <StatusBadge status={status} draft={draft} />
     </>
   );

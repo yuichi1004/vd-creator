@@ -4,8 +4,11 @@
 
 import type {
   ApiError,
+  CancelAgentResponse,
   ChangesResponse,
   ConfirmRequiredError,
+  DiscardProposalResponse,
+  GeneratePlanResponse,
   GenerateRequest,
   GenerateResponse,
   ItemPatchRequest,
@@ -13,9 +16,13 @@ import type {
   LibraryResponse,
   PatchResponse,
   ProjectResponse,
+  ProposalResponse,
   ScenarioErrorResponse,
   ScenePatchRequest,
   ServerInfoResponse,
+  TakesResponse,
+  TrialRequest,
+  TrialResponse,
   VerifyLibraryEntryRequest,
   VerifyLibraryEntryResponse,
 } from "@vd-creator/server";
@@ -140,6 +147,42 @@ export class ApiClient {
   /** Marks all changes reviewed. The server answers with the project, now without marks. */
   async markReviewed(): Promise<ProjectResponse> {
     return this.request<ProjectResponse>("POST", "api/changes/review", {});
+  }
+
+  /** The versions of a line, newest first. */
+  async getTakes(id: string): Promise<TakesResponse> {
+    return this.request<TakesResponse>("GET", `api/items/${segment(id)}/takes`);
+  }
+
+  /** Asks the agent for a proposal for a line. Runs the agent, so it can take a while. */
+  async createProposal(id: string, instruction: string): Promise<ProposalResponse> {
+    return this.request<ProposalResponse>("POST", `api/items/${segment(id)}/proposals`, {
+      instruction,
+    });
+  }
+
+  async cancelAgentRun(): Promise<CancelAgentResponse> {
+    return this.request<CancelAgentResponse>("POST", "api/agent-run/cancel", {});
+  }
+
+  async discardProposal(proposalId: string): Promise<DiscardProposalResponse> {
+    return this.request<DiscardProposalResponse>(
+      "POST",
+      `api/proposals/${segment(proposalId)}/discard`,
+      {},
+    );
+  }
+
+  /**
+   * One trial take of a line. Without `confirm: true` the answer is the plan and its cost and
+   * nothing is generated; with it, the trial is generated. Never writes `scenario.yaml`.
+   */
+  async trial(id: string, body: TrialRequest): Promise<GeneratePlanResponse | TrialResponse> {
+    return this.request<GeneratePlanResponse | TrialResponse>(
+      "POST",
+      `api/items/${segment(id)}/trials`,
+      body,
+    );
   }
 
   async generate(body: GenerateRequest): Promise<GenerateResponse> {

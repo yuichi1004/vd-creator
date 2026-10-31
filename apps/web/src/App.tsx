@@ -17,13 +17,15 @@ import { IssueList } from "./components/IssueList.js";
 import { LibraryPanel, type LibraryTarget } from "./components/LibraryPanel.js";
 import { LineEditor } from "./components/LineEditor.js";
 import { PlayerControls } from "./components/PlayerControls.js";
+import { type ContextLine, RetakeScreen } from "./components/RetakeScreen.js";
 import { SceneList } from "./components/SceneList.js";
 import { SettingsScreen } from "./components/SettingsScreen.js";
 import { type GenerationStart, nothingSummary, runSummary, startGeneration } from "./generation.js";
 import { placeIssues } from "./issues.js";
 import { LiveUpdates } from "./live.js";
 import { imageAt, itemAt, startOf } from "./playback.js";
-import { buildHash, buildHref, REVIEW_ROUTE, SETTINGS_ROUTE } from "./routes.js";
+import { findLine, lineBase, neighbours, RetakeController } from "./retake.js";
+import { buildHash, buildHref, lineRoute, REVIEW_ROUTE, SETTINGS_ROUTE } from "./routes.js";
 import { loadSettings, nextQuickSpeed, type Settings, saveSettings } from "./settings.js";
 import { useRoute } from "./useRoute.js";
 
@@ -94,6 +96,24 @@ export function App() {
       window.location.replace(buildHref(window.location.href, REVIEW_ROUTE));
     }
   }, []);
+  // The retake screen of a line (#/line/<id>). It sits on the review screen, which stays mounted.
+  const retakeId = route.name === "line" ? route.id : undefined;
+  const pushedRetake = useRef(false);
+  const openRetake = useCallback((id: string) => {
+    pushedRetake.current = true;
+    window.location.hash = buildHash(lineRoute(id));
+  }, []);
+  const closeRetake = useCallback(() => {
+    if (pushedRetake.current) {
+      pushedRetake.current = false;
+      window.history.back();
+    } else {
+      window.location.replace(buildHref(window.location.href, REVIEW_ROUTE));
+    }
+  }, []);
+  useEffect(() => {
+    if (retakeId === undefined) pushedRetake.current = false;
+  }, [retakeId]);
   // Focus goes back to the gear button when settings closes (the screen focuses its own heading).
   const settingsButton = useRef<HTMLButtonElement>(null);
   const wasOnSettings = useRef(onSettings);
@@ -125,10 +145,16 @@ export function App() {
   );
   // The server says whether it can make pitch-keeping copies (it needs ffmpeg).
   const [serverKeepsPitch, setServerKeepsPitch] = useState(true);
+  // The agent that answers instructions on the retake screen. Without one, its box is hidden.
+  const [agent, setAgent] = useState<{ command: string }>();
   useEffect(() => {
     let current = true;
     client.getServer().then(
-      (server) => current && setServerKeepsPitch(server.preview.keepPitch),
+      (server) => {
+        if (!current) return;
+        setServerKeepsPitch(server.preview.keepPitch);
+        setAgent(server.agent);
+      },
       () => undefined,
     );
     return () => {
@@ -373,6 +399,41 @@ export function App() {
     [project, play],
   );
 
+  // The controller of the retake screen. It reads the line from the latest project, so a reload
+  // after a stale answer shows in its next request.
+  const projectRef = useRef(project);
+  projectRef.current = project;
+  const paid = project?.provider.paid ?? false;
+  const retake = useMemo(() => {
+    if (retakeId === undefined) return undefined;
+    return new RetakeController({
+      client,
+      itemId: retakeId,
+      paid,
+      getBase: () => {
+        const line = findLine(projectRef.current?.scenario, retakeId);
+        return line && lineBase(line);
+      },
+      applyProject: (next) => applyProject(next),
+      reload,
+      askConfirm: (plan, changed) =>
+        new Promise<boolean>((resolve) => {
+          setConfirm({
+            plan,
+            changed,
+            onConfirm: () => {
+              setConfirm(undefined);
+              resolve(true);
+            },
+            onCancel: () => {
+              setConfirm(undefined);
+              resolve(false);
+            },
+          });
+        }),
+    });
+  }, [client, retakeId, paid, applyProject, reload]);
+
   const openLibrary = useCallback(
     (target: LibraryTarget) => {
       setLibraryTarget(target);
@@ -436,6 +497,47 @@ export function App() {
   const editingLine = editing
     ? scenario?.scenes.flatMap((s) => s.items).find((i) => "line" in i && i.id === editing)
     : undefined;
+
+  const retakeLine = retakeId !== undefined ? findLine(scenario, retakeId) : undefined;
+  const speakerName = (id: string) => scenario?.speakers.find((s) => s.id === id)?.name ?? id;
+  const fileOf = (id: string) => {
+    const entry = timeline?.items.find((i) => i.id === id);
+    return entry && !entry.missing ? entry.assetFile : undefined;
+  };
+  const contextLine = (item: ReturnType<typeof findLine>): ContextLine | undefined =>
+    item && {
+      id: item.id,
+      speaker: speakerName(item.speaker),
+      text: item.line,
+      file: fileOf(item.id),
+    };
+  const around = retakeId !== undefined ? neighbours(scenario, retakeId) : undefined;
+  const retakeScreen =
+    retakeId === undefined ? undefined : retakeLine && retake ? (
+      <RetakeScreen
+        // Each line starts with its own state.
+        key={retakeId}
+        controller={retake}
+        client={client}
+        line={retakeLine}
+        speakerName={speakerName(retakeLine.speaker)}
+        before={contextLine(around?.before)}
+        after={contextLine(around?.after)}
+        currentFile={fileOf(retakeLine.id)}
+        agent={agent}
+        speed={settings.speed}
+        generating={generating.has(retakeLine.id)}
+        onRegenerate={() => void regenerate(retakeLine.id, retakeLine.take)}
+        onClose={closeRetake}
+      />
+    ) : (
+      <section className="retake" aria-label="Retake">
+        <p role="status">{scenario ? `There is no line ${retakeId}.` : "Loading…"}</p>
+        <button type="button" onClick={closeRetake}>
+          Back
+        </button>
+      </section>
+    );
 
   const controls = (
     <PlayerControls
@@ -564,12 +666,14 @@ export function App() {
                 onGenerate={(id) => void generate(id)}
                 onPlayFrom={playFrom}
                 onEditLine={setEditing}
+                onRetake={openRetake}
                 onOpenLibrary={openLibrary}
               />
             )}
           </main>
           {!isPhone && (
             <aside className="side-panel">
+              {retakeScreen}
               {imageView}
               {library}
             </aside>
@@ -577,6 +681,12 @@ export function App() {
         </div>
 
         {isPhone && <footer className="bottom-bar">{controls}</footer>}
+
+        {isPhone && retakeScreen && (
+          <div className="sheet retake-sheet" role="dialog" aria-modal="true" aria-label="Retake">
+            {retakeScreen}
+          </div>
+        )}
 
         {isPhone && librarySheetOpen && library && (
           <div className="sheet" role="dialog" aria-modal="true" aria-label="Library">

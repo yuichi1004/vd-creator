@@ -45,6 +45,7 @@ test("an item's start time is separated from its label by a space", async () => 
       onGenerate={noop}
       onPlayFrom={noop}
       onEditLine={noop}
+      onRetake={noop}
       onOpenLibrary={noop}
     />,
   );
