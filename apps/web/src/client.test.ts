@@ -52,6 +52,9 @@ describe("URLs stay relative to the page under a path prefix", () => {
   test("asset, library file, and event URLs stay below the prefix", () => {
     const client = new ApiClient(PREFIX);
     expect(client.assetUrl("audio/line 1.mp3")).toBe(`${PREFIX}assets/audio/line%201.mp3`);
+    expect(client.previewUrl("audio/line 1.mp3", 1.25)).toBe(
+      `${PREFIX}preview/audio/line%201.mp3?tempo=1.25`,
+    );
     expect(client.libraryFileUrl("bgm", "calm")).toBe(`${PREFIX}library-files/bgm/calm`);
     expect(client.eventsUrl()).toBe(`${PREFIX}api/events`);
   });

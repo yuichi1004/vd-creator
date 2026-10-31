@@ -3,6 +3,7 @@ import {
   DEFAULT_SETTINGS,
   formatSpeed,
   loadSettings,
+  nextQuickSpeed,
   normalizeSpeed,
   SETTINGS_KEY,
   type StorageLike,
@@ -95,5 +96,18 @@ describe("speed", () => {
     expect(formatSpeed(1.25)).toBe("x1.25");
     expect(formatSpeed(0.5)).toBe("x0.5");
     expect(formatSpeed(2)).toBe("x2.0");
+  });
+});
+
+describe("quick speed", () => {
+  test("cycles x1.0, x1.25, x1.5, x2.0 and back to x1.0", () => {
+    expect([1, 1.25, 1.5, 2].map(nextQuickSpeed)).toEqual([1.25, 1.5, 2, 1]);
+  });
+
+  test("a speed off the list goes to the next higher quick speed", () => {
+    expect(nextQuickSpeed(0.5)).toBe(1);
+    expect(nextQuickSpeed(0.75)).toBe(1);
+    expect(nextQuickSpeed(1.1)).toBe(1.25);
+    expect(nextQuickSpeed(1.75)).toBe(2);
   });
 });

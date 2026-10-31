@@ -113,9 +113,9 @@ export function App() {
     () =>
       new Player({
         unlock,
-        load: async (file, tempo) => {
+        load: async (file, tempo, signal) => {
           const url = tempo === 1 ? client.assetUrl(file) : client.previewUrl(file, tempo);
-          const response = await fetch(url, { credentials: "same-origin" });
+          const response = await fetch(url, { credentials: "same-origin", signal });
           if (!response.ok) throw new Error("asset not loaded");
           return response.arrayBuffer();
         },

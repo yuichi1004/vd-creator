@@ -5,6 +5,7 @@ import {
   AudioUnlock,
   type BufferSourceLike,
   type GainNodeLike,
+  LOAD_WAIT_MS,
   Player,
 } from "./audio.js";
 import type { Timeline } from "./types.js";
@@ -358,6 +359,132 @@ describe("stop and retry", () => {
     await flush();
     expect(loaded.filter((f) => f === "l1.mp3")).toHaveLength(2);
     expect(context.started.map((s) => s.file)).toContain("l1.mp3");
+  });
+});
+
+describe("loading wait", () => {
+  const lineTimeline = (file: string): Timeline => ({
+    items: [
+      {
+        id: "a",
+        kind: "line",
+        sceneId: "s1",
+        index: 0,
+        startSec: 0,
+        durationSec: 4,
+        assetFile: file,
+      },
+    ],
+    images: [],
+    bgm: [],
+    scenes: [{ sceneId: "s1", startSec: 0, endSec: 4 }],
+    durationSec: 4,
+  });
+
+  /** A player whose loads settle only when the test says so. */
+  function gated() {
+    const context = new FakeContext();
+    const calls: { file: string; tempo: number; signal?: AbortSignal; release: () => void }[] = [];
+    const player = new Player({
+      unlock: new AudioUnlock(() => context),
+      load: (file, tempo, signal) =>
+        new Promise<ArrayBuffer>((resolve, reject) => {
+          calls.push({
+            file,
+            tempo,
+            signal,
+            release: () =>
+              resolve(new TextEncoder().encode(`${file}@${tempo}`).buffer as ArrayBuffer),
+          });
+          signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        }),
+      setInterval: () => 1,
+      clearInterval: () => undefined,
+    });
+    return { context, player, calls };
+  }
+
+  test("a new timeline during the wait restarts the play on the new timeline", async () => {
+    const { player, calls } = gated();
+    player.setTimeline(lineTimeline("old.mp3"));
+    const first = player.play(1);
+    await flush();
+    expect(player.isLoading).toBe(true);
+    player.setTimeline(lineTimeline("new.mp3"));
+    await flush();
+    expect(await first).toBe(false);
+    expect(player.isLoading).toBe(true);
+    expect(calls.map((c) => c.file)).toEqual(["old.mp3", "new.mp3"]);
+    calls[1]?.release();
+    await flush();
+    expect(player.isPlaying).toBe(true);
+    expect(player.position).toBeCloseTo(1);
+  });
+
+  test("a seek during the wait changes where the play starts", async () => {
+    const { player, calls } = gated();
+    player.setTimeline(lineTimeline("a.mp3"));
+    void player.play(0);
+    await flush();
+    player.seek(2);
+    await flush();
+    calls.at(-1)?.release();
+    await flush();
+    expect(player.isPlaying).toBe(true);
+    expect(player.position).toBeCloseTo(2);
+  });
+
+  test("the wait is bounded, and a late sound starts part way in", async () => {
+    vi.useFakeTimers();
+    try {
+      const { context, player, calls } = gated();
+      player.setTimeline(lineTimeline("a.mp3"));
+      const pending = player.play(0);
+      await vi.advanceTimersByTimeAsync(LOAD_WAIT_MS - 1);
+      expect(player.isLoading).toBe(true);
+      await vi.advanceTimersByTimeAsync(2);
+      expect(await pending).toBe(true);
+      expect(player.isPlaying).toBe(true);
+      // The file arrives 1 s of clock time later and starts 1 s in.
+      context.currentTime = 1.05;
+      calls[0]?.release();
+      await vi.advanceTimersByTimeAsync(0);
+      await flush();
+      expect(context.started).toHaveLength(1);
+      expect(context.started[0]?.offset).toBeCloseTo(1, 0);
+      player.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("a replaced play aborts its loads", async () => {
+    const { player, calls } = gated();
+    player.setTimeline(lineTimeline("a.mp3"));
+    void player.play(0);
+    await flush();
+    expect(calls[0]?.signal?.aborted).toBe(false);
+    player.configure({ speed: 2, keepPitch: true });
+    await flush();
+    expect(calls[0]?.signal?.aborted).toBe(true);
+    expect(calls[1]).toMatchObject({ tempo: 2 });
+    expect(calls[1]?.signal?.aborted).toBe(false);
+    player.stop();
+    expect(calls[1]?.signal?.aborted).toBe(true);
+  });
+
+  test("an aborted stretched load does not mark the file as failed", async () => {
+    const { player, calls } = gated();
+    player.setTimeline(lineTimeline("a.mp3"));
+    player.configure({ speed: 2, keepPitch: true });
+    void player.play(0);
+    await flush();
+    player.stop();
+    await flush();
+    void player.play(0);
+    await flush();
+    // The second play asks for the stretched copy again, not the original.
+    expect(calls.map((c) => c.tempo)).toEqual([2, 2]);
   });
 });
 

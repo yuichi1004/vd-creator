@@ -117,6 +117,11 @@ export class AudioUnlock {
 
 /** How far ahead of the position sounds are started on the audio clock. */
 export const SCHEDULE_AHEAD_SEC = 2;
+/**
+ * The longest a play waits for its first sounds. Sounds not decoded by then start late, part
+ * way in, as soon as they are, which keeps them in sync with the clock.
+ */
+export const LOAD_WAIT_MS = 5000;
 /** How far ahead of the position files are fetched and decoded, in drama time. */
 export const DECODE_AHEAD_SEC = 8;
 const TICK_MS = 250;
@@ -125,9 +130,10 @@ export type PlayerOptions = {
   unlock: AudioUnlock;
   /**
    * Fetches the bytes of an asset file, given relative to `assets/`. A `tempo` other than 1 asks
-   * for a copy stretched to `1 / tempo` of the length with the pitch kept.
+   * for a copy stretched to `1 / tempo` of the length with the pitch kept. The `signal` aborts
+   * when the play that wanted the file is replaced or stopped.
    */
-  load: (file: string, tempo: number) => Promise<ArrayBuffer>;
+  load: (file: string, tempo: number, signal?: AbortSignal) => Promise<ArrayBuffer>;
   /** Called on start, stop, and the end of the timeline. */
   onChange?: () => void;
   setInterval?: (callback: () => void, ms: number) => unknown;
@@ -177,6 +183,8 @@ export class Player {
   private loadingFrom = 0;
   private timer?: unknown;
   private generation = 0;
+  /** Aborts the loads of the current play when it is replaced or stopped. */
+  private controller = new AbortController();
 
   constructor(private readonly options: PlayerOptions) {}
 
@@ -202,6 +210,7 @@ export class Player {
    */
   configure(next: PlaybackSpeed): void {
     if (next.speed === this.speed && next.keepPitch === this.keepPitch) return;
+    this.previewFailed.clear();
     const resumeAt = this.playing ? this.position : this.loading ? this.loadingFrom : undefined;
     if (this.playing) this.halt();
     this.speed = next.speed;
@@ -218,8 +227,10 @@ export class Player {
   /** Sets the timeline. If playing, playback restarts at the same position in the new one. */
   setTimeline(timeline: Timeline | undefined): void {
     const wasPlaying = this.playing;
-    const position = this.position;
+    const wasLoading = this.loading;
+    const position = wasLoading ? this.loadingFrom : this.position;
     if (wasPlaying) this.halt();
+    if (wasLoading) this.cancelLoading();
     this.timeline = timeline;
     // Files of the old timeline that are still used keep their decoded buffers.
     const files = new Set(timeline ? scheduleFrom(timeline, 0).map((s) => s.file) : []);
@@ -227,13 +238,14 @@ export class Player {
       if (!files.has(key.slice(0, key.lastIndexOf("@")))) this.buffers.delete(key);
     }
     this.positionSec = timeline ? clampPosition(timeline, position) : 0;
-    if (wasPlaying && timeline) void this.play(this.positionSec);
+    if ((wasPlaying || wasLoading) && timeline) void this.play(this.positionSec);
     else this.options.onChange?.();
   }
 
   /** Moves the position without playing. */
   seek(sec: number): void {
-    if (this.playing) {
+    // A play still waiting for its sounds starts from the latest seek.
+    if (this.playing || this.loading) {
       void this.play(sec);
       return;
     }
@@ -249,21 +261,39 @@ export class Player {
     const start = fromSec ?? this.positionSec;
     if (this.playing) this.halt();
     const run = ++this.generation;
+    this.controller.abort();
+    this.controller = new AbortController();
+    this.loading = true;
+    this.loadingFrom = start;
     const context = await this.options.unlock.unlock();
-    if (!context || !this.timeline || run !== this.generation) return false;
+    if (run !== this.generation) return false;
+    if (!context || !this.timeline) {
+      this.loading = false;
+      this.options.onChange?.();
+      return false;
+    }
     const timeline = this.timeline;
     this.failed.clear();
+    this.previewFailed.clear();
     for (const [key, promise] of this.buffers) {
       if (this.pending.has(promise)) this.buffers.delete(key);
     }
     this.startSec = start >= timeline.durationSec ? 0 : Math.max(0, start);
     this.sounds = scheduleFrom(timeline, this.startSec);
     // Wait for the sounds of the next 2 s of clock time, so that none starts part way in.
-    this.loading = true;
     this.loadingFrom = this.startSec;
     this.options.onChange?.();
     const first = filesAround(this.sounds, this.startSec, SCHEDULE_AHEAD_SEC * this.speed);
-    await Promise.all(first.map((file) => this.decode(context, file)));
+    const loads = Promise.all(first.map((file) => this.decode(context, file)));
+    // Bounded: sounds that are not ready then start late, part way in, once they are.
+    let bound: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      loads,
+      new Promise<void>((resolve) => {
+        bound = globalThis.setTimeout(resolve, LOAD_WAIT_MS);
+      }),
+    ]);
+    globalThis.clearTimeout(bound);
     if (run !== this.generation) return false;
     this.loading = false;
     this.clockStart = context.currentTime + 0.05;
@@ -280,7 +310,7 @@ export class Player {
   stop(): void {
     this.generation++;
     if (this.loading) {
-      this.loading = false;
+      this.cancelLoading();
       this.options.onChange?.();
     }
     if (!this.playing) return;
@@ -288,10 +318,18 @@ export class Player {
     this.options.onChange?.();
   }
 
+  /** Gives up a play that is waiting for its sounds, and aborts its loads. */
+  private cancelLoading(): void {
+    this.loading = false;
+    this.generation++;
+    this.controller.abort();
+  }
+
   private halt(): void {
     this.positionSec = this.position;
     this.playing = false;
     this.generation++;
+    this.controller.abort();
     if (this.timer !== undefined) {
       const clear =
         this.options.clearInterval ??
@@ -392,15 +430,17 @@ export class Player {
     if (existing) return existing;
     if (this.failed.has(key)) return Promise.resolve(undefined);
     const run = this.generation;
+    const { signal } = this.controller;
     const fetchDecoded = (at: number) =>
       this.options
-        .load(file, at)
+        .load(file, at, signal)
         .then((bytes) => context.decodeAudioData(bytes))
         .then((buffer): Decoded => ({ buffer, tempo: at }));
     const promise: Promise<Decoded | undefined> = fetchDecoded(tempo)
       .catch((error: unknown) => {
-        if (tempo === 1) throw error;
-        // No stretched copy: play the original with `playbackRate` from now on.
+        // A load of a replaced play was aborted, not refused by the server.
+        if (tempo === 1 || signal.aborted || run !== this.generation) throw error;
+        // No stretched copy: play the original with `playbackRate` until the next play.
         this.previewFailed.add(file);
         const original = bufferKey(file, 1);
         if (!this.buffers.has(original)) this.buffers.set(original, promise);

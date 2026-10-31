@@ -794,6 +794,11 @@ input[type="range"].speed-slider {
 
 .bottom-bar .player-controls {
   margin-left: 0;
+  gap: 6px;
+}
+
+.bottom-bar .player-controls .hint {
+  flex-basis: 100%;
 }
 
 @media (max-width: 767px) {

@@ -86,8 +86,8 @@ export function saveSettings(
 /** The speeds that the quick speed button cycles through. */
 export const QUICK_SPEEDS: readonly number[] = [1, 1.25, 1.5, 2];
 
-/** The speed after a tap on the quick button. Other speeds, such as x0.5, go back to x1.0. */
+/** The next higher quick speed, wrapping to x1.0 after x2.0 (and above it). */
 export function nextQuickSpeed(speed: number): number {
-  const index = QUICK_SPEEDS.indexOf(normalizeSpeed(speed));
-  return QUICK_SPEEDS[(index + 1) % QUICK_SPEEDS.length] ?? 1;
+  const current = normalizeSpeed(speed);
+  return QUICK_SPEEDS.find((quick) => quick > current) ?? 1;
 }

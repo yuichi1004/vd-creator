@@ -47,7 +47,8 @@ export function PlayerControls(props: Props) {
       </span>
       {loading && (
         <span className="hint" role="status">
-          Loading…
+          <span aria-hidden="true">…</span>
+          <span className="visually-hidden">Loading</span>
         </span>
       )}
       {unlockState === "locked" && <span className="hint">Tap play to enable sound</span>}
