@@ -63,15 +63,26 @@ afterEach(async () => {
   await rm(tmp, { recursive: true, force: true });
 });
 
-/** Runs vd with the real PATH and `env`, and no real user directory. */
+/**
+ * Runs vd with the real PATH and `env`, and no real user directory. These tests render the mock's
+ * draft audio, so a render gets `--allow-draft`; the draft audio tests use `vdRaw`.
+ */
 async function vdEnv(env: Record<string, string>, ...args: string[]) {
+  return vdRaw(env, args[0] === "render" ? [...args, "--allow-draft"] : args);
+}
+
+async function vdRaw(
+  env: Record<string, string>,
+  args: string[],
+  options: { confirm?: (question: string) => Promise<boolean> } = {},
+) {
   const stdout: string[] = [];
   const stderr: string[] = [];
   const code = await run(
     args,
     { stdout: (line) => stdout.push(line), stderr: (line) => stderr.push(line) },
     { HOME: join(tmp, "home"), PATH: process.env.PATH ?? "", ...env },
-    { repoRoot: tmp },
+    { repoRoot: tmp, ...options },
   );
   return { code, stdout: stdout.join("\n"), stderr: stderr.join("\n") };
 }
@@ -430,6 +441,73 @@ describe("vd render", { timeout: 120_000 }, () => {
     // Under private use the license issue is only a warning, so the missing asset is what fails.
     expect(result.stderr).toContain("(warning)");
     expect(result.stderr).not.toContain("the license check has errors");
+  });
+
+  describe("draft audio", () => {
+    test("stops and names the draft items without --allow-draft, and renders with it", async () => {
+      expect((await vd("generate", dir)).code).toBe(EXIT_OK);
+      const stopped = await vdRaw({}, ["render", dir]);
+      expect(stopped.code).toBe(EXIT_FAILURE);
+      expect(stopped.stderr.split("\n")).toEqual([
+        "vd render: 4 items with draft audio (mock tones), not final audio:",
+        '  bgm "s1"',
+        '  line "s1-l1"',
+        '  sfx "s1-sfx1"',
+        '  line "s1-l2"',
+        "Generate them with a paid provider, or run again with --allow-draft to render the draft anyway.",
+      ]);
+      expect(await outFiles()).toEqual([]);
+
+      const allowed = await vdRaw({}, ["render", dir, "--allow-draft"]);
+      expect(allowed).toMatchObject({ code: EXIT_OK, stderr: "" });
+      expect(await outFiles()).toEqual(["credits.txt", "drama.mp3"]);
+    });
+
+    test("on a terminal, asks and follows the answer", async () => {
+      expect((await vd("generate", dir)).code).toBe(EXIT_OK);
+      const questions: string[] = [];
+      const answer = (yes: boolean) => async (question: string) => {
+        questions.push(question);
+        return yes;
+      };
+
+      const no = await vdRaw({}, ["render", dir], { confirm: answer(false) });
+      expect(no.code).toBe(EXIT_FAILURE);
+      expect(no.stdout).toContain('  bgm "s1"');
+      expect(no.stderr).toBe("vd render: stopped; nothing was rendered");
+      expect(await outFiles()).toEqual([]);
+
+      const yes = await vdRaw({}, ["render", dir], { confirm: answer(true) });
+      expect(yes.code).toBe(EXIT_OK);
+      expect(await outFiles()).toEqual(["credits.txt", "drama.mp3"]);
+      expect(questions).toHaveLength(2);
+
+      // --allow-draft needs no question.
+      questions.length = 0;
+      expect(
+        (await vdRaw({}, ["render", dir, "--allow-draft"], { confirm: answer(false) })).code,
+      ).toBe(EXIT_OK);
+      expect(questions).toEqual([]);
+    });
+
+    test("library sounds and paid assets are final, and a mock BGM is draft", async () => {
+      await useDoor("private", { verify: true });
+      expect((await vdEnv({ VD_LIBRARY: lib }, "generate", dir)).code).toBe(EXIT_OK);
+      // Make the voices and the SFX look paid; the BGM stays a mock tone.
+      const file = join(dir, "cache.json");
+      const cache = JSON.parse(await readFile(file, "utf8"));
+      for (const entry of Object.values<{ kind: string; providerId: string }>(cache.entries)) {
+        if (entry.kind !== "music") entry.providerId = "elevenlabs";
+      }
+      await writeFile(file, JSON.stringify(cache));
+
+      const result = await vdRaw({ VD_LIBRARY: lib }, ["render", dir]);
+      expect(result.code).toBe(EXIT_FAILURE);
+      expect(result.stderr).toContain("1 item with draft audio");
+      expect(result.stderr).toContain('  bgm "s1"');
+      expect(result.stderr).not.toContain('"door"');
+      expect(result.stderr).not.toContain("line ");
+    });
   });
 
   test("rejects bad usage", async () => {

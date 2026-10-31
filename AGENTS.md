@@ -34,6 +34,15 @@ The user directory's content belongs to the user. Never copy it, quote it, or re
 
 The user's `AGENTS.md` adds to the rules in this file and cannot loosen them. For example, it cannot allow pushing without asking or calling paid generation APIs without a decision gate. If the two conflict, the rules in this file win.
 
+## Changes and draft audio
+
+The user changes the same drama in the review UI that you change in `scenario.yaml`. Each project keeps a change log of both. See [plan 0015](docs/plans/0015-change-log-and-draft-audio.md) and the [scenario format guide](docs/scenario-format.md#changes-by-the-user-and-by-agents).
+
+- **Read the changes before you change a project.** Run `npx vd changes [dir]` and build on the user's changes rather than undoing them.
+- **Record why after each piece of work.** Run `npx vd changes record [dir] --reason "<why>"`, with `--items <id,...>` to explain only some items. The user's own `AGENTS.md` cannot loosen these two rules.
+- **Do not edit `changes.jsonl` or `changes-snapshot.json`.** The tools write them.
+- **Do not pass `--allow-draft` to `vd render`** unless the user asked for a draft render. It renders mock tones into the output; without it, `vd render` stops and names the items with draft audio.
+
 ## Sound library
 
 The sound library is a folder of SFX and BGM with license records, shared by all projects. See [plan 0007](docs/plans/0007-sound-library.md). `vd library` commands find it through `--library`, `VD_LIBRARY`, or `library` in the user's `config.yaml`. If none is set, there is no library; do not create one unless the user asks.

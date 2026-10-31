@@ -283,6 +283,17 @@ Programs change items with `updateItem` from `@vd-creator/scenario`, which is al
 
 So that the UI can always edit what you write, **do not use YAML anchors (`&name`), aliases (`*name`), or tags (`!!str`) in a scenario**. Repeat values instead. They are valid YAML, and validation accepts them, but the editor may refuse to change the items they touch.
 
+## Changes by the user and by agents
+
+The user fixes lines in the review UI while you edit `scenario.yaml`. Each project keeps a change log, `changes.jsonl`, of both sides, and `changes-snapshot.json`, the last state it compared with. Both are written by the tools, so do not edit them, and `vd clean` keeps them. Plan [0015](plans/0015-change-log-and-draft-audio.md) describes them.
+
+- **Before you change a project**, run `vd changes [dir]`. It lists, oldest first, what the user and others changed since the last time an agent recorded its work. Build on those changes rather than undoing them. `--since <entry ID|time|start>` reads further back, `--source ui|file|agent|review` filters, and `--json` prints the entries.
+- **After you change it**, run `vd changes record [dir] --reason "<why>"`, with a reason of up to 300 characters. The user sees it next to the items you changed. It explains every change in the file that no reason explains yet; `--items <id,...>` explains only the changes to those items. Run it after each piece of work, so the next agent starts from there.
+
+## Draft audio
+
+Audio made by the free `mock` provider is a test tone, called draft audio. Library sounds and the audio of a paid provider are final. `vd render` stops and names every item with draft audio, and on a terminal asks whether to go on. **Do not pass `--allow-draft` unless the user asked for a draft render.** To make the audio final, run `vd generate` with a paid provider, which needs the user's decision.
+
 ## Common mistakes
 
 - **A missing `id`** on a scene, line, or SFX.

@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import {
   AssetCache,
@@ -8,6 +9,7 @@ import {
   checkLibraryLicenses,
   computeTimeline,
   defaultResolvers,
+  draftItems,
   GenerationError,
   type ItemResult,
   itemLabel,
@@ -38,6 +40,7 @@ import {
   startServer,
   WatchError,
 } from "@vd-creator/server";
+import { changesCommand } from "./changes.js";
 import { CleanInterruptedError, CleanRefusedError, cleanProject } from "./clean.js";
 import {
   CONFIG_ENV_VARS,
@@ -129,9 +132,25 @@ Commands:
     --format <f>      mp3 (default) or wav, for out/drama.wav
     --print-command   Print the ffmpeg commands as a shell script after the checks, and
                       render nothing. ffmpeg need not be on PATH
+    --allow-draft     Render even if some items have draft audio (mock tones). Without it,
+                      render stops and names them, or on a terminal asks whether to go on.
+                      Agents: pass it only when the user asked for a draft render
   clean [dir]       Remove files in assets/voice, assets/sfx, and assets/bgm, and cache.json
-                    entries, that the scenario no longer uses. assets/library/ is kept
+                    entries, that the scenario no longer uses. assets/library/,
+                    changes.jsonl, and changes-snapshot.json are kept
     --dry-run         List what would be removed and stop
+  changes [dir]     List what the user and others changed since the last agent entry, oldest
+                    first: time, source (ui, file, agent, review), target, change, reason.
+                    Compares scenario.yaml with the last recorded state first. Run it before
+                    you change a project, and build on the user's changes
+    --since <p>       Start after entry ID <p>, after the time <p>, or at "start"
+    --source <s>      Only entries from ui, file, agent, or review
+    --json            Print the entries as JSON
+  changes record [dir] --reason "<why>"
+                    Record why you changed the project, in up to 300 characters. It explains
+                    every change in the file that no reason explains yet. Run it after each
+                    piece of work
+    --items <id,...>  Explain only the changes to these item IDs
   config path       Print the user directory and the rule that selected it: VD_USER_DIR,
                     local/ at the repository root, or vd-creator/ in XDG_CONFIG_HOME
                     (default: ~/.config). The first that exists is used
@@ -192,6 +211,11 @@ export type RunOptions = {
   signal?: AbortSignal;
   /** The built web UI that vd serve serves. Defaults to `WEB_DIR`. */
   webDir?: string;
+  /**
+   * Asks the user a yes or no question at a terminal. Defaults to a prompt on the real terminal
+   * if both stdin and stdout are one, and to no terminal otherwise.
+   */
+  confirm?: (question: string) => Promise<boolean>;
 };
 
 /** What a command needs besides its arguments. */
@@ -203,6 +227,7 @@ type Context = {
   library?: string;
   signal?: AbortSignal;
   webDir: string;
+  confirm?: (question: string) => Promise<boolean>;
 };
 
 /**
@@ -234,6 +259,8 @@ export async function run(
     webDir: options.webDir ?? WEB_DIR,
   };
   if (options.signal !== undefined) context.signal = options.signal;
+  const confirm = options.confirm ?? terminalConfirm();
+  if (confirm !== undefined) context.confirm = confirm;
   try {
     return await dispatch(args, context);
   } catch (e) {
@@ -285,6 +312,13 @@ async function dispatch(args: string[], context: Context): Promise<number> {
       return render(rest, parsed.values, context);
     case "clean":
       return clean(rest, parsed.values, context);
+    case "changes":
+      return changesCommand(
+        rest,
+        parsed.values,
+        { stdout: output.stdout, stderr: output.stderr, debug: context.debug },
+        { ok: EXIT_OK, failure: EXIT_FAILURE, usage: EXIT_USAGE },
+      );
     case "config":
       return config(rest, parsed.values, context);
     case "library":
@@ -333,6 +367,11 @@ function parse(args: string[]) {
       srt: { type: "boolean" },
       format: { type: "string" },
       "print-command": { type: "boolean" },
+      "allow-draft": { type: "boolean" },
+      since: { type: "string" },
+      source: { type: "string" },
+      reason: { type: "string" },
+      items: { type: "string" },
     },
   });
 }
@@ -344,8 +383,9 @@ const COMMAND_OPTIONS: Partial<Record<string, readonly string[]>> = {
   init: [],
   validate: [],
   generate: ["provider", "only", "dry-run", "yes"],
-  render: ["video", "srt", "format", "print-command"],
+  render: ["video", "srt", "format", "print-command", "allow-draft"],
   clean: ["dry-run"],
+  changes: ["since", "source", "json", "reason", "items"],
   // Each subcommand checks which of these it takes.
   config: ["dir", "json"],
   library: LIBRARY_OPTIONS,
@@ -635,6 +675,32 @@ async function render(args: string[], options: Options, context: Context): Promi
     return EXIT_FAILURE;
   }
 
+  // Draft audio is a test tone, so it never goes into a render unless the user chose that.
+  if (options["allow-draft"] !== true) {
+    const drafts = await draftItems(scenario, cache);
+    if (drafts.length > 0) {
+      const list = drafts.map((item) => `  ${itemLabel(item)}`);
+      if (context.confirm === undefined) {
+        output.stderr(
+          `vd render: ${plural(drafts.length, "item")} with draft audio (mock tones), not final audio:`,
+        );
+        for (const line of list) output.stderr(line);
+        output.stderr(
+          "Generate them with a paid provider, or run again with --allow-draft to render the draft anyway.",
+        );
+        return EXIT_FAILURE;
+      }
+      output.stdout(
+        `${plural(drafts.length, "item")} with draft audio (mock tones), not final audio:`,
+      );
+      for (const line of list) output.stdout(line);
+      if (!(await context.confirm("Render with the draft audio anyway? [y/N] "))) {
+        output.stderr("vd render: stopped; nothing was rendered");
+        return EXIT_FAILURE;
+      }
+    }
+  }
+
   if (printOnly) {
     // The script enters the project folder itself; a quoted path holds any character safely.
     output.stdout(`cd -- ${shellQuote(dir)} || exit 1`);
@@ -784,6 +850,19 @@ async function clean(args: string[], options: Options, context: Context): Promis
  * Loads and validates the scenario of a project, like vd validate, and its cache. Prints the
  * problems and returns an exit code if either cannot be used.
  */
+/** A yes or no prompt on the real terminal, or undefined if stdin or stdout is not one. */
+function terminalConfirm(): ((question: string) => Promise<boolean>) | undefined {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return undefined;
+  return async (question) => {
+    const reader = createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      return /^y(es)?$/i.test((await reader.question(question)).trim());
+    } finally {
+      reader.close();
+    }
+  };
+}
+
 async function loadProject(
   command: string,
   dir: string,

@@ -16,7 +16,7 @@ import {
 import type { Env } from "./config/index.js";
 
 export const RENDER_USAGE =
-  "Usage: vd render [dir] [--video] [--srt] [--format mp3|wav] [--print-command]";
+  "Usage: vd render [dir] [--video] [--srt] [--format mp3|wav] [--print-command] [--allow-draft]";
 
 export const RENDER_FORMATS: readonly RenderFormat[] = ["mp3", "wav"];
 
