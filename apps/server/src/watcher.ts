@@ -1,14 +1,16 @@
 // Watches a project folder for changes to scenario.yaml and cache.json.
 
 import { type FSWatcher, watch } from "node:fs";
-import { CACHE_FILE } from "@vd-creator/core";
+import { CACHE_FILE, CHANGES_FILE } from "@vd-creator/core";
 import { SCENARIO_FILE } from "@vd-creator/scenario";
 import type { ProjectChangedEvent } from "./api.js";
 
 /** Changes are reported this long after the last event for a file, so a save is one event. */
 export const WATCH_DEBOUNCE_MS = 100;
 
-const WATCHED = new Set<string>([SCENARIO_FILE, CACHE_FILE]);
+// The change log is watched so that a review, or a reason an agent records, reaches every
+// open page. Reloading the project only reads, so these events cannot loop.
+const WATCHED = new Set<string>([SCENARIO_FILE, CACHE_FILE, CHANGES_FILE]);
 
 export type ProjectListener = (event: ProjectChangedEvent) => void;
 

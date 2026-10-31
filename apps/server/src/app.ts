@@ -68,7 +68,7 @@ import type {
   SoundSource,
   VerifyLibraryEntryResponse,
 } from "./api.js";
-import { changedSinceReview } from "./changes.js";
+import { changedSinceReview, entryView } from "./changes.js";
 import { relativeUrlPath, serveFile } from "./files.js";
 import { hostCheck } from "./hosts.js";
 import { type MessageRoot, sanitizeMessage, sanitizeTarget } from "./sanitize.js";
@@ -264,8 +264,9 @@ export function createApp(options: AppOptions): Hono {
     if (since === "review") point = "review";
     else if (/^[1-9]\d{0,15}$/.test(since)) point = { id: Number(since) };
     else throw badRequest("since must be review or an entry ID");
+    const session = sessionOf(c);
     const response: ChangesResponse = {
-      entries: entriesSince(await readEntries(projectDir), point),
+      entries: entriesSince(await readEntries(projectDir), point).map((e) => entryView(e, session)),
     };
     return c.json(response);
   });

@@ -2,7 +2,18 @@
 // docs/plans/0015-change-log-and-draft-audio.md.
 
 import type { ChangeEntry, ChangeTarget } from "@vd-creator/core";
-import type { ChangedTarget } from "./api.js";
+import type { ChangedTarget, ChangeEntryView } from "./api.js";
+
+/**
+ * An entry as a client sees it. The stored session ID is never sent, since another client could
+ * copy it into `X-VD-Session` to hide its changes from a page. `own: true` marks a `ui` entry
+ * made by the requester's own session.
+ */
+export function entryView(entry: ChangeEntry, session?: string): ChangeEntryView {
+  if (entry.source !== "ui") return entry;
+  const { session: stored, ...rest } = entry;
+  return session !== undefined && stored === session ? { ...rest, own: true } : rest;
+}
 
 /**
  * The targets with `file` or `ui` entries after the last `review` entry, and the targets of
@@ -25,7 +36,8 @@ export function changedSinceReview(
   const byId = new Map(entries.map((e) => [e.id, e]));
   for (const entry of entries) {
     if (entry.id <= reviewId) continue;
-    if (entry.source === "file" || (entry.source === "ui" && entry.session !== session)) {
+    const own = entry.source === "ui" && session !== undefined && entry.session === session;
+    if (entry.source === "file" || (entry.source === "ui" && !own)) {
       mark(entry.target);
     } else if (entry.source === "agent") {
       // A reason recorded after the review shows the changes it explains, however old.

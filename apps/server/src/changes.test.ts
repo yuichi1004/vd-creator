@@ -53,7 +53,10 @@ function providers(id = "fake", paid = false): ServerProviders {
 }
 
 function request(app: ReturnType<typeof createApp>, method: string, path: string, init = {}) {
-  const { body, headers, ...rest } = init as { body?: unknown; headers?: HeadersInit };
+  const { body, headers, ...rest } = init as {
+    body?: unknown;
+    headers?: Record<string, string>;
+  };
   return app.request(path, {
     method,
     headers: { Host: "localhost:5310", "Content-Type": "application/json", ...headers },
@@ -207,6 +210,128 @@ describe("review and marks", () => {
       { kind: "item", id: "mira", count: 2 },
       { kind: "speaker", id: "mira", count: 1 },
     ]);
+  });
+});
+
+describe("sessions", () => {
+  test("a change without a session is not hidden from a request without one", async () => {
+    const app = createApp({ projectDir: dir, provider: providers() });
+    const patched = await json<ProjectResponse>(
+      await request(app, "PATCH", "/api/items/s1-l1", { body: { text: "anon" } }),
+    );
+    expect(patched.changedSinceReview).toEqual([{ kind: "item", id: "s1-l1", count: 1 }]);
+    const got = await json<ProjectResponse>(await request(app, "GET", "/api/project"));
+    expect(got.changedSinceReview).toEqual([{ kind: "item", id: "s1-l1", count: 1 }]);
+  });
+
+  test("session IDs never appear in responses; own is set only for the requester", async () => {
+    const app = createApp({ projectDir: dir, provider: providers() });
+    const secret = "secret-session-id-0123456789abcdef";
+    const patch = await request(app, "PATCH", "/api/items/s1-l1", {
+      body: { text: "mine" },
+      headers: { "X-VD-Session": secret },
+    });
+    expect(await patch.text()).not.toContain(secret);
+    const get = (session?: string) =>
+      request(app, "GET", "/api/changes?since=1", {
+        headers: session ? { "X-VD-Session": session } : {},
+      });
+    await request(app, "PATCH", "/api/items/s1-l1", {
+      body: { gapBeforeSec: 1 },
+      headers: { "X-VD-Session": secret },
+    });
+    const own = await get(secret);
+    const ownText = await own.text();
+    expect(ownText).not.toContain(secret);
+    expect(JSON.parse(ownText).entries).toEqual([expect.objectContaining({ own: true })]);
+    for (const other of [undefined, "another-session"]) {
+      const text = await (await get(other)).text();
+      expect(text).not.toContain(secret);
+      expect(text).not.toContain('"session"');
+      expect(text).not.toContain('"own"');
+    }
+    const project = await (await request(app, "GET", "/api/project")).text();
+    expect(project).not.toContain(secret);
+  });
+});
+
+describe("live updates of the log", () => {
+  test("a review or an agent reason reaches the event stream", async () => {
+    running = await startServer({ projectDir: dir, provider: providers(), port: 0 });
+    const events = await fetch(new URL("api/events", running.url));
+    const reader = (events.body as ReadableStream<Uint8Array>).getReader();
+    let text = "";
+    const seen = async (needle: string) => {
+      const until = Date.now() + 5000;
+      while (!text.includes(needle) && Date.now() < until) {
+        const { value, done } = await Promise.race([
+          reader.read(),
+          new Promise<{ value: undefined; done: true }>((r) =>
+            setTimeout(() => r({ value: undefined, done: true }), 500),
+          ),
+        ]);
+        if (value) text += new TextDecoder().decode(value);
+        if (done && !value) continue;
+      }
+      return text.includes(needle);
+    };
+    expect(await seen(": connected")).toBe(true);
+    text = "";
+    const review = await fetch(new URL("api/changes/review", running.url), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(review.status).toBe(200);
+    expect(await seen('"file":"changes.jsonl"')).toBe(true);
+    text = "";
+    await recordAgent(dir, "Only a reason");
+    expect(await seen('"file":"changes.jsonl"')).toBe(true);
+    await reader.cancel();
+  });
+});
+
+describe("the new routes keep the request checks", () => {
+  const routes: [string, string, unknown][] = [
+    ["GET", "/api/changes", undefined],
+    ["POST", "/api/changes/review", {}],
+  ];
+
+  test("a mutation must be JSON and not cross-site", async () => {
+    const app = createApp({ projectDir: dir, provider: providers() });
+    const plain = await app.request("/api/changes/review", {
+      method: "POST",
+      headers: { Host: "localhost:5310", "Content-Type": "text/plain" },
+      body: "{}",
+    });
+    expect(plain.status).toBe(400);
+    const cross = await request(app, "POST", "/api/changes/review", {
+      body: {},
+      headers: { "Sec-Fetch-Site": "cross-site" },
+    });
+    expect(cross.status).toBe(400);
+    expect(await readEntries(dir)).toEqual([]);
+  });
+
+  test("a Host that is not allowed is refused", async () => {
+    const app = createApp({ projectDir: dir, provider: providers() });
+    for (const [method, path, body] of routes) {
+      const response = await request(app, method, path, {
+        body,
+        headers: { Host: "evil.example" },
+      });
+      expect(response.status).toBe(403);
+    }
+    expect(await readEntries(dir)).toEqual([]);
+  });
+
+  test("with a token, both routes need it", async () => {
+    const app = createApp({ projectDir: dir, provider: providers(), token: "tok" });
+    for (const [method, path, body] of routes) {
+      expect((await request(app, method, path, { body })).status).toBe(401);
+      const ok = await request(app, method, path, { body, headers: { Cookie: "vd_token=tok" } });
+      expect(ok.status).toBe(200);
+    }
   });
 });
 

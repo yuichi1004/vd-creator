@@ -45,8 +45,20 @@ export type ProjectTimeline = Omit<Timeline, "items" | "bgm"> & {
 /** A target with changes the user has not reviewed. `count` is the number of change entries. */
 export type ChangedTarget = { kind: ChangeTargetKind; id: string; count: number };
 
+/**
+ * A change log entry as the server sends it. Session IDs are never sent: a `ui` entry made by
+ * the requesting session (the `X-VD-Session` of the request) has `own: true`, and no other
+ * entry has `own`. The page makes its session ID random, at least 128 bits, so no one else
+ * learns it.
+ */
+export type ChangeEntryView = ChangeEntry extends infer E
+  ? E extends { session?: string }
+    ? Omit<E, "session"> & { own?: true }
+    : E
+  : never;
+
 /** Response of `GET /api/changes`: the entries after the point, oldest first. */
-export type ChangesResponse = { entries: ChangeEntry[] };
+export type ChangesResponse = { entries: ChangeEntryView[] };
 
 /** `GET /api/project`. */
 export type ProjectResponse = {
@@ -81,7 +93,7 @@ export type ServerEventName = "project-changed";
 
 /** Data of a `project-changed` event, sent as JSON. The UI then reloads `GET /api/project`. */
 export type ProjectChangedEvent = {
-  file: "scenario.yaml" | "cache.json";
+  file: "scenario.yaml" | "cache.json" | "changes.jsonl";
 };
 
 /** A sound source written as `{ prompt }` for a generated sound or `{ library }` for a library entry. */
