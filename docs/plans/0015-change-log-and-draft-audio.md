@@ -108,13 +108,14 @@ Run the first task, then the second and third at the same time, then the fourth.
   - Constraints: no new dependencies. Depends on the first task.
   - Ownership: `apps/cli/` except the `serve` part of `cli.ts`, `AGENTS.md`, `docs/scenario-format.md`.
   - Acceptance: `npm test -w apps/cli` passes, with tests that `vd changes` lists entries since the last `agent` entry, even after a `review` entry, and prints JSON with `--json`; that `record` explains edits the server recorded first; that `vd render` stops and names draft items without `--allow-draft`, renders with it, and on a terminal asks and follows the answer; that library sounds and paid assets in a mixed drama are not called draft, and a mock BGM is; and that `vd clean` keeps `changes.jsonl` and `changes-snapshot.json`.
-- [ ] Server changes and draft state
+- [x] Server changes and draft state
   - Requirements: R38, R39, R13
   - Target: `apps/server/`
   - Change: `ui` entries for every mutation route, with the session ID; the comparison on file change and on start; `GET /api/changes`, `POST /api/changes/review`; `audio` and `changedSinceReview` in the project response, with types in `api.ts`. Update the API table of 0005 with a link to this plan.
   - Constraints: no new dependencies. Every UI change holds the project lock and reconciles before it writes, inside the same mutation queue step. Depends on the first task.
   - Ownership: `apps/server/`, the API table in plan 0005.
   - Acceptance: `npm test -w apps/server` passes, with tests that a PATCH writes one `ui` entry per field with the session ID and no `file` entry; that an outside edit of `scenario.yaml` writes `file` entries; that an outside edit not yet seen by the watcher is recorded as `file` before a PATCH on top of it; that edits made while the server was stopped are recorded on start; that `review` clears `changedSinceReview`, and an `agent` entry after it marks its targets again; that a speaker and an item with the same ID are marked apart; and that a mock asset gives `audio: "draft"` while library and paid assets give `final`.
+  - Review notes: first review by Codex `gpt-6.1-sol`: four P2. The server typecheck failed on a test type; requests without a session matched each other; `GET /api/changes` returned session IDs, which another client could copy into `X-VD-Session` to hide its edits from that page; and a review or a log-only agent reason sent no live event. Round 1 hides entries only for a matching session ID, never sends session IDs (only `own: true` to the requester), and watches `changes.jsonl`. The Claude re-review found no P1 or P2. Follow-ups: each PATCH now fires two `project-changed` events (one for `scenario.yaml`, one for `changes.jsonl`), so the page reloads twice per edit; coalesce them. Add tests that an empty, over-long, or newline-suffixed `X-VD-Session` gets 400, including on `GET /api/changes`. Strip `session` from every entry in responses, not only `ui` entries.
 - [ ] Marks and draft badges in the UI
   - Requirements: R39, R13
   - Target: `apps/web/src/`
