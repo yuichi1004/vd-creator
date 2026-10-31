@@ -93,13 +93,14 @@ Every mutation route of 0005 records its `ui` entries. Requests may send an `X-V
 
 Run the first task, then the second and third at the same time, then the fourth. Run this plan before plans 0010 and 0013, and not at the same time as another plan that owns `apps/server/` or `apps/web/src/`. The first task's first review uses `gpt-6-astra`, because it adds project files that agents and later versions will read. The server task's first review uses Codex `gpt-6.1-sol`, because it writes into the project from requests. Fix rounds and the other tasks use a Claude reviewer.
 
-- [ ] Change log in core
+- [x] Change log in core
   - Requirements: R38, R39
   - Target: `packages/core/src/changes/` (new)
   - Change: the draft or final kind of an asset, as one helper both later tasks use; the entry type and its JSON Schema, append and read with filters, the snapshot with atomic replacement, the comparison of a scenario with the snapshot by kind, ID, and field, the project lock, reconciling with recovery, and `agent` entries with their `refs`.
   - Constraints: no new dependencies. Never compare a scenario that does not validate.
   - Ownership: `packages/core/src/changes/`, `packages/core/src/draft.ts` (new), `packages/core/src/index.ts`.
   - Acceptance: the standard acceptance chain passes, with tests that an edited field, an added, removed, and moved item, and a changed voice setting each give the right entry; that images and top-level fields are tracked; that a removed item keeps its last fields; that the first run records nothing; that an invalid scenario records nothing and keeps the snapshot; that a reason refers to file entries already recorded by an earlier reconcile; that `--items` limits the refs, and a later plain record still explains the rest; that two reconciles racing on the lock record each change once; that a stale lock is taken over; that a cut-off last line is skipped and removed; that a crash between append and snapshot does not duplicate entries on the next run; and that `since` filters by entry ID and by the last review.
+  - Review notes: first review by Codex `gpt-6-astra`: one P1 (lock ownership was checked and removed in separate steps, so two holders could overlap) and three P2 (crash recovery compared only the stale snapshot; `--items` matched IDs without kind; the JSON Schema disagreed with the reader). Round 1 put release and takeover under a gate file, `changes.lock.break`, created exclusively, and recovered against the snapshot plus the entries after it. The Claude re-review found the stale-gate removal racy, no real concurrency test, and a release with no deadline that could hide errors. Round 2 renames a stale gate aside before judging it, adds a stress test with five child processes, one of them crashing while holding the lock, bounds release, and applies entries in order. Follow-ups: the stress test runs the built `packages/core/dist`, so `npm test` alone fails in a fresh clone before `npm run build`; it could skip with a note instead.
 - [ ] `vd changes`, the render check, and the agent rules
   - Requirements: R38, R39, R36
   - Target: `apps/cli/`, `AGENTS.md`, `docs/scenario-format.md`
