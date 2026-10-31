@@ -28,6 +28,25 @@ export type ProviderInfo = {
 };
 
 /**
+ * `GET /api/server`: facts about the whole server (plan 0010). No path on disk is ever in it.
+ * Later plans add fields.
+ */
+export type ServerInfoResponse = {
+  provider: ProviderInfo;
+  /** The library's name from its library.yaml. Absent when no library is set or it is unreadable. */
+  library?: { name: string };
+  /** The vd version. */
+  version: string;
+  preview: {
+    /**
+     * True if `GET /preview/*` can make time-stretched copies that keep the pitch, which needs
+     * ffmpeg on `PATH`. When false, the UI plays at a speed with `playbackRate`.
+     */
+    keepPitch: boolean;
+  };
+};
+
+/**
  * Whether the audio of a line, SFX, or BGM is draft (made by the free provider) or final (a
  * library sound, or made by a paid provider). `null` where there is no asset yet.
  */

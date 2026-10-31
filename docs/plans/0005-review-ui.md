@@ -86,6 +86,8 @@ When the server knows a library (`VD_LIBRARY` or `vd serve --library`), the UI s
 | `POST /api/library/:kind/:id/verify` | Body `{ confirm: true, approveCommercial?: boolean }`. Marks the entry verified. |
 | `GET /library-files/:kind/:id` | The entry's audio, for preview. Only files named in an `entry.yaml` are served. |
 | `GET /assets/*` | Files under the project's `assets/`, with path traversal rejected. |
+| `GET /api/server` | Facts about the whole server: provider (`id`, `paid`), the library's name when one is set, the vd version, and `preview.keepPitch`. Added by plan [0010](0010-settings-and-playback-speed.md). |
+| `GET /preview/*?tempo=<r>` | A time-stretched copy of a project asset, as 16-bit WAV, for playback speed; `r` is 0.5 to 2.0 in steps of 0.05. Added by plan [0010](0010-settings-and-playback-speed.md), which has the file checks, the cache, and the ffmpeg limits. |
 | `GET /*` | The built web UI. |
 
 With `--host`, every route above checks the token.

@@ -1,5 +1,6 @@
 // The Hono app with the HTTP API of docs/plans/0005-review-ui.md, section "HTTP API".
 
+import { readFileSync } from "node:fs";
 import { join, resolve as resolvePath } from "node:path";
 import {
   ASSETS_DIR,
@@ -65,12 +66,20 @@ import type {
   ProviderInfo,
   ScenePatchRequest,
   ServerEventName,
+  ServerInfoResponse,
   SoundSource,
   VerifyLibraryEntryResponse,
 } from "./api.js";
 import { changedSinceReview, entryView } from "./changes.js";
 import { relativeUrlPath, serveFile } from "./files.js";
 import { hostCheck } from "./hosts.js";
+import {
+  createPreview,
+  inputFormat,
+  type PreviewOptions,
+  parseTempo,
+  plainPath,
+} from "./preview.js";
 import { type MessageRoot, sanitizeMessage, sanitizeTarget } from "./sanitize.js";
 import { documentData, sceneIndex, updateSceneBgm } from "./scene-edit.js";
 import { tokenCheck } from "./token.js";
@@ -100,7 +109,21 @@ export type AppOptions = {
   events?: ProjectEvents;
   /** Aborting it ends every open event stream, so that the server can close. */
   signal?: AbortSignal;
+  /** The vd version `GET /api/server` reports. Default: the version of this package. */
+  version?: string;
+  /** Cache, ffmpeg runner, and limits of `GET /preview/*`. Tests replace them. */
+  preview?: PreviewOptions;
 };
+
+const PACKAGE_VERSION = (() => {
+  try {
+    const file = new URL("../package.json", import.meta.url);
+    const { version } = JSON.parse(readFileSync(file, "utf8")) as { version?: unknown };
+    return typeof version === "string" ? version : "unknown";
+  } catch {
+    return "unknown";
+  }
+})();
 
 /** A keep-alive comment is sent this often on the event stream. */
 export const KEEP_ALIVE_MS = 15_000;
@@ -114,7 +137,9 @@ const MESSAGES: Record<ApiErrorCode, string> = {
 };
 
 /** Path prefixes that the built UI never serves. */
-const NOT_WEB = ["/api/", "/assets/", "/library-files/"];
+const NOT_WEB = ["/api/", "/assets/", "/library-files/", "/preview/"];
+
+const PREVIEW_FAILED = "The preview could not be made";
 
 const PROJECT_UNREADABLE = "scenario.yaml cannot be read";
 const LIBRARY_UNREADABLE = "The library cannot be read; run vd library check";
@@ -257,6 +282,21 @@ export function createApp(options: AppOptions): Hono {
   }
 
   app.get("/api/project", async (c) => c.json(await project(sessionOf(c))));
+
+  const preview = createPreview(options.preview);
+
+  app.get("/api/server", async (c) => {
+    const response: ServerInfoResponse = {
+      provider: providerInfo,
+      version: options.version ?? PACKAGE_VERSION,
+      preview: { keepPitch: preview.keepPitch() },
+    };
+    if (library !== undefined) {
+      const lib = await readLibrary(library).catch(() => undefined);
+      if (lib) response.library = { name: lib.meta.name };
+    }
+    return c.json(response);
+  });
 
   app.get("/api/changes", async (c) => {
     const since = c.req.query("since") ?? "review";
@@ -528,6 +568,32 @@ export function createApp(options: AppOptions): Hono {
     if (rel === undefined) throw notFound();
     const response = await serveFile(join(projectDir, ASSETS_DIR), rel, { sandbox: true });
     if (!response) throw notFound();
+    return response;
+  });
+
+  app.get("/preview/*", async (c) => {
+    const url = new URL(c.req.url);
+    const rel = relativeUrlPath(url.pathname.slice("/preview/".length));
+    if (rel === undefined) throw notFound();
+    const values = url.searchParams.getAll("tempo");
+    const hundredths = values.length === 1 ? parseTempo(values[0]) : undefined;
+    if (hundredths === undefined) {
+      throw badRequest("tempo must be 0.5 to 2.0 in steps of 0.05");
+    }
+    const assets = join(projectDir, ASSETS_DIR);
+    if (hundredths === 100) {
+      if (inputFormat(rel) === undefined) throw badRequest("The file is not audio");
+      if ((await plainPath(assets, rel)) === undefined) throw notFound();
+      const response = await serveFile(assets, rel, { sandbox: true });
+      if (!response) throw notFound();
+      return response;
+    }
+    const made = await preview.get(assets, rel, hundredths);
+    if (made === "not-audio") throw badRequest("The file is not audio");
+    if (made === "not-found") throw notFound();
+    if (made === "failed") throw new HttpError(500, "server-error", PREVIEW_FAILED);
+    const response = await serveFile(made.dir, made.file, { sandbox: true });
+    if (!response) throw new HttpError(500, "server-error", PREVIEW_FAILED);
     return response;
   });
 
