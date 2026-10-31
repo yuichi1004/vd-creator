@@ -2,7 +2,8 @@
 
 - Status: Draft
 - Date: 2026-10-31
-- Depends on: [0005](0005-review-ui.md)
+- PRD: [P0001](../prd/P0001-product-baseline.md), R12
+- Depends on: [0005](0005-review-ui.md), [0015](0015-change-log-and-draft-audio.md)
 
 ## Background
 
@@ -88,21 +89,24 @@ With `--host`, both check the token like every route. `/preview/` joins the path
 
 ## Tasks
 
-Run in order. The server task's first review uses Codex `gpt-6.1-sol`, because it runs ffmpeg on files named by requests. The other tasks use a Claude reviewer.
+Run in order, after plan 0015 and before plan 0013, and not at the same time as another plan that owns `apps/server/` or `apps/web/src/`. The server task's first review uses Codex `gpt-6.1-sol`, because it runs ffmpeg on files named by requests. The other tasks use a Claude reviewer.
 
 - [ ] Server info and preview endpoint
+  - Requirements: R12
   - Target: `apps/server/`
   - Change: `GET /api/server`, `GET /preview/*?tempo=<r>` with the file checks, the cache, and the ffmpeg limits, with types in `api.ts`. Update the API table of 0005 with a link to this plan.
   - Constraints: no new dependencies. ffmpeg runs with an argument list, never through a shell, and reads only from stdin. Tests use a fake ffmpeg runner, plus one test with real ffmpeg that is skipped when ffmpeg is missing.
   - Ownership: `apps/server/`, and the API table in plan 0005.
   - Acceptance: `npm test -w apps/server` passes, with tests that a tempo outside the allowed values returns 400; that `/preview/../scenario.yaml`, a non-audio file, and a symbolic link inside `assets/` are refused; that a second request reuses the cached copy without running ffmpeg; that a failed conversion leaves no file in the cache; that `keepPitch` is false without ffmpeg; and, with real ffmpeg, that a 2.0 s WAV at tempo 2 comes back about 1.0 s long.
 - [ ] Screens and settings storage
+  - Requirements: R12
   - Target: `apps/web/src/`
   - Change: the hash route module, the settings screen with the playback section and the server section, the settings button in the header, and the settings store in `localStorage` with defaults and a version number. The speed control is shown but only saves the value; playback uses it in the next task.
   - Constraints: no new dependencies and no router library. Every control works by tap, with targets of at least 44 by 44 px. Back from the settings screen keeps the playback position. Depends on the first task.
   - Ownership: `apps/web/src/` except `audio.ts` and `playback.ts`.
   - Acceptance: `npm run build -w apps/web && npm test -w apps/web` pass, with tests that routes parse and build under a path prefix, that settings fall back to defaults when storage throws or holds invalid JSON, and that a saved speed is read back.
 - [ ] Playback at a speed
+  - Requirements: R12
   - Target: `apps/web/src/audio.ts`, `apps/web/src/playback.ts`, the player components
   - Change: the scheduler mapping above, both pitch modes, the wait for the first buffers, the lookahead in drama time, buffers keyed by tempo, the quick speed control, and the change of speed while playing. With keep pitch on, sounds load from `preview/<file>?tempo=<r>`.
   - Constraints: no new dependencies. The playback position stays in drama time. Depends on the first two tasks.

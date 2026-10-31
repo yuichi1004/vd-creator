@@ -2,6 +2,7 @@
 
 - Status: Draft
 - Date: 2026-10-31
+- PRD: [P0001](../prd/P0001-product-baseline.md), R24, R25
 - Depends on: [0005](0005-review-ui.md), [0007](0007-sound-library.md), [0010](0010-settings-and-playback-speed.md), [0011](0011-project-picker.md)
 
 ## Background
@@ -74,18 +75,21 @@ Saving runs the same code as `vd library promote`. Today the part that finds the
 Run in order. The server task's first review uses Codex `gpt-6.1-sol`, because promote writes into the shared library from a request. The other tasks use a Claude reviewer.
 
 - [ ] Promote in core
+  - Requirements: R25
   - Target: `apps/cli/src/library.ts`, `packages/core/src/library/`
   - Change: move the code that finds an item's generated asset and generation record for promote from the CLI into a core function, and make `vd library promote` call it. Behaviour does not change.
   - Constraints: no new dependencies. No change to the library format or to `promoteEntry`.
   - Ownership: `apps/cli/src/library.ts`, its tests, and `packages/core/src/library/`.
   - Acceptance: the standard acceptance chain passes, and the existing `vd library promote` tests pass unchanged.
 - [ ] Library API additions
+  - Requirements: R24, R25
   - Target: `apps/server/`, `packages/library/src/` if a helper for tags is missing
   - Change: the routes and query fields above, the `conflict` error code, and `date` in `LibraryEntryInfo`, with types in `api.ts`. Update the API table of 0005 with a link to this plan.
   - Constraints: no new dependencies. Never set `verified` on promote. Never accept a license that is not in the registry. Use a temporary library in tests. Depends on the first task.
   - Ownership: `apps/server/`, `packages/library/src/`, and the API table in plan 0005.
   - Acceptance: `npm test -w apps/server && npm test -w packages/library` pass, with tests that tags count per kind, that `tags` and `sort` filter and order the list, that promote creates an unverified entry with the item's audio and generation record, that promote refuses an existing ID with 409 `conflict` and an unknown license with 400, and that a `library` item cannot be promoted.
 - [ ] Library screen
+  - Requirements: R24, R25
   - Target: `apps/web/src/`
   - Change: the routes, the header and picker buttons, the screen with tabs, search, tag chips, sort, preview, detail, "Use in this project", and "Add to library" with its form.
   - Constraints: no new dependencies. Keep `LibraryPanel` working. The phone rules of 0005 apply. Depends on the second task.

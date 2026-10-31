@@ -65,5 +65,6 @@ Each task must be self-contained: an agent working on it sees only the task, not
 | [0010](0010-settings-and-playback-speed.md) | Settings screen and playback speed | Draft |
 | [0011](0011-project-picker.md) | Several projects in one server | Draft |
 | [0012](0012-library-screen.md) | Library screen | Draft |
-| [0013](0013-voice-retake-with-agent.md) | Voice retakes with instructions and parameters | Draft |
+| [0013](0013-voice-retake-with-agent.md) | Voice retakes with an agent | Draft |
 | [0014](0014-product-requirements-workflow.md) | Product requirements before plans | Draft |
+| [0015](0015-change-log-and-draft-audio.md) | Change log, agent changes, and draft audio | Draft |

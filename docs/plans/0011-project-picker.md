@@ -2,7 +2,8 @@
 
 - Status: Draft
 - Date: 2026-10-31
-- Depends on: [0005](0005-review-ui.md), [0008](0008-user-config.md), [0010](0010-settings-and-playback-speed.md)
+- PRD: [P0001](../prd/P0001-product-baseline.md), R31
+- Depends on: [0005](0005-review-ui.md), [0008](0008-user-config.md), [0010](0010-settings-and-playback-speed.md), [0013](0013-voice-retake-with-agent.md), [0015](0015-change-log-and-draft-audio.md)
 
 ## Background
 
@@ -78,11 +79,12 @@ The UI client builds every per-project URL from a base, `./` in single-project m
 
 ## Tasks
 
-The server task's first review uses `gpt-6-astra`, because it changes the HTTP API and maps names from requests to folders. Its fix rounds use a Claude reviewer. The other tasks use a Claude reviewer.
+Run after plans 0015, 0010, and 0013, following P0001's build order. Projects mode must cover everything they add: the change log routes and marks of 0015, and the retake route, takes, trials, proposals, and agent runs of 0013, with one agent run at a time per server and cancel only from the run's own project. The server task's first review uses `gpt-6-astra`, because it changes the HTTP API and maps names from requests to folders. Its fix rounds use a Claude reviewer. The other tasks use a Claude reviewer.
 
 - [ ] Server in projects mode
+  - Requirements: R31
   - Target: `apps/server/`
-  - Change: the projects root, `mode` in `GET /api/server`, `GET /api/projects`, the per-project routes under `/p/<name>/` with the request checks, the open-project limit that keeps projects with streams, per-project mutation queues, the library queue, and the one-paid-run limit. `startServer` takes either `projectDir` or `projectsRoot`. Add the new types to `apps/server/src/api.ts`, and update the API table of 0005 with a link to this plan.
+  - Change: the projects root, `mode` in `GET /api/server`, `GET /api/projects`, the per-project routes under `/p/<name>/` with the request checks, the open-project limit that keeps projects with streams, per-project mutation queues, the library queue, the one-paid-run limit, and every route of 0015 and 0013 under `/p/<name>/`: changes and review, takes, trials, proposals, and agent cancel, with one agent run per server that only its own project can cancel. `startServer` takes either `projectDir` or `projectsRoot`. Add the new types to `apps/server/src/api.ts`, and update the API table of 0005 with a link to this plan.
   - Constraints: no new dependencies. Single-project mode keeps every route and response of 0005 and 0010. Never build a path from a name without finding it in the list. Never call a paid API in tests.
   - Ownership: `apps/server/`, and the API table in plan 0005.
   - Acceptance: `npm test -w apps/server` passes, with tests that:
@@ -92,19 +94,23 @@ The server task's first review uses `gpt-6-astra`, because it changes the HTTP A
     - an edit in one project does not wait for a generation in another;
     - a ninth open project closes the least used one without a stream and stops its watcher, while a project with a stream stays open;
     - two verifies from different projects run one after the other;
+    - the change log, takes, trial, and proposal routes of 0015 and 0013 work under `/p/<name>/` and write only that project's files;
+    - a second project's agent run gets 409 `busy`, and its cancel does not end the first project's run;
     - every 0005 and 0010 test still passes in single-project mode.
 - [ ] `vd serve --projects` and `serve.projects`
+  - Requirements: R31
   - Target: `apps/cli/`, the docs that describe `vd serve` and `config.yaml`
   - Change: the `--projects <root>` option, `serve.projects` in the config schema with `vd config show`, the mode rule and the errors above, and the printed URL and mode. Document both in the README and in the config docs.
   - Constraints: no new dependencies. Depends on the server task.
   - Ownership: `apps/cli/`, `README.md`, and the docs pages that list `vd serve` options or `config.yaml` keys.
   - Acceptance: `npm test -w apps/cli` passes, with tests that `--projects` serves `/api/projects` from a temporary root with two `init` projects, that a folder and `--projects` together fail, that `serve.projects` is used by a plain `vd serve`, and that `vd serve .` with `serve.projects` set runs single-project mode.
 - [ ] Project picker
+  - Requirements: R31
   - Target: `apps/web/src/`
-  - Change: the client base URL, the routes above, the picker screen, the back button, the last opened project, and search.
+  - Change: the client base URL, the routes above, including the retake route of 0013 under the project's route, the picker screen, the back button, the last opened project, and search.
   - Constraints: no new dependencies. The phone rules of 0005 apply. Can run in parallel with the CLI task once the server task is merged.
   - Ownership: `apps/web/src/`.
-  - Acceptance: `npm run build -w apps/web && npm test -w apps/web` pass, with tests that per-project URLs stay relative under a path prefix in both modes, that server-wide URLs never get the project base, that the picker sorts by last change and filters by search, and that single-project mode shows no picker. Before the plan is closed, the coordinator opens two projects from the picker in a browser at 1280 px and 375 px widths.
+  - Acceptance: `npm run build -w apps/web && npm test -w apps/web` pass, with tests that per-project URLs stay relative under a path prefix in both modes, that server-wide URLs never get the project base, that the picker sorts by last change and filters by search, and that single-project mode shows no picker, and that the retake screen and the change marks work in a project opened from the picker. Before the plan is closed, the coordinator opens two projects from the picker in a browser at 1280 px and 375 px widths.
 
 ## Open questions
 
