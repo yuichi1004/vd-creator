@@ -1,6 +1,6 @@
 # 0011: Several projects in one server
 
-- Status: Accepted
+- Status: In progress
 - Date: 2026-10-31
 - PRD: [P0001](../prd/P0001-product-baseline.md), R31
 - Depends on: [0005](0005-review-ui.md), [0008](0008-user-config.md), [0010](0010-settings-and-playback-speed.md), [0013](0013-voice-retake-with-agent.md), [0015](0015-change-log-and-draft-audio.md)
