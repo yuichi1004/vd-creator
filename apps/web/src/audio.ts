@@ -18,6 +18,7 @@ export type GainNodeLike = AudioNodeLike & { gain: AudioParamLike };
 export type BufferSourceLike = AudioNodeLike & {
   buffer: AudioBufferLike | null;
   loop: boolean;
+  playbackRate: AudioParamLike;
   start(when: number, offset?: number, duration?: number): void;
   stop(when?: number): void;
 };
@@ -116,14 +117,17 @@ export class AudioUnlock {
 
 /** How far ahead of the position sounds are started on the audio clock. */
 export const SCHEDULE_AHEAD_SEC = 2;
-/** How far ahead of the position files are fetched and decoded. */
+/** How far ahead of the position files are fetched and decoded, in drama time. */
 export const DECODE_AHEAD_SEC = 8;
 const TICK_MS = 250;
 
 export type PlayerOptions = {
   unlock: AudioUnlock;
-  /** Fetches the bytes of an asset file, given relative to `assets/`. */
-  load: (file: string) => Promise<ArrayBuffer>;
+  /**
+   * Fetches the bytes of an asset file, given relative to `assets/`. A `tempo` other than 1 asks
+   * for a copy stretched to `1 / tempo` of the length with the pitch kept.
+   */
+  load: (file: string, tempo: number) => Promise<ArrayBuffer>;
   /** Called on start, stop, and the end of the timeline. */
   onChange?: () => void;
   setInterval?: (callback: () => void, ms: number) => unknown;
@@ -131,6 +135,16 @@ export type PlayerOptions = {
 };
 
 type Started = { sound: ScheduledSound; source: BufferSourceLike; gain: GainNodeLike };
+
+/** A decoded buffer, and the tempo it was stretched to (1 for the original). */
+type Decoded = { buffer: AudioBufferLike; tempo: number };
+
+/** How the player plays: the speed, and whether stretched copies keep the pitch. */
+export type PlaybackSpeed = { speed: number; keepPitch: boolean };
+
+function bufferKey(file: string, tempo: number): string {
+  return `${file}@${tempo}`;
+}
 
 /**
  * Plays a timeline with Web Audio. Sounds are started a little ahead of time on the audio
@@ -145,7 +159,8 @@ export class Player {
   private startSec = 0;
   private sounds: ScheduledSound[] = [];
   private readonly started = new Map<string, Started>();
-  private readonly buffers = new Map<string, Promise<AudioBufferLike | undefined>>();
+  /** Decoded buffers, keyed by file and tempo, so a buffer is never played at another speed. */
+  private readonly buffers = new Map<string, Promise<Decoded | undefined>>();
   /**
    * Files that failed to load. They play as silence until the next `play`, which retries
    * them. A failed load is never kept in `buffers`, and only the play that started a load
@@ -153,7 +168,13 @@ export class Player {
    */
   private readonly failed = new Set<string>();
   /** Loads in `buffers` that have not settled yet. A new `play` does not reuse them. */
-  private readonly pending = new Set<Promise<AudioBufferLike | undefined>>();
+  private readonly pending = new Set<Promise<Decoded | undefined>>();
+  /** Files whose stretched copy could not be made. They play with `playbackRate`. */
+  private readonly previewFailed = new Set<string>();
+  private speed = 1;
+  private keepPitch = true;
+  private loading = false;
+  private loadingFrom = 0;
   private timer?: unknown;
   private generation = 0;
 
@@ -163,11 +184,35 @@ export class Player {
     return this.playing;
   }
 
-  /** The playback position in timeline seconds. */
+  /** True while a play waits for the first sounds to be decoded. */
+  get isLoading(): boolean {
+    return this.loading;
+  }
+
+  /** The playback position in timeline seconds. Drama time runs `speed` times the clock. */
   get position(): number {
     const context = this.options.unlock.audioContext;
     if (!this.playing || !context) return this.positionSec;
-    return this.startSec + Math.max(0, context.currentTime - this.clockStart);
+    return this.startSec + Math.max(0, context.currentTime - this.clockStart) * this.speed;
+  }
+
+  /**
+   * Sets the speed and whether to keep the pitch. If playing, the sounds stop and start again
+   * from the current drama position, the same way a seek does.
+   */
+  configure(next: PlaybackSpeed): void {
+    if (next.speed === this.speed && next.keepPitch === this.keepPitch) return;
+    const resumeAt = this.playing ? this.position : this.loading ? this.loadingFrom : undefined;
+    if (this.playing) this.halt();
+    this.speed = next.speed;
+    this.keepPitch = next.keepPitch;
+    if (resumeAt !== undefined) void this.play(resumeAt);
+    else this.options.onChange?.();
+  }
+
+  /** The tempo to load for a file: 1 plays the original with `playbackRate`. */
+  private tempoFor(file: string): number {
+    return this.keepPitch && this.speed !== 1 && !this.previewFailed.has(file) ? this.speed : 1;
   }
 
   /** Sets the timeline. If playing, playback restarts at the same position in the new one. */
@@ -178,7 +223,9 @@ export class Player {
     this.timeline = timeline;
     // Files of the old timeline that are still used keep their decoded buffers.
     const files = new Set(timeline ? scheduleFrom(timeline, 0).map((s) => s.file) : []);
-    for (const file of this.buffers.keys()) if (!files.has(file)) this.buffers.delete(file);
+    for (const key of this.buffers.keys()) {
+      if (!files.has(key.slice(0, key.lastIndexOf("@")))) this.buffers.delete(key);
+    }
     this.positionSec = timeline ? clampPosition(timeline, position) : 0;
     if (wasPlaying && timeline) void this.play(this.positionSec);
     else this.options.onChange?.();
@@ -206,11 +253,19 @@ export class Player {
     if (!context || !this.timeline || run !== this.generation) return false;
     const timeline = this.timeline;
     this.failed.clear();
-    for (const [file, promise] of this.buffers) {
-      if (this.pending.has(promise)) this.buffers.delete(file);
+    for (const [key, promise] of this.buffers) {
+      if (this.pending.has(promise)) this.buffers.delete(key);
     }
     this.startSec = start >= timeline.durationSec ? 0 : Math.max(0, start);
     this.sounds = scheduleFrom(timeline, this.startSec);
+    // Wait for the sounds of the next 2 s of clock time, so that none starts part way in.
+    this.loading = true;
+    this.loadingFrom = this.startSec;
+    this.options.onChange?.();
+    const first = filesAround(this.sounds, this.startSec, SCHEDULE_AHEAD_SEC * this.speed);
+    await Promise.all(first.map((file) => this.decode(context, file)));
+    if (run !== this.generation) return false;
+    this.loading = false;
     this.clockStart = context.currentTime + 0.05;
     this.playing = true;
     this.positionSec = this.startSec;
@@ -224,6 +279,10 @@ export class Player {
   /** Stops playback and keeps the position. Also cancels a play still waiting to start. */
   stop(): void {
     this.generation++;
+    if (this.loading) {
+      this.loading = false;
+      this.options.onChange?.();
+    }
     if (!this.playing) return;
     this.halt();
     this.options.onChange?.();
@@ -270,16 +329,20 @@ export class Player {
       this.started.delete(key);
     }
     const wanted = new Set(filesAround(this.sounds, now, DECODE_AHEAD_SEC));
-    for (const file of wanted) this.decode(context, file);
+    const wantedKeys = new Set<string>();
+    for (const file of wanted) {
+      this.decode(context, file);
+      wantedKeys.add(bufferKey(file, this.tempoFor(file)));
+    }
     // Free buffers that are behind the position and not needed again soon.
-    for (const file of this.buffers.keys()) {
-      if (!wanted.has(file) && !this.isStartedFile(file)) this.buffers.delete(file);
+    for (const key of this.buffers.keys()) {
+      if (!wantedKeys.has(key) && !this.isStartedKey(key)) this.buffers.delete(key);
     }
     const run = this.generation;
     for (const sound of this.sounds) {
-      if (sound.atSec > now + SCHEDULE_AHEAD_SEC) break;
+      if (sound.atSec > now + SCHEDULE_AHEAD_SEC * this.speed) break;
       if (this.started.has(sound.key) || sound.atSec + sound.durationSec <= now) continue;
-      const buffer = this.buffers.get(sound.file);
+      const buffer = this.buffers.get(bufferKey(sound.file, this.tempoFor(sound.file)));
       if (!buffer) continue;
       // Reserve the key, so a later tick does not start it twice while it decodes.
       void buffer.then((decoded) => {
@@ -289,52 +352,76 @@ export class Player {
     }
   }
 
-  private startSound(context: AudioContextLike, sound: ScheduledSound, buffer: AudioBufferLike) {
+  private startSound(context: AudioContextLike, sound: ScheduledSound, decoded: Decoded) {
+    const { buffer, tempo } = decoded;
     // If decoding was late, start part way in rather than out of sync.
     const lateSec = Math.max(0, this.position - sound.atSec);
     const durationSec = sound.durationSec - lateSec;
     if (durationSec <= 0) return;
-    const when = this.clockStart + (sound.atSec - this.startSec) + lateSec;
+    // Drama time runs `speed` times the clock, so the clock waits `1 / speed` per drama second.
+    const when = this.clockStart + (sound.atSec - this.startSec + lateSec) / this.speed;
     const source = context.createBufferSource();
     source.buffer = buffer;
     source.loop = sound.loop;
+    // A stretched copy already runs at the speed. The original is played faster with the rate,
+    // and offset and duration then stay in seconds of the original buffer.
+    source.playbackRate.value = tempo === 1 ? this.speed : 1;
     const gain = context.createGain();
     gain.gain.value = sound.gain;
     source.connect(gain);
     gain.connect(context.destination);
-    let offset = sound.offsetSec + lateSec;
+    let offset = (sound.offsetSec + lateSec) / tempo;
     if (sound.loop && buffer.duration > 0) offset %= buffer.duration;
-    source.start(Math.max(when, context.currentTime), offset, durationSec);
+    source.start(Math.max(when, context.currentTime), offset, durationSec / tempo);
     this.started.set(sound.key, { sound, source, gain });
   }
 
-  private isStartedFile(file: string): boolean {
+  private isStartedKey(key: string): boolean {
     for (const { sound } of this.started.values()) {
-      if (sound.file === file && sound.atSec + sound.durationSec > this.position) return true;
+      if (sound.atSec + sound.durationSec <= this.position) continue;
+      if (key === bufferKey(sound.file, this.tempoFor(sound.file))) return true;
     }
     return false;
   }
 
-  private decode(context: AudioContextLike, file: string): void {
-    if (this.buffers.has(file) || this.failed.has(file)) return;
+  /** Starts loading the file at the current tempo, unless it is loaded or loading. */
+  private decode(context: AudioContextLike, file: string): Promise<Decoded | undefined> {
+    const tempo = this.tempoFor(file);
+    const key = bufferKey(file, tempo);
+    const existing = this.buffers.get(key);
+    if (existing) return existing;
+    if (this.failed.has(key)) return Promise.resolve(undefined);
     const run = this.generation;
-    const promise: Promise<AudioBufferLike | undefined> = this.options
-      .load(file)
-      .then((bytes) => context.decodeAudioData(bytes))
+    const fetchDecoded = (at: number) =>
+      this.options
+        .load(file, at)
+        .then((bytes) => context.decodeAudioData(bytes))
+        .then((buffer): Decoded => ({ buffer, tempo: at }));
+    const promise: Promise<Decoded | undefined> = fetchDecoded(tempo)
+      .catch((error: unknown) => {
+        if (tempo === 1) throw error;
+        // No stretched copy: play the original with `playbackRate` from now on.
+        this.previewFailed.add(file);
+        const original = bufferKey(file, 1);
+        if (!this.buffers.has(original)) this.buffers.set(original, promise);
+        return fetchDecoded(1);
+      })
       .then(
-        (buffer) => {
+        (decoded) => {
           this.pending.delete(promise);
-          return buffer;
+          return decoded;
         },
         () => {
           this.pending.delete(promise);
-          if (this.buffers.get(file) === promise) this.buffers.delete(file);
-          if (run === this.generation) this.failed.add(file);
+          for (const [k, p] of this.buffers) if (p === promise) this.buffers.delete(k);
+          if (run === this.generation) this.failed.add(bufferKey(file, 1));
+          if (run === this.generation) this.failed.add(key);
           return undefined;
         },
       );
     this.pending.add(promise);
-    this.buffers.set(file, promise);
+    this.buffers.set(key, promise);
+    return promise;
   }
 }
 
@@ -344,6 +431,7 @@ const nullSource: BufferSourceLike = {
   ...nullNode,
   buffer: null,
   loop: false,
+  playbackRate: { value: 1 },
   start: () => undefined,
   stop: () => undefined,
 };

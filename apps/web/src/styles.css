@@ -185,6 +185,12 @@ code {
   margin-left: auto;
 }
 
+.speed-button {
+  min-width: 44px;
+  min-height: 44px;
+  font-variant-numeric: tabular-nums;
+}
+
 .player-controls .time {
   font-variant-numeric: tabular-nums;
 }

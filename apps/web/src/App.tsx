@@ -24,7 +24,7 @@ import { placeIssues } from "./issues.js";
 import { LiveUpdates } from "./live.js";
 import { imageAt, itemAt, startOf } from "./playback.js";
 import { buildHash, buildHref, REVIEW_ROUTE, SETTINGS_ROUTE } from "./routes.js";
-import { loadSettings, type Settings, saveSettings } from "./settings.js";
+import { loadSettings, nextQuickSpeed, type Settings, saveSettings } from "./settings.js";
 import { useRoute } from "./useRoute.js";
 
 /** Events that arrive within this time of each other reload the project once. */
@@ -113,8 +113,9 @@ export function App() {
     () =>
       new Player({
         unlock,
-        load: async (file) => {
-          const response = await fetch(client.assetUrl(file), { credentials: "same-origin" });
+        load: async (file, tempo) => {
+          const url = tempo === 1 ? client.assetUrl(file) : client.previewUrl(file, tempo);
+          const response = await fetch(url, { credentials: "same-origin" });
           if (!response.ok) throw new Error("asset not loaded");
           return response.arrayBuffer();
         },
@@ -122,6 +123,21 @@ export function App() {
       }),
     [unlock, client, rerender],
   );
+  // The server says whether it can make pitch-keeping copies (it needs ffmpeg).
+  const [serverKeepsPitch, setServerKeepsPitch] = useState(true);
+  useEffect(() => {
+    let current = true;
+    client.getServer().then(
+      (server) => current && setServerKeepsPitch(server.preview.keepPitch),
+      () => undefined,
+    );
+    return () => {
+      current = false;
+    };
+  }, [client]);
+  useEffect(() => {
+    player.configure({ speed: settings.speed, keepPitch: settings.keepPitch && serverKeepsPitch });
+  }, [player, settings.speed, settings.keepPitch, serverKeepsPitch]);
   const [position, setPosition] = useState(0);
   useEffect(() => unlock.subscribe(setUnlockState), [unlock]);
 
@@ -428,6 +444,9 @@ export function App() {
       position={position}
       duration={timeline?.durationSec ?? 0}
       disabled={!timeline}
+      loading={player.isLoading}
+      speed={settings.speed}
+      onSpeed={() => changeSettings({ ...settings, speed: nextQuickSpeed(settings.speed) })}
       onPlay={() => play()}
       onStop={() => player.stop()}
       onRestart={() => play(0)}

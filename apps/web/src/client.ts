@@ -98,6 +98,14 @@ export class ApiClient {
     return this.url(`assets/${encodePath(file)}`);
   }
 
+  /**
+   * URL of a project asset stretched to `tempo` with the pitch kept. Relative to the page, like
+   * every URL here, so it works under a path prefix.
+   */
+  previewUrl(file: string, tempo: number): string {
+    return this.url(`preview/${encodePath(file)}?tempo=${tempo}`);
+  }
+
   /** URL of a library entry's audio, for preview. */
   libraryFileUrl(kind: string, id: string): string {
     return this.url(`library-files/${segment(kind)}/${segment(id)}`);
