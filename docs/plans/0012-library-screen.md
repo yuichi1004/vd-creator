@@ -1,6 +1,6 @@
 # 0012: Library screen
 
-- Status: Draft
+- Status: Accepted
 - Date: 2026-10-31
 - PRD: [P0001](../prd/P0001-product-baseline.md), R24, R25
 - Depends on: [0005](0005-review-ui.md), [0007](0007-sound-library.md), [0010](0010-settings-and-playback-speed.md), [0011](0011-project-picker.md)
