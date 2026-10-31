@@ -1,8 +1,10 @@
 import type { ItemPatchRequest, ScenePatchRequest } from "@vd-creator/server";
 import { type ReactNode, useEffect, useState } from "react";
+import { markKey, type TargetMark } from "../changes.js";
 import { type ItemKey, type ItemStatus, itemStatus, type PlacedIssues } from "../issues.js";
 import { formatTime } from "../playback.js";
 import type { Bgm, Item, Scenario, Scene, Speaker, Timeline, TimelineItem } from "../types.js";
+import { ChangedMark } from "./Changes.js";
 import { EditableText, NumberField } from "./fields.js";
 import { IssueList } from "./IssueList.js";
 import type { LibraryTarget } from "./LibraryPanel.js";
@@ -26,6 +28,8 @@ type Props = Handlers & {
   isPhone: boolean;
   hasLibrary: boolean;
   libraryTarget: LibraryTarget | undefined;
+  /** Changed targets by `markKey`. */
+  marks?: ReadonlyMap<string, TargetMark>;
 };
 
 /** The scenes with their BGM and items. */
@@ -60,7 +64,8 @@ function SceneBlock(props: SceneProps) {
     <section className="scene" aria-label={`Scene ${scene.title ?? scene.id}`}>
       <h2>
         {scene.title ?? scene.id}
-        {scene.title && <span className="muted"> {scene.id}</span>}
+        {scene.title && <span className="muted"> {scene.id}</span>}{" "}
+        <ChangedMark mark={props.marks?.get(markKey("scene", scene.id))} label={scene.id} />
       </h2>
       {scene.bgm && (
         <BgmRow
@@ -77,6 +82,9 @@ function SceneBlock(props: SceneProps) {
           return (
             <li key={item.id ?? key} className={rowClass(item, props.currentItemId)}>
               <ItemRow {...props} item={item} entry={entry} />
+              {item.id !== undefined && (
+                <ChangedMark mark={props.marks?.get(markKey("item", item.id))} label={item.id} />
+              )}
               <IssueList issues={issues.get(key) ?? []} />
             </li>
           );
@@ -92,8 +100,13 @@ function rowClass(item: Item, currentItemId: string | undefined): string {
   return `item ${kind}${item.id !== undefined && item.id === currentItemId ? " current" : ""}`;
 }
 
-function StatusBadge({ status }: { status: ItemStatus }) {
-  return <span className={`status ${status}`}>{status}</span>;
+function StatusBadge({ status, draft }: { status: ItemStatus; draft?: boolean }) {
+  return (
+    <>
+      <span className={`status ${status}`}>{status}</span>
+      {draft && <span className="status draft">draft</span>}
+    </>
+  );
 }
 
 type ItemRowProps = SceneProps & { item: Item; entry: TimelineItem | undefined };
@@ -138,6 +151,7 @@ function LineRow(props: RowProps<Extract<Item, { line: string }>>) {
       id={item.id}
       take={item.take}
       status={status}
+      draft={entry?.audio === "draft"}
       onPatchItem={props.onPatchItem}
       onRegenerate={props.onRegenerate}
     />
@@ -158,7 +172,7 @@ function LineRow(props: RowProps<Extract<Item, { line: string }>>) {
           {time}
           <PlayFromButton id={item.id} onPlayFrom={props.onPlayFrom} />
           <span className="take">take {item.take}</span>
-          <StatusBadge status={status} />
+          <StatusBadge status={status} draft={entry?.audio === "draft"} />
         </div>
       </div>
     );
@@ -233,6 +247,7 @@ function SfxRow(props: RowProps<Extract<Item, { sfx: unknown }>>) {
           id={item.id}
           take={item.take}
           status={status}
+          draft={entry?.audio === "draft"}
           onPatchItem={props.onPatchItem}
           onRegenerate={props.onRegenerate}
         />
@@ -286,7 +301,7 @@ function BgmRow(props: SceneProps & { bgm: Bgm; status: ItemStatus; issueKey: It
               Library
             </button>
           )}
-          <StatusBadge status={status} />
+          <StatusBadge status={status} draft={props.bgmMissing?.audio === "draft"} />
           {status === "missing" && (
             <button type="button" onClick={() => props.onGenerate(scene.id)}>
               Generate
@@ -342,10 +357,11 @@ function TakeControls(props: {
   id: string;
   take: number;
   status: ItemStatus;
+  draft: boolean;
   onPatchItem: Handlers["onPatchItem"];
   onRegenerate: Handlers["onRegenerate"];
 }) {
-  const { id, take, status } = props;
+  const { id, take, status, draft } = props;
   return (
     <>
       <span className="field take">
@@ -366,7 +382,7 @@ function TakeControls(props: {
       >
         Regenerate
       </button>
-      <StatusBadge status={status} />
+      <StatusBadge status={status} draft={draft} />
     </>
   );
 }

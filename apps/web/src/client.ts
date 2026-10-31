@@ -4,6 +4,7 @@
 
 import type {
   ApiError,
+  ChangesResponse,
   ConfirmRequiredError,
   GenerateRequest,
   GenerateResponse,
@@ -40,6 +41,15 @@ export class ApiRequestError extends Error {
   }
 }
 
+/**
+ * A random ID for this page's session, sent as `X-VD-Session` so that the server leaves the
+ * page's own changes unmarked. 128 bits, as hex; it is never shown or stored.
+ */
+export function newSessionId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 
 /** True if a failed request is the 409 of a paid generation without `confirm`. */
@@ -73,6 +83,8 @@ export class ApiClient {
   constructor(
     readonly baseUrl: string,
     private readonly fetchImpl: FetchLike = (url, init) => fetch(url, init),
+    /** Sent as `X-VD-Session` with every API request. */
+    readonly sessionId: string = newSessionId(),
   ) {}
 
   /** Resolves a relative path, such as `api/project`, against the base URL. */
@@ -107,6 +119,16 @@ export class ApiClient {
     return this.request<PatchResponse>("PATCH", `api/scenes/${segment(id)}`, patch);
   }
 
+  /** The change log entries after the last review, or after the entry with ID `since`. */
+  async getChanges(since: "review" | number = "review"): Promise<ChangesResponse> {
+    return this.request<ChangesResponse>("GET", `api/changes?since=${since}`);
+  }
+
+  /** Marks all changes reviewed. The server answers with the project, now without marks. */
+  async markReviewed(): Promise<ProjectResponse> {
+    return this.request<ProjectResponse>("POST", "api/changes/review", {});
+  }
+
   async generate(body: GenerateRequest): Promise<GenerateResponse> {
     return this.request<GenerateResponse>("POST", "api/generate", body);
   }
@@ -132,9 +154,10 @@ export class ApiClient {
   }
 
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const init: RequestInit = { method, credentials: "same-origin" };
+    const headers: Record<string, string> = { "X-VD-Session": this.sessionId };
+    const init: RequestInit = { method, credentials: "same-origin", headers };
     if (body !== undefined) {
-      init.headers = { "Content-Type": "application/json" };
+      headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(body);
     }
     let response: Response;

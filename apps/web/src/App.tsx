@@ -1,9 +1,16 @@
 // The review page. See "UI" and "PC and smartphone" in docs/plans/0005-review-ui.md.
 
-import type { ItemPatchRequest, ProjectResponse, ScenePatchRequest } from "@vd-creator/server";
+import type {
+  ChangeEntryView,
+  ItemPatchRequest,
+  ProjectResponse,
+  ScenePatchRequest,
+} from "@vd-creator/server";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type AudioContextLike, AudioUnlock, Player, type UnlockState } from "./audio.js";
+import { buildMarks, countDraft, groupMarks, loadChangeEntries } from "./changes.js";
 import { ApiClient, ApiRequestError, UNKNOWN_ERROR_MESSAGE } from "./client.js";
+import { ChangesPanel } from "./components/Changes.js";
 import { ConfirmDialog, type ConfirmRequest } from "./components/ConfirmDialog.js";
 import { ImageLane } from "./components/ImageLane.js";
 import { IssueList } from "./components/IssueList.js";
@@ -53,6 +60,9 @@ export function App() {
   const [libraryTarget, setLibraryTarget] = useState<LibraryTarget>();
   const [librarySheetOpen, setLibrarySheetOpen] = useState(false);
   const isPhone = useIsPhone();
+  const [changeEntries, setChangeEntries] = useState<ChangeEntryView[]>([]);
+  const [changesOpen, setChangesOpen] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
 
   // Player state.
   const unlock = useMemo(() => new AudioUnlock(createAudioContext()), []);
@@ -141,6 +151,35 @@ export function App() {
   const showError = useCallback((error: unknown) => {
     setNotice({ text: errorText(error), kind: "error" });
   }, []);
+
+  // The details of the marks. The project says what is marked; the entries only explain it.
+  const changedJson = JSON.stringify(project?.changedSinceReview ?? []);
+  useEffect(() => {
+    if (changedJson === "[]") {
+      setChangeEntries([]);
+      return;
+    }
+    let current = true;
+    loadChangeEntries(client).then(
+      (entries) => current && setChangeEntries(entries),
+      () => current && setChangeEntries([]),
+    );
+    return () => {
+      current = false;
+    };
+  }, [client, changedJson]);
+
+  const markReviewed = useCallback(async () => {
+    setReviewing(true);
+    try {
+      applyProject(await client.markReviewed());
+      setChangesOpen(false);
+    } catch (error) {
+      showError(error);
+    } finally {
+      setReviewing(false);
+    }
+  }, [client, applyProject, showError]);
 
   const patchItem = useCallback(
     async (id: string, patch: ItemPatchRequest): Promise<boolean> => {
@@ -290,6 +329,8 @@ export function App() {
   const placed = placeIssues(scenario, project.issues, project.licenseIssues);
   const currentImage = timeline ? imageAt(timeline, position) : undefined;
   const currentItem = timeline ? itemAt(timeline, position) : undefined;
+  const marks = buildMarks(project.changedSinceReview, changeEntries);
+  const draftCount = countDraft(timeline);
   const editingLine = editing
     ? scenario?.scenes.flatMap((s) => s.items).find((i) => "line" in i && i.id === editing)
     : undefined;
@@ -333,8 +374,31 @@ export function App() {
           {provider.id}
           {provider.paid ? " (paid)" : ""}
         </span>
+        {draftCount > 0 && (
+          <span className="status draft" title="Audio made by the free provider">
+            {draftCount} draft
+          </span>
+        )}
+        {marks.size > 0 && (
+          <button
+            type="button"
+            className="changed-mark"
+            aria-expanded={changesOpen}
+            onClick={() => setChangesOpen(!changesOpen)}
+          >
+            {marks.size} changed
+          </button>
+        )}
         {!isPhone && controls}
       </header>
+
+      {changesOpen && marks.size > 0 && (
+        <ChangesPanel
+          groups={groupMarks(marks, scenario)}
+          busy={reviewing}
+          onMarkReviewed={() => void markReviewed()}
+        />
+      )}
 
       {notice && (
         <div
@@ -376,6 +440,7 @@ export function App() {
               isPhone={isPhone}
               hasLibrary={project.library}
               libraryTarget={libraryTarget}
+              marks={marks}
               onPatchItem={patchItem}
               onPatchScene={patchScene}
               onRegenerate={(id, take) => void regenerate(id, take)}
