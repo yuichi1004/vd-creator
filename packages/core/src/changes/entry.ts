@@ -43,6 +43,9 @@ export type ChangeDetail =
    */
   | { change: "edited"; field: string; old?: ChangeJsonValue; new?: ChangeJsonValue };
 
+/** A JSON Schema `date-time` (RFC 3339): a date, a time, and a time zone. */
+const DATE_TIME = /^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/;
+
 /** The maximum length of a reason. */
 export const REASON_MAX_LENGTH = 300;
 
@@ -210,8 +213,12 @@ export function parseChangeEntry(value: unknown): ChangeEntry {
   const allowed = ["id", "time", "source"];
   if (!Number.isInteger(entry.id) || (entry.id as number) < 1)
     throw bad("id must be an integer, 1 or more");
-  if (typeof entry.time !== "string" || Number.isNaN(Date.parse(entry.time))) {
-    throw bad("time must be an ISO 8601 time");
+  if (
+    typeof entry.time !== "string" ||
+    !DATE_TIME.test(entry.time) ||
+    Number.isNaN(Date.parse(entry.time))
+  ) {
+    throw bad("time must be an ISO 8601 time with a time zone, such as 2026-10-31T09:00:00.000Z");
   }
   if (source === "review") {
     noExtra(entry, allowed);

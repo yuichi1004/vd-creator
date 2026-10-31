@@ -2,7 +2,7 @@
 // docs/plans/0015-change-log-and-draft-audio.md.
 
 import { randomUUID } from "node:crypto";
-import { link, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { link, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 /** File name of the lock inside a project folder. */
@@ -40,11 +40,16 @@ export async function withProjectLock<T>(
   options: ChangeLockOptions = {},
 ): Promise<T> {
   const token = await acquire(projectDir, options);
+  let result: T;
   try {
-    return await fn();
-  } finally {
-    await release(projectDir, token, options.staleMs ?? LOCK_STALE_MS);
+    result = await fn();
+  } catch (e) {
+    // A failed release must not hide the error of `fn`. The lock then ends by going stale.
+    await release(projectDir, token, options).catch(() => {});
+    throw e;
   }
+  await release(projectDir, token, options);
+  return result;
 }
 
 async function acquire(projectDir: string, options: ChangeLockOptions): Promise<string> {
@@ -90,17 +95,24 @@ async function createExclusive(path: string, content: string, token: string): Pr
       throw e;
     }
   } finally {
-    await rm(temp, { force: true });
+    // The temporary file goes whether or not the lock was created, even after a failed write.
+    await rm(temp, { force: true }).catch(() => {});
   }
 }
 
 /**
  * Removes the lock if it is still ours. Like breaking a stale lock, this goes through the gate, so
- * that a takeover cannot replace the lock between the check and the removal.
+ * that a takeover cannot replace the lock between the check and the removal. Gives up with a
+ * `ChangeLockError` if the gate stays busy for `waitMs`.
  */
-async function release(projectDir: string, token: string, staleMs: number): Promise<void> {
+async function release(
+  projectDir: string,
+  token: string,
+  options: ChangeLockOptions,
+): Promise<void> {
+  const { waitMs = LOCK_WAIT_MS, staleMs = LOCK_STALE_MS } = options;
   const path = join(projectDir, LOCK_FILE);
-  await withGate(path, staleMs, async () => {
+  await withGate(path, staleMs, Date.now() + waitMs, async () => {
     // A lock that was taken over is not ours to remove.
     const raw = await readRaw(path);
     if (raw !== undefined && parseLock(raw)?.token === token) await rm(path, { force: true });
@@ -115,26 +127,22 @@ async function release(projectDir: string, token: string, staleMs: number): Prom
 async function breakStale(path: string, staleMs: number): Promise<void> {
   const raw = await readRaw(path);
   if (raw === undefined || !(await isStale(path, raw, staleMs))) return;
-  await withGate(
-    path,
-    staleMs,
-    async () => {
-      if ((await readRaw(path)) === raw) await unlink(path);
-    },
-    false,
-  );
+  await withGate(path, staleMs, undefined, async () => {
+    if ((await readRaw(path)) === raw) await rm(path, { force: true });
+  });
 }
 
 /**
- * Runs `fn` holding the gate of the lock file, `<lock>.break`, created exclusively. With `wait`
- * it polls until it has the gate; without, it gives up if someone else has it. A gate left by a
+ * Runs `fn` holding the gate of the lock file, `<lock>.break`, created exclusively. With a
+ * `deadline` (a time in milliseconds) it polls for the gate and throws a `ChangeLockError` when
+ * the time comes; without, it gives up quietly if someone else has the gate. A gate left by a
  * process that stopped is older than `staleMs` and is removed.
  */
 async function withGate(
   path: string,
   staleMs: number,
+  deadline: number | undefined,
   fn: () => Promise<void>,
-  wait = true,
 ): Promise<void> {
   const gate = `${path}.break`;
   for (;;) {
@@ -143,15 +151,43 @@ async function withGate(
       break;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      if (await isOlderThan(gate, staleMs)) await rm(gate, { force: true });
-      else if (!wait) return;
-      else await new Promise((resolve) => setTimeout(resolve, 5));
+      if (await removeStaleGate(gate, staleMs)) continue;
+      if (deadline === undefined) return;
+      if (Date.now() >= deadline) {
+        throw new ChangeLockError(`${LOCK_FILE}.break is busy; try again in a moment`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
     }
   }
   try {
     await fn();
   } finally {
     await rm(gate, { force: true });
+  }
+}
+
+/**
+ * Removes the gate if it is older than `staleMs`. The gate may be removed and created again by
+ * someone else between the look and the removal, so it is first renamed to a name of its own and
+ * judged again there: a live gate that was renamed is put back. Returns whether a stale gate was
+ * removed.
+ */
+async function removeStaleGate(gate: string, staleMs: number): Promise<boolean> {
+  if (!(await isOlderThan(gate, staleMs))) return false;
+  const aside = `${gate}.${randomUUID()}.stale`;
+  try {
+    await rename(gate, aside);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return true;
+    throw e;
+  }
+  try {
+    if (await isOlderThan(aside, staleMs)) return true;
+    // It was a live gate. Put it back; if a newer gate has taken its place, give it up.
+    await link(aside, gate).catch(() => {});
+    return false;
+  } finally {
+    await rm(aside, { force: true });
   }
 }
 
