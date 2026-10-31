@@ -99,6 +99,20 @@ export function findLine(scenario: Scenario | undefined, id: string): LineItem |
   return undefined;
 }
 
+/**
+ * What the retake screen says while it has no line to show. A line that exists but whose
+ * controller is not ready yet (the first render) is "Loading…", not "There is no line".
+ */
+export function retakePlaceholder(
+  scenario: Scenario | undefined,
+  id: string,
+  hasController: boolean,
+): string {
+  if (!scenario) return "Loading…";
+  if (findLine(scenario, id) && !hasController) return "Loading…";
+  return `There is no line ${id}.`;
+}
+
 /** The line before and the line after, in scenario order, with the scenes joined. */
 export function neighbours(
   scenario: Scenario | undefined,
@@ -245,9 +259,12 @@ export class RetakeController {
    */
   dispose(): void {
     if (this.disposed) return;
+    const asking = this.state.asking;
     this.disposed = true;
     this.listeners.clear();
     this.deps.closeConfirm?.();
+    // The agent keeps running on the server, so the next line would get "busy". Stop it.
+    if (asking) void this.deps.client.cancelAgentRun().catch(() => undefined);
   }
 
   getState = (): RetakeState => this.state;
@@ -293,11 +310,16 @@ export class RetakeController {
   /** Sends the instruction to the agent. The answer is a proposal; nothing is written. */
   async ask(instruction: string): Promise<void> {
     const text = instruction.trim();
-    if (text === "" || this.state.asking) return;
+    if (this.disposed || text === "" || this.state.asking) return;
     this.cancelRequested = false;
     this.set({ asking: true, message: undefined });
     try {
       const response = await this.deps.client.createProposal(this.deps.itemId, text);
+      if (this.disposed) {
+        // Nobody will see this proposal, so say so in the change log.
+        await this.deps.client.discardProposal(response.proposal.id).catch(() => undefined);
+        return;
+      }
       this.adopted = false;
       this.set({ asking: false, proposal: response.proposal });
     } catch (error) {
@@ -346,7 +368,7 @@ export class RetakeController {
   /** Makes a trial take of the proposal. */
   async tryProposal(): Promise<void> {
     const proposal = this.state.proposal;
-    if (!proposal) return;
+    if (this.disposed || !proposal) return;
     await this.runTrial(
       {
         base: proposal.base,
@@ -362,7 +384,7 @@ export class RetakeController {
   /** Makes a trial take of the fields the user edited by hand. */
   async tryEdit(fields: EditFields): Promise<void> {
     let base = this.deps.getBase();
-    if (!base) return;
+    if (this.disposed || !base) return;
     // A proposal copied into the fields keeps its ID and base, so that its reason and its
     // tried and kept outcomes stay linked. It is dropped when the line changed meanwhile.
     let proposalId: string | undefined;
@@ -372,8 +394,10 @@ export class RetakeController {
         base = proposal.base;
         proposalId = proposal.id;
       } else {
+        // The proposal was made for an older line: drop it, and say so in the change log.
         this.adopted = false;
         this.set({ proposal: undefined });
+        void this.deps.client.discardProposal(proposal.id).catch(() => undefined);
       }
     }
     const settings = parseSettings(fields.settings);
@@ -405,7 +429,7 @@ export class RetakeController {
     },
     base: TrialBase,
   ): Promise<void> {
-    if (this.state.working) return;
+    if (this.disposed || this.state.working) return;
     this.set({ working: "trial", message: undefined });
     try {
       const planned = await this.deps.client.trial(this.deps.itemId, request);
@@ -466,14 +490,14 @@ export class RetakeController {
   /** Keeps the trial: one restore PATCH with the trial's key and the line it was made from. */
   async keep(): Promise<void> {
     const trial = this.state.trial;
-    if (!trial || this.state.working) return;
+    if (this.disposed || !trial || this.state.working) return;
     await this.restore(trial.key, trial.base, "keep", TEXT.kept);
   }
 
   /** Uses an earlier take: one restore PATCH, with the line as the page last saw it. */
   async takeBack(take: TakeInfo): Promise<void> {
     const base = this.deps.getBase();
-    if (!base || !take.canUse || this.state.working) return;
+    if (this.disposed || !base || !take.canUse || this.state.working) return;
     await this.restore(take.key, base, "use", TEXT.usedTake);
   }
 
@@ -483,6 +507,7 @@ export class RetakeController {
     working: "keep" | "use",
     done: string,
   ): Promise<void> {
+    if (this.disposed) return;
     this.set({ working, message: undefined });
     try {
       const project = await this.deps.client.patchItem(this.deps.itemId, {

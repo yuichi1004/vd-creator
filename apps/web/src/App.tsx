@@ -24,7 +24,7 @@ import { type GenerationStart, nothingSummary, runSummary, startGeneration } fro
 import { placeIssues } from "./issues.js";
 import { LiveUpdates } from "./live.js";
 import { imageAt, itemAt, startOf } from "./playback.js";
-import { findLine, lineBase, neighbours, RetakeController } from "./retake.js";
+import { findLine, lineBase, neighbours, RetakeController, retakePlaceholder } from "./retake.js";
 import { buildHash, buildHref, lineRoute, REVIEW_ROUTE, SETTINGS_ROUTE } from "./routes.js";
 import { loadSettings, nextQuickSpeed, type Settings, saveSettings } from "./settings.js";
 import { useRoute } from "./useRoute.js";
@@ -545,7 +545,7 @@ export function App() {
       />
     ) : (
       <section className="retake" aria-label="Retake">
-        <p role="status">{scenario ? `There is no line ${retakeId}.` : "Loading…"}</p>
+        <p role="status">{retakePlaceholder(scenario, retakeId, retake !== undefined)}</p>
         <button type="button" onClick={closeRetake}>
           Back
         </button>

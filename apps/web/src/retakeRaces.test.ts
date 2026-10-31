@@ -2,7 +2,8 @@ import type { ProposalView, TakeInfo, TrialBase } from "@vd-creator/server";
 import { describe, expect, test } from "vitest";
 import { ApiClient } from "./client.js";
 import { stopWhenHidden } from "./contextAudio.js";
-import { RetakeController } from "./retake.js";
+import { RetakeController, retakePlaceholder } from "./retake.js";
+import type { Scenario } from "./types.js";
 
 const PREFIX = "http://host.example/";
 const BASE: TrialBase = { speaker: "a", text: "Hello.", take: 1, direction: "calm" };
@@ -204,6 +205,127 @@ describe("proposal provenance (P2-4)", () => {
     expect(trials()[0]?.body).not.toHaveProperty("proposalId");
     expect(trials()[0]?.body?.base).toEqual(base);
     expect(controller.getState().proposal).toBeUndefined();
+  });
+});
+
+describe("a disposed controller sends nothing (round 2, P2-a)", () => {
+  const PROPOSAL: ProposalView = { id: "p1", text: "Hello!", reason: "r", base: BASE };
+  const TAKE = {
+    key: "k1",
+    take: 1,
+    trial: false,
+    provider: "mock",
+    current: false,
+    text: "x",
+    canUse: true,
+  } as TakeInfo;
+
+  test("trial, ask, keep, take back, and loading takes send no request", async () => {
+    const h = harness((call) => {
+      if (call.path === "api/items/l1/proposals") return { body: { proposal: PROPOSAL } };
+      if (call.path === "api/items/l1/trials") return { body: call.body?.confirm ? TRIAL : PLAN };
+      return { body: { takes: [] } };
+    });
+    // A live controller with a proposal and a trial, so every call has something to act on.
+    await h.controller.ask("More");
+    await h.controller.tryProposal();
+    expect(h.controller.getState().trial).toBeDefined();
+    const sent = h.calls.length;
+    h.controller.dispose();
+    await h.controller.ask("Again");
+    await h.controller.tryProposal();
+    await h.controller.tryEdit(EDIT);
+    await h.controller.keep();
+    await h.controller.takeBack(TAKE);
+    await h.controller.loadTakes();
+    expect(h.calls).toHaveLength(sent);
+    expect(h.calls.filter((c) => c.method === "PATCH")).toHaveLength(0);
+  });
+
+  test("no takes read follows a trial that finishes after dispose", async () => {
+    const run = gate<Answer>();
+    const h = harness((call) => {
+      if (call.path !== "api/items/l1/trials") return undefined;
+      return call.body?.confirm ? run.promise : { body: PLAN };
+    });
+    const trying = h.controller.tryEdit(EDIT);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    h.controller.dispose();
+    run.open({ body: TRIAL });
+    await trying;
+    expect(h.calls.some((c) => c.path === "api/items/l1/takes")).toBe(false);
+  });
+});
+
+describe("leaving while the agent works (round 2, P2-b)", () => {
+  const PROPOSAL: ProposalView = { id: "p9", text: "Hello!", reason: "r", base: BASE };
+
+  test("dispose while asking cancels the agent run", async () => {
+    const answer = gate<Answer>();
+    const h = harness((call) =>
+      call.path === "api/items/l1/proposals" ? answer.promise : undefined,
+    );
+    const asking = h.controller.ask("Softer");
+    h.controller.dispose();
+    expect(h.calls.map((c) => c.path)).toContain("api/agent-run/cancel");
+    answer.open({ status: 500, body: { error: "server-error", message: "cancelled" } });
+    await asking;
+  });
+
+  test("dispose while idle does not cancel anything", () => {
+    const h = harness(() => undefined);
+    h.controller.dispose();
+    expect(h.calls).toHaveLength(0);
+  });
+
+  test("a late proposal for a disposed controller is discarded and not shown", async () => {
+    const answer = gate<Answer>();
+    const h = harness((call) =>
+      call.path === "api/items/l1/proposals" ? answer.promise : undefined,
+    );
+    const asking = h.controller.ask("Softer");
+    h.controller.dispose();
+    answer.open({ body: { proposal: PROPOSAL } });
+    await asking;
+    expect(h.calls.map((c) => c.path)).toContain("api/proposals/p9/discard");
+    expect(h.controller.getState().proposal).toBeUndefined();
+  });
+});
+
+describe("a proposal for an older line (round 2, P3-c)", () => {
+  test("is discarded on the server when a try drops it", async () => {
+    let base: TrialBase = BASE;
+    const h = harness(
+      (call) => {
+        if (call.path === "api/items/l1/proposals") {
+          return { body: { proposal: { id: "p2", text: "Hi", reason: "r", base: BASE } } };
+        }
+        if (call.path === "api/items/l1/trials") return { body: call.body?.confirm ? TRIAL : PLAN };
+        return { body: { takes: [] } };
+      },
+      { base: () => base },
+    );
+    await h.controller.ask("x");
+    h.controller.editProposal();
+    base = { ...BASE, text: "Changed.", take: 2 };
+    await h.controller.tryEdit({ text: "Other", direction: "calm", settings: "" });
+    expect(h.calls.map((c) => c.path)).toContain("api/proposals/p2/discard");
+  });
+});
+
+describe("the placeholder (round 2, P3-b)", () => {
+  const scenario = {
+    scenes: [{ id: "s", items: [{ id: "l1", speaker: "a", line: "Hi", take: 1 }] }],
+  } as unknown as Scenario;
+
+  test("a line that exists but has no controller yet is loading, not missing", () => {
+    expect(retakePlaceholder(scenario, "l1", false)).toBe("Loading…");
+    expect(retakePlaceholder(undefined, "l1", false)).toBe("Loading…");
+  });
+
+  test("a line that does not exist is missing", () => {
+    expect(retakePlaceholder(scenario, "nope", true)).toBe("There is no line nope.");
+    expect(retakePlaceholder(scenario, "nope", false)).toBe("There is no line nope.");
   });
 });
 
