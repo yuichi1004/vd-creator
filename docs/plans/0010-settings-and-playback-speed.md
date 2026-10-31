@@ -1,6 +1,6 @@
 # 0010: Settings screen and playback speed
 
-- Status: Accepted
+- Status: In progress
 - Date: 2026-10-31
 - PRD: [P0001](../prd/P0001-product-baseline.md), R12
 - Depends on: [0005](0005-review-ui.md), [0015](0015-change-log-and-draft-audio.md)

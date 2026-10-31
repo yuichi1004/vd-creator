@@ -66,7 +66,7 @@ A plan for new user-facing work is written only after its PRD is Approved; see [
 | [0007](0007-sound-library.md) | Shared sound library and licenses | Done |
 | [0008](0008-user-config.md) | User config and private docs | Done |
 | [0009](0009-follow-ups-0003-0008.md) | Follow-ups from plans 0003 to 0008 | In progress |
-| [0010](0010-settings-and-playback-speed.md) | Settings screen and playback speed | Accepted |
+| [0010](0010-settings-and-playback-speed.md) | Settings screen and playback speed | In progress |
 | [0011](0011-project-picker.md) | Several projects in one server | Draft |
 | [0012](0012-library-screen.md) | Library screen | Draft |
 | [0013](0013-voice-retake-with-agent.md) | Voice retakes with an agent | Accepted |
