@@ -87,7 +87,7 @@ Each proposal and each trial carries the line's fields as they were when it was 
 
 ### Retake screen
 
-The route is `#/line/<id>`. It opens from a "Retake" button on each line, which replaces the plain regenerate button of 0005 on lines. On a phone it is full screen; on PC it is a side panel next to the scene list.
+The route is `#/line/<id>`. It opens from a "Retake" button on each line, which replaces the plain regenerate button of 0005 on lines. On a phone the button shows on every line card without a tap first, as SFX and BGM cards show Regenerate today, so that the user can see what a card offers (from the human's phone check in plan 0009). On a phone it is full screen; on PC it is a side panel next to the scene list.
 
 It shows:
 
@@ -177,10 +177,10 @@ Run in order, after plans 0015 and 0010, and not at the same time as another pla
 - [ ] Retake screen
   - Requirements: R18, R19, R17
   - Target: `apps/web/src/`
-  - Change: the route, the screen with context, the agent box, the proposal diff, the text and direction fields, trial takes with "Keep" and "Not this one", the stale message, and the takes list with "Use this take".
+  - Change: the route, the Retake button on every line card, shown on a phone without a tap first, the screen with context, the agent box, the proposal diff, the text and direction fields, trial takes with "Keep" and "Not this one", the stale message, and the takes list with "Use this take".
   - Constraints: no new dependencies. The phone rules of 0005 apply. Paid generation goes through the existing confirm step. Depends on the third task.
   - Ownership: `apps/web/src/`.
-  - Acceptance: `npm run build -w apps/web && npm test -w apps/web` pass, with tests that "Try it" sends a trial request and no PATCH, that "Keep" sends one `restore` PATCH with the trial's key and base, that "Discard" and "Not this one" send no PATCH, that a 409 `stale` reloads the line and shows the message, that "Use this take" is shown only where the server allows it, and that the agent box is hidden without an agent. Before the plan is closed, the coordinator runs a retake with the mock provider and a fake agent in a browser at 1280 px and 375 px widths, and the human tries one real instruction with their agent.
+  - Acceptance: `npm run build -w apps/web && npm test -w apps/web` pass, with tests that "Try it" sends a trial request and no PATCH, that "Keep" sends one `restore` PATCH with the trial's key and base, that "Discard" and "Not this one" send no PATCH, that a 409 `stale` reloads the line and shows the message, that "Use this take" is shown only where the server allows it, that a line card on a phone shows the Retake button without a tap, and that the agent box is hidden without an agent. Before the plan is closed, the coordinator runs a retake with the mock provider and a fake agent in a browser at 1280 px and 375 px widths, and the human tries one real instruction with their agent.
 
 ## Open questions
 
