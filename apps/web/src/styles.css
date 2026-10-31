@@ -625,6 +625,121 @@ select.speaker {
   gap: 4px;
 }
 
+/* Settings (plan 0010) */
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.settings-button {
+  font-size: 1.3rem;
+}
+
+/* On a phone the header has no player controls, so the button goes to the right edge. */
+.app-header > .settings-button {
+  flex: none;
+}
+
+.app.phone .app-header > .settings-button {
+  margin-left: auto;
+}
+
+.settings-page {
+  min-height: 100vh;
+}
+
+.settings-screen {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 0 16px 32px;
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+}
+
+.settings-header h1 {
+  margin: 0;
+  font-size: 1.2rem;
+}
+
+.settings-section {
+  margin-top: 16px;
+  padding: 8px 16px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.settings-section h2 {
+  font-size: 1.05rem;
+}
+
+.setting + .setting {
+  margin-top: 16px;
+}
+
+.setting .speed-value {
+  margin-left: 8px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.speed-slider {
+  display: block;
+  width: 100%;
+  min-height: var(--touch);
+  margin: 4px 0;
+}
+
+.speed-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.server-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 12px;
+  margin: 0;
+}
+
+.server-facts dt {
+  color: var(--muted);
+}
+
+.server-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 767px) {
+  .settings-page {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    overflow-y: auto;
+    background: var(--bg);
+  }
+
+  .settings-screen {
+    padding-left: calc(12px + env(safe-area-inset-left));
+    padding-right: calc(12px + env(safe-area-inset-right));
+    padding-bottom: calc(24px + env(safe-area-inset-bottom));
+  }
+}
+
 /* Phone */
 
 .image-strip {

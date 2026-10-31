@@ -15,6 +15,7 @@ import type {
   ProjectResponse,
   ScenarioErrorResponse,
   ScenePatchRequest,
+  ServerInfoResponse,
   VerifyLibraryEntryRequest,
   VerifyLibraryEntryResponse,
 } from "@vd-creator/server";
@@ -109,6 +110,10 @@ export class ApiClient {
 
   async getProject(): Promise<ProjectResponse> {
     return this.request<ProjectResponse>("GET", "api/project");
+  }
+
+  async getServer(): Promise<ServerInfoResponse> {
+    return this.request<ServerInfoResponse>("GET", "api/server");
   }
 
   async patchItem(id: string, patch: ItemPatchRequest): Promise<PatchResponse> {

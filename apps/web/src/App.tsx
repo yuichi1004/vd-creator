@@ -18,10 +18,14 @@ import { LibraryPanel, type LibraryTarget } from "./components/LibraryPanel.js";
 import { LineEditor } from "./components/LineEditor.js";
 import { PlayerControls } from "./components/PlayerControls.js";
 import { SceneList } from "./components/SceneList.js";
+import { SettingsScreen } from "./components/SettingsScreen.js";
 import { type GenerationStart, nothingSummary, runSummary, startGeneration } from "./generation.js";
 import { placeIssues } from "./issues.js";
 import { LiveUpdates } from "./live.js";
 import { imageAt, itemAt, startOf } from "./playback.js";
+import { buildHash, buildHref, REVIEW_ROUTE, SETTINGS_ROUTE } from "./routes.js";
+import { loadSettings, type Settings, saveSettings } from "./settings.js";
+import { useRoute } from "./useRoute.js";
 
 /** Events that arrive within this time of each other reload the project once. */
 const COALESCE_MS = 150;
@@ -66,11 +70,40 @@ export function App() {
   const [changesOpen, setChangesOpen] = useState(false);
   const [reviewing, setReviewing] = useState(false);
 
+  // Screens. The review screen stays mounted under the settings screen, so the player, its
+  // position, and the scroll position survive a visit to settings.
+  const route = useRoute();
+  const onSettings = route.name === "settings";
+  const [settings, setSettings] = useState(() => loadSettings());
+  const changeSettings = useCallback((next: Settings) => {
+    setSettings(next);
+    saveSettings(next);
+  }, []);
+  // True when this page pushed the settings entry, so that Back can pop it.
+  const pushedSettings = useRef(false);
+  const openSettings = useCallback(() => {
+    pushedSettings.current = true;
+    window.location.hash = buildHash(SETTINGS_ROUTE);
+  }, []);
+  const closeSettings = useCallback(() => {
+    if (pushedSettings.current) {
+      pushedSettings.current = false;
+      window.history.back();
+    } else {
+      // Opened by a link: leave without keeping the settings entry.
+      window.location.replace(buildHref(window.location.href, REVIEW_ROUTE));
+    }
+  }, []);
+  useEffect(() => {
+    if (!onSettings) pushedSettings.current = false;
+  }, [onSettings]);
+
   // Player state.
   const unlock = useMemo(() => new AudioUnlock(createAudioContext()), []);
   const [unlockState, setUnlockState] = useState<UnlockState>(unlock.state);
   const [, setTick] = useState(0);
   const rerender = useCallback(() => setTick((n) => n + 1), []);
+  const loadServer = useCallback(() => client.getServer(), [client]);
   const player = useMemo(
     () =>
       new Player({
@@ -397,121 +430,137 @@ export function App() {
   ) : undefined;
 
   return (
-    <div className={`app ${isPhone ? "phone" : "pc"}`}>
-      <header className="app-header">
-        <h1>{scenario?.title ?? "vd-creator"}</h1>
-        <span className={`provider ${provider.paid ? "paid" : "free"}`}>
-          {provider.id}
-          {provider.paid ? " (paid)" : ""}
-        </span>
-        {draftCount > 0 && (
-          <span className="status draft" title="Audio made by the free provider">
-            {draftCount} draft
+    <>
+      {onSettings && (
+        <div className={`app settings-page ${isPhone ? "phone" : "pc"}`}>
+          <SettingsScreen
+            settings={settings}
+            onChange={changeSettings}
+            loadServer={loadServer}
+            onBack={closeSettings}
+          />
+        </div>
+      )}
+      <div className={`app ${isPhone ? "phone" : "pc"}`} hidden={onSettings}>
+        <header className="app-header">
+          <h1>{scenario?.title ?? "vd-creator"}</h1>
+          <span className={`provider ${provider.paid ? "paid" : "free"}`}>
+            {provider.id}
+            {provider.paid ? " (paid)" : ""}
           </span>
+          {draftCount > 0 && (
+            <span className="status draft" title="Audio made by the free provider">
+              {draftCount} draft
+            </span>
+          )}
+          {marks.size > 0 && (
+            <button
+              type="button"
+              className="changed-mark"
+              aria-expanded={changesOpen}
+              aria-controls={changesOpen ? CHANGES_PANEL_ID : undefined}
+              onClick={() => setChangesOpen(!changesOpen)}
+            >
+              {marks.size} changed
+            </button>
+          )}
+          {!isPhone && controls}
+          <button type="button" className="icon settings-button" onClick={openSettings}>
+            <span aria-hidden="true">⚙</span>
+            <span className="visually-hidden">Settings</span>
+          </button>
+        </header>
+
+        {changesOpen && marks.size > 0 && (
+          <ChangesPanel
+            groups={groupMarks(marks, scenario)}
+            busy={reviewing}
+            onMarkReviewed={() => void markReviewed()}
+          />
         )}
-        {marks.size > 0 && (
-          <button
-            type="button"
-            className="changed-mark"
-            aria-expanded={changesOpen}
-            aria-controls={changesOpen ? CHANGES_PANEL_ID : undefined}
-            onClick={() => setChangesOpen(!changesOpen)}
+
+        {notice && (
+          <div
+            className={`notice ${notice.kind}`}
+            role={notice.kind === "error" ? "alert" : "status"}
           >
-            {marks.size} changed
-          </button>
+            <span>{notice.text}</span>
+            <button type="button" className="link" onClick={() => setNotice(undefined)}>
+              Dismiss
+            </button>
+          </div>
         )}
-        {!isPhone && controls}
-      </header>
+        {loadError && (
+          <div className="notice error" role="alert">
+            {loadError}
+          </div>
+        )}
 
-      {changesOpen && marks.size > 0 && (
-        <ChangesPanel
-          groups={groupMarks(marks, scenario)}
-          busy={reviewing}
-          onMarkReviewed={() => void markReviewed()}
-        />
-      )}
+        {isPhone && timeline && <div className="image-strip">{imageView}</div>}
 
-      {notice && (
-        <div
-          className={`notice ${notice.kind}`}
-          role={notice.kind === "error" ? "alert" : "status"}
-        >
-          <span>{notice.text}</span>
-          <button type="button" className="link" onClick={() => setNotice(undefined)}>
-            Dismiss
-          </button>
-        </div>
-      )}
-      {loadError && (
-        <div className="notice error" role="alert">
-          {loadError}
-        </div>
-      )}
-
-      {isPhone && timeline && <div className="image-strip">{imageView}</div>}
-
-      <div className="layout">
-        <main className="main-column">
-          <IssueList issues={placed.general} />
-          {timeline && (
-            <ImageLane
-              timeline={timeline}
-              client={client}
-              current={currentImage}
-              onSeek={(sec) => player.seek(sec)}
-            />
+        <div className="layout">
+          <main className="main-column">
+            <IssueList issues={placed.general} />
+            {timeline && (
+              <ImageLane
+                timeline={timeline}
+                client={client}
+                current={currentImage}
+                onSeek={(sec) => player.seek(sec)}
+              />
+            )}
+            {scenario && (
+              <SceneList
+                scenario={scenario}
+                timeline={timeline}
+                issues={placed.byItem}
+                generating={generating}
+                currentItemId={currentItem?.id}
+                isPhone={isPhone}
+                hasLibrary={project.library}
+                libraryTarget={libraryTarget}
+                marks={marks}
+                onPatchItem={patchItem}
+                onPatchScene={patchScene}
+                onRegenerate={(id, take) => void regenerate(id, take)}
+                onGenerate={(id) => void generate(id)}
+                onPlayFrom={playFrom}
+                onEditLine={setEditing}
+                onOpenLibrary={openLibrary}
+              />
+            )}
+          </main>
+          {!isPhone && (
+            <aside className="side-panel">
+              {imageView}
+              {library}
+            </aside>
           )}
-          {scenario && (
-            <SceneList
-              scenario={scenario}
-              timeline={timeline}
-              issues={placed.byItem}
-              generating={generating}
-              currentItemId={currentItem?.id}
-              isPhone={isPhone}
-              hasLibrary={project.library}
-              libraryTarget={libraryTarget}
-              marks={marks}
-              onPatchItem={patchItem}
-              onPatchScene={patchScene}
-              onRegenerate={(id, take) => void regenerate(id, take)}
-              onGenerate={(id) => void generate(id)}
-              onPlayFrom={playFrom}
-              onEditLine={setEditing}
-              onOpenLibrary={openLibrary}
-            />
-          )}
-        </main>
-        {!isPhone && (
-          <aside className="side-panel">
-            {imageView}
+        </div>
+
+        {isPhone && <footer className="bottom-bar">{controls}</footer>}
+
+        {isPhone && librarySheetOpen && library && (
+          <div className="sheet" role="dialog" aria-modal="true" aria-label="Library">
             {library}
-          </aside>
+          </div>
         )}
+
+        {editingLine && "line" in editingLine && scenario && (
+          <LineEditor
+            item={editingLine}
+            speakers={scenario.speakers}
+            generating={generating.has(editingLine.id)}
+            onSave={async (patch) => {
+              if (await patchItem(editingLine.id, patch)) setEditing(undefined);
+            }}
+            onRegenerate={() => void regenerate(editingLine.id, editingLine.take)}
+            onCancel={() => setEditing(undefined)}
+          />
+        )}
+
+        {confirm && <ConfirmDialog request={confirm} />}
       </div>
-
-      {isPhone && <footer className="bottom-bar">{controls}</footer>}
-
-      {isPhone && librarySheetOpen && library && (
-        <div className="sheet" role="dialog" aria-modal="true" aria-label="Library">
-          {library}
-        </div>
-      )}
-
-      {editingLine && "line" in editingLine && scenario && (
-        <LineEditor
-          item={editingLine}
-          speakers={scenario.speakers}
-          generating={generating.has(editingLine.id)}
-          onSave={async (patch) => {
-            if (await patchItem(editingLine.id, patch)) setEditing(undefined);
-          }}
-          onRegenerate={() => void regenerate(editingLine.id, editingLine.take)}
-          onCancel={() => setEditing(undefined)}
-        />
-      )}
-
-      {confirm && <ConfirmDialog request={confirm} />}
-    </div>
+    </>
   );
 }

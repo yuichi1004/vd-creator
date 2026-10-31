@@ -30,6 +30,7 @@ describe("URLs stay relative to the page under a path prefix", () => {
     // The first visit with a token: the query must not leak into API URLs.
     const client = new ApiClient(`${PREFIX}?token=secret`, fetchImpl);
     await client.getProject();
+    await client.getServer();
     await client.patchItem("l1", { text: "Hi" });
     await client.patchScene("s1", { volume: 0.5 });
     await client.generate({ ids: ["l1"], dryRun: true });
@@ -38,6 +39,7 @@ describe("URLs stay relative to the page under a path prefix", () => {
 
     expect(calls.map((c) => c.url)).toEqual([
       `${PREFIX}api/project`,
+      `${PREFIX}api/server`,
       `${PREFIX}api/items/l1`,
       `${PREFIX}api/scenes/s1`,
       `${PREFIX}api/generate`,
