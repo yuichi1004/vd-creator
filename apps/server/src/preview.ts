@@ -27,6 +27,10 @@ export const CONVERT_TIMEOUT_MS = 30_000;
 export const MAX_PROCESSES = 2;
 /** Sources larger than this are refused, because they are read into memory. */
 const MAX_SOURCE_BYTES = 256 * 1024 * 1024;
+/** Less audio than this in a converted copy is a failed conversion. */
+const MIN_DATA_BYTES = 100;
+/** A copy shorter than this share of the length the source predicts is a failed conversion. */
+const MIN_LENGTH_SHARE = 0.5;
 
 /**
  * Runs ffmpeg with `args` (never through a shell) and `input` on its stdin. Resolves when it
@@ -48,6 +52,8 @@ export type PreviewOptions = {
   available?: boolean;
   maxCacheBytes?: number;
   timeoutMs?: number;
+  /** Awaited between the path check and the open of a source file. Tests swap files there. */
+  beforeOpen?: () => Promise<void>;
 };
 
 /** The reasons a preview request is refused; the app turns them into fixed responses. */
@@ -151,15 +157,51 @@ export async function plainPath(root: string, rel: string): Promise<string | und
   }
 }
 
-/** The bytes of `rel` inside `root`, or undefined if it is not a plain file there. */
-async function readSource(root: string, rel: string): Promise<Buffer | undefined> {
+type Handle = Awaited<ReturnType<typeof open>>;
+
+/** A copy opened for serving: it stays readable even if the cache removes its file. */
+export type Copy = { handle: Handle; size: number };
+
+/** The audio bytes and the length in seconds of a PCM WAV, from its chunks. */
+export function wavInfo(bytes: Uint8Array): { dataBytes: number; seconds: number } | undefined {
+  const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (buf.length < 12 || buf.toString("ascii", 0, 4) !== "RIFF") return undefined;
+  if (buf.toString("ascii", 8, 12) !== "WAVE") return undefined;
+  let byteRate = 0;
+  let at = 12;
+  while (at + 8 <= buf.length) {
+    const id = buf.toString("ascii", at, at + 4);
+    const size = buf.readUInt32LE(at + 4);
+    if (id === "fmt " && at + 20 <= buf.length) byteRate = buf.readUInt32LE(at + 16);
+    if (id === "data") {
+      return byteRate > 0 ? { dataBytes: size, seconds: size / byteRate } : undefined;
+    }
+    at += 8 + size + (size % 2);
+  }
+  return undefined;
+}
+
+/**
+ * The bytes of `rel` inside `root`, or undefined if it is not a plain file there. O_NOFOLLOW
+ * covers only the last part of the path, so after the open the path is checked again and must
+ * still lead to the file that was opened: a folder swapped for a link in between is refused.
+ */
+async function readSource(
+  root: string,
+  rel: string,
+  beforeOpen?: () => Promise<void>,
+): Promise<Buffer | undefined> {
   const expected = await plainPath(root, rel);
   if (expected === undefined) return undefined;
   try {
+    await beforeOpen?.();
     const handle = await open(expected, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
     try {
       const info = await handle.stat();
       if (!info.isFile() || info.size > MAX_SOURCE_BYTES) return undefined;
+      if ((await plainPath(root, rel)) !== expected) return undefined;
+      const now = await stat(expected);
+      if (now.dev !== info.dev || now.ino !== info.ino) return undefined;
       return await handle.readFile();
     } finally {
       await handle.close();
@@ -169,18 +211,57 @@ async function readSource(root: string, rel: string): Promise<Buffer | undefined
   }
 }
 
+/** Opens a file of the cache for serving, or undefined if it is gone or not a plain file. */
+async function openCopy(path: string): Promise<Copy | undefined> {
+  let handle: Handle | undefined;
+  try {
+    handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const info = await handle.stat();
+    if (info.isFile()) return { handle, size: info.size };
+  } catch {
+    // Gone or unreadable.
+  }
+  await handle?.close().catch(() => {});
+  return undefined;
+}
+
+/** True if the converted file holds audio, and about as much as the source predicts. */
+async function plausibleOutput(
+  path: string,
+  sourceSeconds: number | undefined,
+  hundredths: number,
+): Promise<boolean> {
+  let handle: Handle | undefined;
+  try {
+    handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const head = Buffer.alloc(4096);
+    const { bytesRead } = await handle.read(head, 0, head.length, 0);
+    const info = wavInfo(head.subarray(0, bytesRead));
+    if (!info || info.dataBytes < MIN_DATA_BYTES) return false;
+    if (sourceSeconds === undefined) return true;
+    return info.seconds >= (MIN_LENGTH_SHARE * sourceSeconds * 100) / hundredths;
+  } catch {
+    return false;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+/** The length of a WAV source in seconds, or undefined if it is not known. */
+function wavSourceSeconds(source: Uint8Array): number | undefined {
+  const info = wavInfo(source);
+  if (!info || info.seconds <= 0) return undefined;
+  return (Math.min(info.dataBytes, source.length) / info.dataBytes) * info.seconds;
+}
+
 export type Preview = {
   /** Whether stretching that keeps the pitch works. */
   keepPitch(): boolean;
   /**
-   * The path of the cached WAV of `rel` (inside `assetsDir`) at `hundredths`, made if needed.
-   * Never throws: a failure is a `PreviewFailure`.
+   * The WAV of `rel` (inside `assetsDir`) at `hundredths`, opened for serving, made if needed.
+   * The caller must serve or close the handle. Never throws: a failure is a `PreviewFailure`.
    */
-  get(
-    assetsDir: string,
-    rel: string,
-    hundredths: number,
-  ): Promise<{ dir: string; file: string } | PreviewFailure>;
+  get(assetsDir: string, rel: string, hundredths: number): Promise<Copy | PreviewFailure>;
 };
 
 export function createPreview(options: PreviewOptions = {}): Preview {
@@ -188,9 +269,17 @@ export function createPreview(options: PreviewOptions = {}): Preview {
   const maxBytes = options.maxCacheBytes ?? MAX_CACHE_BYTES;
   const timeoutMs = options.timeoutMs ?? CONVERT_TIMEOUT_MS;
   const gate = new Gate(MAX_PROCESSES);
-  const running = new Map<string, Promise<boolean>>();
+  const running = new Map<string, Promise<Copy | undefined>>();
   const available = () =>
     options.available ?? (options.runner !== undefined ? true : ffmpegOnPath());
+  // Moving a copy into the cache, opening it, and pruning run one at a time, so that two
+  // conversions cannot remove each other's copy before it is opened.
+  let lock: Promise<unknown> = Promise.resolve();
+  const locked = <T>(task: () => Promise<T>): Promise<T> => {
+    const run = lock.then(task);
+    lock = run.catch(() => {});
+    return run;
+  };
 
   async function convert(
     dir: string,
@@ -198,7 +287,7 @@ export function createPreview(options: PreviewOptions = {}): Preview {
     format: string,
     source: Uint8Array,
     hundredths: number,
-  ): Promise<boolean> {
+  ): Promise<Copy | undefined> {
     const temp = join(dir, `${name}.${randomUUID()}.tmp`);
     try {
       await mkdir(dir, { recursive: true, mode: 0o700 });
@@ -226,12 +315,22 @@ export function createPreview(options: PreviewOptions = {}): Preview {
       ];
       await gate.run(() => runner(args, source, { timeoutMs }));
       const info = await stat(temp);
-      if (!info.isFile() || info.size === 0) return false;
-      await rename(temp, join(dir, name));
-      await prune(dir, name, maxBytes);
-      return true;
+      if (!info.isFile()) return undefined;
+      // A file that decodes to nothing, such as an .m4a whose index is at its end, read from a
+      // pipe, makes a header-only WAV. That is a failure and is never kept.
+      const seconds = format === "wav" ? wavSourceSeconds(source) : undefined;
+      if (!(await plausibleOutput(temp, seconds, hundredths))) return undefined;
+      // Larger than the whole cache: served from the temporary file, which is removed below
+      // while the open handle keeps it readable, and never kept.
+      if (info.size > maxBytes) return await openCopy(temp);
+      return await locked(async () => {
+        await rename(temp, join(dir, name));
+        const copy = await openCopy(join(dir, name));
+        await prune(dir, maxBytes).catch(() => {});
+        return copy;
+      });
     } catch {
-      return false;
+      return undefined;
     } finally {
       await rm(temp, { force: true }).catch(() => {});
     }
@@ -243,40 +342,55 @@ export function createPreview(options: PreviewOptions = {}): Preview {
     async get(assetsDir, rel, hundredths) {
       const format = inputFormat(rel);
       if (format === undefined) return "not-audio";
-      const source = await readSource(assetsDir, rel);
+      const source = await readSource(assetsDir, rel, options.beforeOpen);
       if (source === undefined) return "not-found";
       if (!available()) return "failed";
       const dir = options.cacheDir ?? defaultCacheDir();
       const digest = createHash("sha256").update(source).digest("hex");
       const name = `${digest}-${hundredths}.wav`;
-      const done = { dir, file: name };
+      const path = join(dir, name);
+      const cached = async () => {
+        try {
+          const now = new Date();
+          await utimes(path, now, now);
+        } catch {
+          return undefined;
+        }
+        return openCopy(path);
+      };
+      const hit = await cached();
+      if (hit) return hit;
+      // Identical requests wait for one conversion, then open the copy it made.
+      const pending = running.get(path);
+      if (pending) {
+        // The initiator owns its handle; this request opens its own.
+        await pending.then(
+          () => {},
+          () => {},
+        );
+        const shared = await cached();
+        if (shared) return shared;
+      }
+      const job = convert(dir, name, format, source, hundredths);
+      running.set(path, job);
       try {
-        const now = new Date();
-        await utimes(join(dir, name), now, now);
-        return done;
-      } catch {
-        // Not cached yet.
+        return (await job) ?? "failed";
+      } finally {
+        if (running.get(path) === job) running.delete(path);
       }
-      const key = join(dir, name);
-      let job = running.get(key);
-      if (!job) {
-        job = convert(dir, name, format, source, hundredths).finally(() => running.delete(key));
-        running.set(key, job);
-      }
-      return (await job) ? done : "failed";
     },
   };
 }
 
-/** Removes the oldest copies until the folder holds at most `maxBytes`, never `keep`. */
-async function prune(dir: string, keep: string, maxBytes: number): Promise<void> {
-  const files: { path: string; name: string; size: number; time: number }[] = [];
+/** Removes the oldest copies until the folder holds at most `maxBytes`. */
+async function prune(dir: string, maxBytes: number): Promise<void> {
+  const files: { path: string; size: number; time: number }[] = [];
   for (const name of await readdir(dir)) {
     if (!name.endsWith(".wav")) continue;
     const path = join(dir, name);
     try {
       const info = await stat(path);
-      if (info.isFile()) files.push({ path, name, size: info.size, time: info.mtimeMs });
+      if (info.isFile()) files.push({ path, size: info.size, time: info.mtimeMs });
     } catch {
       // Removed meanwhile.
     }
@@ -285,7 +399,6 @@ async function prune(dir: string, keep: string, maxBytes: number): Promise<void>
   files.sort((a, b) => a.time - b.time);
   for (const f of files) {
     if (total <= maxBytes) break;
-    if (f.name === keep) continue;
     await rm(f.path, { force: true });
     total -= f.size;
   }

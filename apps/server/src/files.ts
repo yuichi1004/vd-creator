@@ -88,17 +88,27 @@ export async function serveFile(
       await handle.close();
       return undefined;
     }
-    const headers: Record<string, string> = {
-      "Content-Type": contentType(rel),
-      "Content-Length": String(info.size),
-      "Cache-Control": "no-cache",
-      "X-Content-Type-Options": "nosniff",
-    };
-    if (options.sandbox) headers["Content-Security-Policy"] = "default-src 'none'; sandbox";
-    const body = Readable.toWeb(handle.createReadStream()) as ReadableStream<Uint8Array>;
-    return new Response(body, { headers });
+    return handleResponse(handle, info.size, rel, options.sandbox === true);
   } catch {
     await handle.close().catch(() => {});
     return undefined;
   }
+}
+
+/** A response streaming an open file, which the stream closes when it ends or is cancelled. */
+export function handleResponse(
+  handle: Awaited<ReturnType<typeof open>>,
+  size: number,
+  name: string,
+  sandbox: boolean,
+): Response {
+  const headers: Record<string, string> = {
+    "Content-Type": contentType(name),
+    "Content-Length": String(size),
+    "Cache-Control": "no-cache",
+    "X-Content-Type-Options": "nosniff",
+  };
+  if (sandbox) headers["Content-Security-Policy"] = "default-src 'none'; sandbox";
+  const body = Readable.toWeb(handle.createReadStream()) as ReadableStream<Uint8Array>;
+  return new Response(body, { headers });
 }

@@ -71,7 +71,7 @@ import type {
   VerifyLibraryEntryResponse,
 } from "./api.js";
 import { changedSinceReview, entryView } from "./changes.js";
-import { relativeUrlPath, serveFile } from "./files.js";
+import { handleResponse, relativeUrlPath, serveFile } from "./files.js";
 import { hostCheck } from "./hosts.js";
 import {
   createPreview,
@@ -592,9 +592,7 @@ export function createApp(options: AppOptions): Hono {
     if (made === "not-audio") throw badRequest("The file is not audio");
     if (made === "not-found") throw notFound();
     if (made === "failed") throw new HttpError(500, "server-error", PREVIEW_FAILED);
-    const response = await serveFile(made.dir, made.file, { sandbox: true });
-    if (!response) throw new HttpError(500, "server-error", PREVIEW_FAILED);
-    return response;
+    return handleResponse(made.handle, made.size, "preview.wav", true);
   });
 
   // The built UI: every other path. Its own files are under ui/, apart from the project's

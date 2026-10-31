@@ -74,7 +74,7 @@ Web Audio has no time stretch that keeps pitch, and adding a library for it is h
 - Only files with an audio extension the project uses (`.mp3`, `.wav`, `.ogg`, `.flac`, `.m4a`) are accepted. The same path checks as `/assets/*` apply.
 - The server opens the file itself, refusing symbolic links (`O_NOFOLLOW`) after the path check, and pipes it to ffmpeg's stdin with the input format forced from the extension (`-f <format> -i pipe:0`). ffmpeg never opens a path from the request and never guesses a format such as a playlist from the content.
 - Copies are cached outside the project, in `vd-creator/preview/` under the user's cache folder (`$XDG_CACHE_HOME`, or `~/.cache` when it is not set), keyed by the SHA-256 of the source file and the tempo. A copy is written to a temporary name and renamed when complete, so no partial file is ever served. The cache is limited to 500 MB, and the oldest files are removed first.
-- At most two ffmpeg processes run at once. A conversion that fails, or takes more than 30 seconds, returns 500 with fixed text.
+- At most two ffmpeg processes run at once. A conversion that fails, or takes more than 30 seconds, returns 500 with fixed text. A copy with no audio, or far shorter than the source predicts, counts as a failed conversion and is never kept. A file that cannot be stretched, such as an `.m4a` whose index is at its end, which ffmpeg cannot read from a pipe, returns 500, and the page then plays that file with `playbackRate`.
 - If ffmpeg is not on `PATH`, `GET /api/server` reports `preview: { keepPitch: false }`, the setting is shown as unavailable with a short reason, and playback uses `playbackRate`.
 - Library previews in the library panel always play at x1.0.
 

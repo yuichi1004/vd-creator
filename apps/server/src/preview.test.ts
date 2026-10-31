@@ -88,6 +88,12 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
+/** The WAV that ffmpeg would make of the 2 s `line.wav` with these arguments. */
+function stretched(args: string[]): Buffer {
+  const filter = args.find((a) => a.startsWith("atempo=")) ?? "atempo=1";
+  return wav(2 / Number(filter.slice("atempo=".length)));
+}
+
 /** A runner that writes a few bytes to the output and records its calls. */
 function fakeRunner(fail = false) {
   const calls: string[][] = [];
@@ -99,7 +105,7 @@ function fakeRunner(fail = false) {
       await writeFile(args[args.length - 1] as string, "partial");
       throw new Error("ffmpeg failed");
     }
-    await writeFile(args[args.length - 1] as string, wav(1));
+    await writeFile(args[args.length - 1] as string, stretched(args));
   };
   return { calls, runner };
 }
@@ -256,7 +262,7 @@ describe("GET /preview", () => {
       active++;
       peak = Math.max(peak, active);
       await new Promise((r) => setTimeout(r, 30));
-      await writeFile(args[args.length - 1] as string, wav(1));
+      await writeFile(args[args.length - 1] as string, stretched(args));
       active--;
     };
     const get = makeApp({ runner });
@@ -276,8 +282,8 @@ describe("GET /preview", () => {
 
   test("removes the oldest copies when the cache is over its limit", async () => {
     const { runner } = fakeRunner();
-    const size = wav(1).length;
-    const get = makeApp({ runner, maxCacheBytes: size * 2 });
+    const limit = wav(2 / 1.5).length + wav(2 / 1.75).length;
+    const get = makeApp({ runner, maxCacheBytes: limit });
     for (const t of ["1.25", "1.5", "1.75"]) {
       expect((await get(`/preview/line.wav?tempo=${t}`)).status).toBe(200);
       await new Promise((r) => setTimeout(r, 15));
@@ -285,6 +291,75 @@ describe("GET /preview", () => {
     const left = await cached();
     expect(left).toHaveLength(2);
     expect(left.some((name) => name.endsWith("-125.wav"))).toBe(false);
+  });
+
+  test("serves a copy larger than the whole cache without keeping it", async () => {
+    const { runner } = fakeRunner();
+    const get = makeApp({ runner, maxCacheBytes: 1000 });
+    const response = await get("/preview/line.wav?tempo=1.25");
+    expect(response.status).toBe(200);
+    expect(wavSeconds(new Uint8Array(await response.arrayBuffer()))).toBeCloseTo(1.6, 1);
+    expect(await cached()).toEqual([]);
+  });
+
+  test("two concurrent conversions under a small limit both return 200", async () => {
+    const { runner } = fakeRunner();
+    const limit = wav(2 / 1.5).length;
+    const get = makeApp({ runner, maxCacheBytes: limit });
+    const responses = await Promise.all(
+      ["1.5", "1.75", "1.25", "2"].map((t) => get(`/preview/line.wav?tempo=${t}`)),
+    );
+    expect(responses.map((r) => r.status)).toEqual([200, 200, 200, 200]);
+    for (const response of responses) {
+      expect((await response.arrayBuffer()).byteLength).toBeGreaterThan(44);
+    }
+    const left = await cached();
+    expect(left.length).toBeLessThanOrEqual(1);
+  });
+
+  test("treats a header-only or far too short WAV as a failed conversion", async () => {
+    const results: Buffer[] = [wav(0), wav(0.1)];
+    for (const output of results) {
+      const runner: FfmpegRunner = async (args) => {
+        await writeFile(args[args.length - 1] as string, output);
+      };
+      const get = makeApp({ runner });
+      const response = await get("/preview/line.wav?tempo=1.5");
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({
+        error: "server-error",
+        message: "The preview could not be made",
+      });
+      expect(await cached()).toEqual([]);
+    }
+  });
+
+  test("treats a header-only WAV of an .m4a as a failed conversion", async () => {
+    await writeFile(join(project, ASSETS_DIR, "line.m4a"), Buffer.from("not really m4a"));
+    const runner: FfmpegRunner = async (args) => {
+      await writeFile(args[args.length - 1] as string, wav(0));
+    };
+    const get = makeApp({ runner });
+    expect((await get("/preview/line.m4a?tempo=1.5")).status).toBe(500);
+    expect(await cached()).toEqual([]);
+  });
+
+  test("refuses a folder swapped for a link between the check and the open", async () => {
+    const outside = join(dir, "outside");
+    await mkdir(outside);
+    await writeFile(join(outside, "line.wav"), wav(2));
+    const inside = join(project, ASSETS_DIR, "sub");
+    await mkdir(inside);
+    await writeFile(join(inside, "line.wav"), wav(2));
+    const { runner, calls } = fakeRunner();
+    const swap = async () => {
+      await rm(inside, { recursive: true });
+      await symlink(outside, inside);
+    };
+    const get = makeApp({ runner, beforeOpen: swap });
+    expect((await get("/preview/sub/line.wav?tempo=1.5")).status).toBe(404);
+    expect(calls).toHaveLength(0);
+    expect(await cached()).toEqual([]);
   });
 
   test("returns 500 for a tempo other than 1 when ffmpeg is missing", async () => {
